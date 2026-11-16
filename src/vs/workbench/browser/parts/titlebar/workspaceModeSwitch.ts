@@ -8,6 +8,7 @@ import { $, append, EventHelper, EventLike } from '../../../../base/browser/dom.
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IAction } from '../../../../base/common/actions.js';
+import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { localize } from '../../../../nls.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
@@ -15,6 +16,7 @@ import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '.
 import { Registry } from '../../../../platform/registry/common/platform.js';
 
 export const WORKSPACE_MODE_SWITCH_SETTING = 'workbench.titleBar.workspaceModeSwitch';
+export const WORKSPACE_MODE_SWITCH_KEYBINDING = KeyChord(KeyMod.CtrlCmd | KeyCode.KeyK, KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyA);
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'workbench',
@@ -45,10 +47,17 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 		container.setAttribute('role', 'switch');
 		container.setAttribute('aria-label', localize('workspaceModeSwitch.label', "IDE mode"));
 		container.setAttribute('aria-checked', String(this.mode === 'ide'));
-		const hover = this.keybindingService.appendKeybinding(this.mode === 'agents'
+		const label = this.mode === 'agents'
 			? localize('workspaceModeSwitch.toIDE', "Switch to IDE with This Session's Workspace")
-			: localize('workspaceModeSwitch.toAgents', "Return to Agents"), this.commandId);
-		this._register(this.hoverService.setupManagedHover(this.options.hoverDelegate ?? getDefaultHoverDelegate('element'), container, hover));
+			: localize('workspaceModeSwitch.toAgents', "Return to Agents");
+		const hover = this._register(this.hoverService.setupManagedHover(this.options.hoverDelegate ?? getDefaultHoverDelegate('element'), container, label));
+		const updateShortcut = () => {
+			const description = this.keybindingService.appendKeybinding(label, this.commandId);
+			hover.update(description);
+			container.setAttribute('aria-description', description);
+		};
+		this._register(this.keybindingService.onDidUpdateKeybindings(updateShortcut));
+		updateShortcut();
 		for (const [mode, label] of [['agents', localize('workspaceModeSwitch.agents', "Agents")], ['ide', localize('workspaceModeSwitch.ide', "IDE")]] as const) {
 			const segment = append(container, $('span.workspace-mode-segment', { 'aria-hidden': 'true' }, label));
 			segment.classList.toggle('active-mode', mode === this.mode);

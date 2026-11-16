@@ -7,10 +7,13 @@ import assert from 'assert';
 import { ActionBar } from '../../../../../base/browser/ui/actionbar/actionbar.js';
 import { mainWindow } from '../../../../../base/browser/window.js';
 import { Action } from '../../../../../base/common/actions.js';
+import { Emitter } from '../../../../../base/common/event.js';
 import { toDisposable } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { WorkspaceModeSwitch } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
 import { workbenchInstantiationService } from '../../workbenchTestServices.js';
+import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
+import { MockKeybindingService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 
 suite('Workspace Mode Switch', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -43,4 +46,26 @@ suite('Workspace Mode Switch', () => {
 			assert.deepStrictEqual({ disabled: control.getAttribute('aria-disabled'), runs }, { disabled: 'true', runs: 3 });
 		});
 	}
+
+	test('refreshes the accessible shortcut description after remapping or removing a binding', () => {
+		const changed = store.add(new Emitter<void>());
+		let shortcut: string | undefined = 'Ctrl+K Ctrl+Shift+A';
+		const instantiation = workbenchInstantiationService(undefined, store);
+		instantiation.stub(IKeybindingService, new class extends MockKeybindingService {
+			override get onDidUpdateKeybindings() { return changed.event; }
+			override appendKeybinding(label: string) { return shortcut ? `${label} (${shortcut})` : label; }
+		}());
+		const action = store.add(new Action('switchMode', 'Switch Mode'));
+		const element = mainWindow.document.body.appendChild(mainWindow.document.createElement('div'));
+		store.add(toDisposable(() => element.remove()));
+		const control = store.add(instantiation.createInstance(WorkspaceModeSwitch, action, undefined, 'agents', action.id));
+		control.render(element);
+		assert.ok(element.getAttribute('aria-description')?.includes('Ctrl+K Ctrl+Shift+A'));
+		shortcut = 'F9';
+		changed.fire();
+		assert.strictEqual(element.getAttribute('aria-description'), 'Switch to IDE with This Session\'s Workspace (F9)');
+		shortcut = undefined;
+		changed.fire();
+		assert.strictEqual(element.getAttribute('aria-description'), 'Switch to IDE with This Session\'s Workspace');
+	});
 });

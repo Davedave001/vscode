@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { OperatingSystem } from '../../../base/common/platform.js';
 import { constObservable } from '../../../base/common/observable.js';
 import { URI } from '../../../base/common/uri.js';
 import { mock, upcastPartial } from '../../../base/test/common/mock.js';
@@ -22,8 +23,14 @@ import { IProductService } from '../../../platform/product/common/productService
 import { NullTelemetryService } from '../../../platform/telemetry/common/telemetryUtils.js';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry.js';
 import { TestConfigurationService } from '../../../platform/configuration/test/common/testConfigurationService.js';
-import { ContextKeyService } from '../../../platform/contextkey/browser/contextKeyService.js';
-import { IsAuxiliaryWindowContext, LayoutModeContext } from '../../../workbench/common/contextkeys.js';
+import { Context, ContextKeyService } from '../../../platform/contextkey/browser/contextKeyService.js';
+import { IsAuxiliaryWindowContext, IsSessionsWindowContext, LayoutModeContext } from '../../../workbench/common/contextkeys.js';
+import { IsPhoneLayoutContext, SessionsWelcomeVisibleContext } from '../../../workbench/contrib/sessions/common/contextkeys.js';
+import { registerAction2 } from '../../../platform/actions/common/actions.js';
+import { KeybindingsRegistry } from '../../../platform/keybinding/common/keybindingsRegistry.js';
+import { KeybindingResolver, ResultKind } from '../../../platform/keybinding/common/keybindingResolver.js';
+import { ResolvedKeybindingItem } from '../../../platform/keybinding/common/resolvedKeybindingItem.js';
+import { USLayoutResolvedKeybinding } from '../../../platform/keybinding/common/usLayoutResolvedKeybinding.js';
 import { OpenInVSCodeAction } from '../../browser/actions/vscodeActions.js';
 import { AgentsWindowMenus } from '../../browser/agentsWindowMenus.js';
 import { IAgentHostSessionsProvider } from '../../../workbench/contrib/sessions/common/agentHostSessionsProvider.js';
@@ -154,6 +161,30 @@ suite('Web Open in Editor', () => {
 
 suite('Open in Editor in Agents windows', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	for (const os of [OperatingSystem.Windows, OperatingSystem.Macintosh, OperatingSystem.Linux]) {
+		test(`resolves the workspace mode chord only in a ready desktop Agents window (${os})`, () => {
+			store.add(registerAction2(OpenInVSCodeAction));
+			const rules = KeybindingsRegistry.getDefaultKeybindingsForOS(os).filter(rule => rule.command === OpenInVSCodeAction.ID);
+			const resolver = new KeybindingResolver(rules.map(rule => new ResolvedKeybindingItem(
+				rule.keybinding ? USLayoutResolvedKeybinding.resolveKeybinding(rule.keybinding, os)[0] : undefined, rule.command, rule.commandArgs, rule.when ?? undefined, true, null, false,
+			)), [], () => { });
+			const context = new Context(0, null);
+			context.setValue(IsSessionsWindowContext.key, true);
+			const first = os === OperatingSystem.Macintosh ? 'meta+K' : 'ctrl+K';
+			const second = os === OperatingSystem.Macintosh ? 'shift+meta+A' : 'ctrl+shift+A';
+			assert.strictEqual(resolver.resolve(context, [], first).kind, ResultKind.MoreChordsNeeded);
+			assert.deepStrictEqual(resolver.resolve(context, [first], second), {
+				kind: ResultKind.KbFound, commandId: OpenInVSCodeAction.ID, commandArgs: undefined, isBubble: false,
+			});
+			for (const key of [IsPhoneLayoutContext.key, SessionsWelcomeVisibleContext.key, IsAuxiliaryWindowContext.key]) {
+				context.setValue(key, true);
+				assert.strictEqual(resolver.resolve(context, [], first).kind, ResultKind.NoMatchingKb);
+				context.setValue(key, false);
+			}
+			context.setValue(IsSessionsWindowContext.key, false);
+			assert.strictEqual(resolver.resolve(context, [], first).kind, ResultKind.NoMatchingKb);
+		});
+	}
 
 	test('shows in the main window and in chat windows, as the main window always showed it, and not in editor windows', () => {
 		const menus = new OpenInVSCodeAction().desc.menu;

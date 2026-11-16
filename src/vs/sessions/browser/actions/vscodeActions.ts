@@ -3,8 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IsAuxiliaryWindowContext, LayoutModeContext } from '../../../workbench/common/contextkeys.js';
+import { IsAuxiliaryWindowContext, IsSessionsWindowContext, LayoutModeContext } from '../../../workbench/common/contextkeys.js';
 import { Codicon } from '../../../base/common/codicons.js';
+import { KeybindingWeight } from '../../../platform/keybinding/common/keybindingsRegistry.js';
 import { Schemas } from '../../../base/common/network.js';
 import { URI } from '../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../editor/browser/editorExtensions.js';
@@ -31,7 +32,7 @@ import { IActionViewItemService } from '../../../platform/actions/browser/action
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution } from '../../../workbench/common/contributions.js';
 import { getEditorWindowSessionResource, notifyEditorWindowSessionUnsupported, resolveRemoteAuthority, resolveRemoteFolderUri } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
-import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
+import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
@@ -43,6 +44,8 @@ export class OpenInVSCodeAction extends Action2 {
 		super({
 			id: OpenInVSCodeAction.ID,
 			title: localize2('openInVSCode', 'Open in Editor'),
+			f1: true,
+			keybinding: { primary: WORKSPACE_MODE_SWITCH_KEYBINDING, weight: KeybindingWeight.SessionsContrib, when: ContextKeyExpr.and(IsSessionsWindowContext, IsPhoneLayoutContext.negate()) },
 			icon: Codicon.vscodeInsiders,
 			precondition: ContextKeyExpr.and(ContextKeyExpr.or(IsAuxiliaryWindowContext.toNegated(), LayoutModeContext)!, SessionsWelcomeVisibleContext.toNegated()),
 			menu: [{

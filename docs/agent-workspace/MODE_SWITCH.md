@@ -6,6 +6,8 @@ In the Agents Window the control appears at the start of the title bar, before s
 
 The control exposes a single keyboard focus target and a switch role with IDE mode on/off state. Click, Enter, and Space activate the existing action. Disabled actions remain disabled and cannot execute. Theme colors, spacing, radii, and focus outlines use existing tokens. The Agents accessibility help documents the control.
 
+Press Ctrl+K followed by Ctrl+Shift+A to switch modes on Windows or Linux; on macOS use Cmd+K followed by Cmd+Shift+A. The shortcut invokes the existing session-workspace action from Agents and the existing current-workspace action from the native IDE. Existing Ctrl+Shift+A commands remain unchanged. The Agents command is also discoverable as Open in Editor in the command palette. Its default shortcut is inactive on phone layouts, while the welcome overlay is visible, and outside Agents windows. The tooltip and accessible description follow later shortcut remapping or removal. The browser preview IDE registers the same chord and a Switch to Agents command-palette entry for its embedder command.
+
 ## Browser preview
 
 Start the existing server with `--workspace-preview` to enable the development preview shell:
@@ -24,14 +26,12 @@ This is a local demo and does not establish access to an agent's desktop filesys
 
 ## Verification
 
-- Client build and native TypeScript source check passed.
-- Targeted lint, CSS lint, and import-layer checks passed.
-- 81 focused browser tests passed, including mode state, toolbar focus, mouse/Enter/Space activation, disabled-action behavior, existing web workspace routing, and accessibility help.
-- The refreshed browser preview was observed rendering the actual IDE workbench, including Explorer, editor tabs, layout controls, and the return switch. A full interactive return-and-buffer-preservation workflow has not yet been verified.
+- Client build, source type check with the native TypeScript compiler, targeted lint, CSS lint, and import-layer checks passed.
+- 85 focused browser tests passed for the mode switch, web workspace routing, and accessibility help. These include three-platform chord resolution, desktop/welcome/auxiliary-window restrictions, remapping/removal descriptions, mouse/Enter/Space activation, focus, and disabled-action behavior.
+- The browser preview was observed rendering the actual IDE workbench with the shared sample workspace. The Agents Files panel was also visually verified listing src, package.json, and README.md without the prior fake-credentials error.
+- In the isolated preview on port 8098, the keyboard chord changed the host URL to IDE mode and revealed the return switch. Computer Use then stopped because its URL safety check could not confidently determine the current browser URL. A complete UI edit/save/return/reload workflow remains unverified.
 - Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Browser evidence does not establish a packaged native build.
-- Shared-workspace increment: client build, native TypeScript source check, targeted lint, and import-layer check passed. All 14 focused browser tests passed, including three new checks for cross-provider create/edit/delete cache invalidation, saved-edit persistence across reopening, and avoiding reseeding deleted samples.
-- The isolated preview on port 8097 was observed rendering the real IDE with the shared mock-repo folder, src directory, package.json, and README.md. A complete UI edit/save/return/reload workflow has not yet been verified.
-- Repository-view increment: 33 focused browser tests passed, including the existing GitHub filesystem suite and new checks for the sample-only read-only mapping and file creation notifications from IDE to Agents. New IndexedDB files now emit ADDED rather than UPDATED, allowing Explorer to refresh for creation. Client build, targeted lint, source type check, and import-layer check passed. The refreshed Files panel has not yet been visually verified while the user is interacting with the preview.
+- 33 focused filesystem browser tests passed, including the existing GitHub filesystem suite and checks for cross-provider create/edit/delete cache invalidation, saved-edit persistence across reopening, avoiding reseeding deleted samples, the sample-only read-only repository mapping, and file creation notifications from IDE to Agents. New IndexedDB files emit ADDED rather than UPDATED, allowing Explorer to refresh for creation.
 
 ## Native build prerequisite
 
