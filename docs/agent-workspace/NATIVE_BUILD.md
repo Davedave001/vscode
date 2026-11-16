@@ -1,0 +1,35 @@
+# Windows native development build
+
+Run the fork from the checkout with its own profiles:
+
+```powershell
+node scripts/code-agent-workspace.ts
+```
+
+Use `--ide` to start in the editor, `--workspace "D:\Your Project"` to choose an existing folder, or `--dry-run` to inspect the executable and arguments without creating profiles or opening a window. The launcher requires a prepared `.build/electron/Code - OSS.exe` and compiled client/extensions. Node 24 can run its TypeScript directly.
+
+The launcher places editor settings, installed extensions, shared storage, Codex configuration, and Claude configuration under separate `agent-workspace-*` directories in `.build`. It clears inherited `VSCODE_*` variables and `ELECTRON_RUN_AS_NODE` so the fork does not reuse another editor's IPC or runtime overrides. A new isolated profile starts with the optional Codex and Claude agents disabled; users can enable and configure them in this profile. Existing settings are never replaced. Credentials are not copied into these directories.
+
+## Native library preparation on this machine
+
+The native modules target Electron 43.8.9, Node 24.22.1, ABI 148. Repository preinstall prepared the runtime headers. The installed VS 2026 compiler is MSVC 14.51.36231, but its Spectre libraries were absent. Microsoft's existing Visual Studio catalog identifies the matching package:
+
+- Package: `Microsoft.VC.14.51.CRT.x64.Desktop.spectre.base`, package version `14.51.36252`.
+- Archive SHA-256: `1d047253e126107611557d8604764aa57d58e81d9e36593f1f2b2d687aeaace9`.
+- Source: the HTTPS payload URL in `C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances\de48834c\catalog.json` on `download.visualstudio.microsoft.com`.
+- Verified archive and provenance: `.build/native-spectre/`.
+- Extracted libraries: `.build/native-spectre/extracted/Contents/VC/Tools/MSVC/14.51.36231/lib/spectre/x64/`.
+
+The archive hash was checked against the catalog before extraction. Native builds passed the extracted directory as both MSBuild global properties `VC_LibraryPath_VC_x64_Desktop_spectre` and `VC_LibraryPath_VC_Desktop_CurrentPlatform_spectre`. The policy-watcher compiler log includes `/Qspectre`, and its linker input log confirms `libcmt.lib`, `libcpmt.lib`, and `libvcruntime.lib` came from the extracted Spectre directory. No mitigation was disabled and the installed compiler files were not modified.
+
+MSBuild must receive a solution's physical pnpm package path rather than the root `node_modules` symlink: generated relative project references are resolved from that physical directory. Modules without a solution were configured with the repository's pinned Node, the existing node-gyp, `--target=43.8.9 --arch=x64 --dist-url=https://electronjs.org/headers`, and the prepared header cache. Supplying `--nodedir` directly made node-gyp choose `Release/node.lib`; normal target configuration correctly selected the cached `x64/node.lib`.
+
+## Validation and limits
+
+- Fifteen native dependencies loaded successfully in the fork's actual Electron runtime, including policy-watcher, SQLite, spdlog, windows-mutex, windows-process-tree, native-watchdog, node-pty, deviceid, windows-registry, fs-copyfile, native-is-elevated, native-keymap, windows-foreground-love, kerberos, and Parcel watcher.
+- A full `build-fast` build completed, including client resources, built-in extensions, and the Copilot extension. This resolved the missing npm extension output identified during the first native launch.
+- The native Agents window was observed rendering the labelled Agents/IDE switch, Attention Queue, Session Tools, workspace picker, local agent controls, and file/tool tabs. This proves a running development window, not a packaged release or a completed model-backed task.
+- Launcher tests cover inherited-environment isolation, separate storage arguments in both modes, and a dry-run with a workspace path containing spaces. Targeted strict type checking and lint passed.
+- The initial direct launch used the default Code OSS shared-storage path and allowed SDK discovery from the ambient agent configuration. The dedicated launcher corrects those defaults for subsequent launches. Existing global data was preserved.
+
+Manual test: launch with the command above, press Ctrl+K then Ctrl+Shift+A from Agents, and confirm the IDE opens the selected workspace. Use the matching switch or shortcut to return to Agents.
