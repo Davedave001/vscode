@@ -20,7 +20,7 @@ The Agents title-bar action invokes the preview host instead of an installed edi
 
 With both `--mock` and `--workspace-preview`, the two workbenches register the same browser-backed `mock-fs://mock-repo/mock-repo` sample workspace before workspace services initialize. The four sample files are seeded once in an IndexedDB transaction. Saved edits survive reopening; intentionally deleted files are not recreated. Cross-window file notifications invalidate the receiving provider's cached directory metadata, so later directory and file-size queries see committed peer changes. The ordinary mock E2E entry keeps its existing in-memory provider.
 
-This is a local demo and does not establish access to an agent's desktop filesystem. The IDE opens the shared sample folder. The existing Agents mock picker still selects a GitHub-shaped Cloud session workspace and its Files panel can report a fake-credentials error; the mock agent's edit URIs nevertheless target the shared sample files. This picker mismatch remains to be addressed. Native workspace handoff uses the existing desktop action, independently of the preview shell.
+This is a local demo and does not establish access to an agent's desktop filesystem. The IDE opens the shared sample folder. The existing Agents mock picker selects a GitHub-shaped Cloud session workspace; the preview registers a read-only repository view that maps precisely that sample repository to the same saved files, without calling GitHub for its file contents. Other repository paths, authorities, and queries cannot use this mapping. Normal Agents windows continue to register the existing GitHub API filesystem when no embedder provider exists. Native workspace handoff uses the existing desktop action, independently of the preview shell.
 
 ## Verification
 
@@ -31,6 +31,7 @@ This is a local demo and does not establish access to an agent's desktop filesys
 - Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Browser evidence does not establish a packaged native build.
 - Shared-workspace increment: client build, native TypeScript source check, targeted lint, and import-layer check passed. All 14 focused browser tests passed, including three new checks for cross-provider create/edit/delete cache invalidation, saved-edit persistence across reopening, and avoiding reseeding deleted samples.
 - The isolated preview on port 8097 was observed rendering the real IDE with the shared mock-repo folder, src directory, package.json, and README.md. A complete UI edit/save/return/reload workflow has not yet been verified.
+- Repository-view increment: 33 focused browser tests passed, including the existing GitHub filesystem suite and new checks for the sample-only read-only mapping and file creation notifications from IDE to Agents. New IndexedDB files now emit ADDED rather than UPDATED, allowing Explorer to refresh for creation. Client build, targeted lint, source type check, and import-layer check passed. The refreshed Files panel has not yet been visually verified while the user is interacting with the preview.
 
 ## Native build prerequisite
 

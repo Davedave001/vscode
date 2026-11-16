@@ -403,6 +403,8 @@ export class IndexedDBFileSystemProvider extends Disposable implements IFileSyst
 	}
 
 	private async bulkWrite(files: [URI, Uint8Array][]): Promise<void> {
+		const previousTree = await this.getFiletree();
+		const changes = files.map(([resource]) => ({ resource, type: previousTree.read(resource.path) ? FileChangeType.UPDATED : FileChangeType.ADDED }));
 		files.forEach(([resource, content]) => this.fileWriteBatch.push({ content, resource }));
 		await this.writeManyThrottler.queue(() => this.writeMany());
 
@@ -412,7 +414,7 @@ export class IndexedDBFileSystemProvider extends Disposable implements IFileSyst
 			this.mtimes.set(resource.toString(), Date.now());
 		}
 
-		this.triggerChanges(files.map(([resource]) => ({ resource, type: FileChangeType.UPDATED })));
+		this.triggerChanges(changes);
 	}
 
 	private fileWriteBatch: { resource: URI; content: Uint8Array }[] = [];

@@ -9,8 +9,10 @@ import { DisposableStore, IDisposable, toDisposable } from '../../../base/common
 import { URI } from '../../../base/common/uri.js';
 import { IndexedDBFileSystemProvider } from '../../../platform/files/browser/indexedDBFileSystemProvider.js';
 import { IFileService } from '../../../platform/files/common/files.js';
+import { PreviewRepositoryFileSystemProvider } from './previewRepositoryFileSystemProvider.js';
 
 export const PREVIEW_WORKSPACE_URI = URI.from({ scheme: 'mock-fs', authority: 'mock-repo', path: '/mock-repo' });
+export const PREVIEW_REPOSITORY_URI = URI.from({ scheme: 'github-remote-file', authority: 'github', path: '/mock-owner/mock-repo/HEAD' });
 
 export const MOCK_WORKSPACE_FILES: Readonly<Record<string, string>> = {
 	'/mock-repo/src/index.ts': 'export function main() {\n\tconsole.log("Hello from mock repo");\n}\n',
@@ -41,6 +43,9 @@ export async function registerPreviewWorkspace(fileService: IFileService, databa
 		});
 		const provider = store.add(new IndexedDBFileSystemProvider(PREVIEW_WORKSPACE_URI.scheme, database, 'files', true));
 		store.add(fileService.registerProvider(PREVIEW_WORKSPACE_URI.scheme, provider));
+		// The existing Cloud-session demo picker uses this GitHub-shaped URI. Resolve
+		// that one sample repository locally, without calling GitHub or using credentials.
+		store.add(fileService.registerProvider(PREVIEW_REPOSITORY_URI.scheme, new PreviewRepositoryFileSystemProvider(provider, PREVIEW_REPOSITORY_URI, PREVIEW_WORKSPACE_URI)));
 		return store;
 	} catch (error) {
 		store.dispose();

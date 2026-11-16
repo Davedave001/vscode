@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { registerWorkbenchContribution2, WorkbenchPhase } from '../../../../workbench/common/contributions.js';
@@ -27,8 +28,11 @@ class GitHubFileSystemProviderContribution extends Disposable {
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
-		const provider = this._register(instantiationService.createInstance(GitHubFileSystemProvider));
-		this._register(fileService.registerProvider(GITHUB_REMOTE_FILE_SCHEME, provider));
+		// Embedders may have already supplied their own provider for virtual repositories.
+		if (!fileService.hasProvider(URI.from({ scheme: GITHUB_REMOTE_FILE_SCHEME, path: '/' }))) {
+			const provider = this._register(instantiationService.createInstance(GitHubFileSystemProvider));
+			this._register(fileService.registerProvider(GITHUB_REMOTE_FILE_SCHEME, provider));
+		}
 		// Without a provider, file searches (Go to File, Add Context, `#file:`) wait forever on this scheme.
 		const searchProvider = this._register(instantiationService.createInstance(FileSystemFileSearchProvider));
 		this._register(searchService.registerSearchResultProvider(GITHUB_REMOTE_FILE_SCHEME, SearchProviderType.file, searchProvider));
