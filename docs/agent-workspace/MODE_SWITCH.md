@@ -26,6 +26,10 @@ This is a local demo. The web IDE initially opens without a local folder; it doe
 - Targeted lint, CSS lint, and import-layer checks passed.
 - 81 focused browser tests passed, including mode state, toolbar focus, mouse/Enter/Space activation, disabled-action behavior, existing web workspace routing, and accessibility help.
 - The refreshed browser preview was observed rendering the actual IDE workbench, including Explorer, editor tabs, layout controls, and the return switch. A full interactive return-and-buffer-preservation workflow has not yet been verified.
-- Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Desktop native dependencies are being prepared separately; browser evidence does not establish a packaged native build.
+- Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Browser evidence does not establish a packaged native build.
+
+## Native build prerequisite
+
+The pinned Node 24.22.1 archive was downloaded from nodejs.org, verified against its published SHA-256 manifest, and kept inside `.build/node-runtime`. Repository preinstall successfully prepared Node and Electron 43.8.9 headers. Native rebuilding then reached Visual Studio but failed with `MSB8040`: the selected compiler lacks Spectre-mitigated C++ libraries. The installed VS 2026 and VS 2022 toolsets were checked and neither had the required x64 libraries. The browser preview remains usable; completing the native build requires the matching Visual Studio Spectre component. No compiler mitigation was disabled and no global toolchain configuration was changed.
 
 Manual smoke test: in the local demo, click IDE, create an untitled buffer, return to Agents, and switch to IDE again. Confirm the same buffer remains and that Agents returns to its previous conversation.
