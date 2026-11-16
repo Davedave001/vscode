@@ -19,7 +19,7 @@ const workbenchPromise = new DeferredPromise<IWorkbench>();
  * @param workbenchFactory Optional factory selecting the workbench presentation
  * under test (defaults to the classic desktop workbench).
  */
-export function create(domElement: HTMLElement, options: IWorkbenchConstructionOptions, workbenchFactory?: SessionsWorkbenchFactory): IDisposable {
+export function create(domElement: HTMLElement, options: IWorkbenchConstructionOptions, workbenchFactory?: SessionsWorkbenchFactory, browserMain = TestSessionsBrowserMain): IDisposable {
 
 	mark('code/didLoadWorkbenchMain');
 	// Honor the same embedder command contract as the production Sessions factory.
@@ -29,7 +29,7 @@ export function create(domElement: HTMLElement, options: IWorkbenchConstructionO
 	}
 
 	let instantiatedWorkbench: IWorkbench | undefined = undefined;
-	new TestSessionsBrowserMain(domElement, options, workbenchFactory).open().then(workbench => {
+	new browserMain(domElement, options, workbenchFactory).open().then(workbench => {
 		instantiatedWorkbench = workbench;
 		workbenchPromise.complete(workbench);
 	});

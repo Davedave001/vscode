@@ -122,7 +122,10 @@ function getSessionsHTML(host, port, cssModules, useMock, useMobile, useIDE, use
 	const entryModule = useMobile
 		? (useMock ? 'test/agents.web.mobile.test.internal' : 'agents.web.mobile.main.internal')
 		: (useMock ? 'test/sessions.web.test.internal' : 'sessions.web.main.internal');
-	const entryPath = useIDE ? 'workbench/workbench.web.main.internal' : `sessions/${entryModule}`;
+	const sharedPreview = useModeSwitch && useMock && !useMobile;
+	const entryPath = sharedPreview
+		? `sessions/test/preview/${useIDE ? 'ide' : 'agents'}.web.preview.internal`
+		: useIDE ? 'workbench/workbench.web.main.internal' : `sessions/${entryModule}`;
 
 	// Expose safe-area insets without disabling browser zoom.
 	const viewportMeta = useMobile
@@ -167,7 +170,7 @@ ${importMapJson}
 				handler: () => parent.postMessage({ type: 'agent-workspace.switch-mode', mode: '${useIDE ? 'agents' : 'ide'}' }, location.origin),
 			}],` : ''}
 			workspaceProvider: {
-				workspace: ${useMock && !useIDE
+				workspace: ${useMock && (!useIDE || sharedPreview)
 			? `{ folderUri: URI.parse('mock-fs://mock-repo/mock-repo') }`
 			: 'undefined'},
 				open: async () => false,

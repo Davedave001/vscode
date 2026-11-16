@@ -178,7 +178,18 @@ export class IndexedDBFileSystemProvider extends Disposable implements IFileSyst
 		if (watchCrossWindowChanges) {
 			this.changesBroadcastChannel = this._register(new BroadcastDataChannel<UriDto<IFileChange>[]>(`vscode.indexedDB.${scheme}.changes`));
 			this._register(this.changesBroadcastChannel.onDidReceiveData(changes => {
-				this._onDidChangeFile.fire(changes.map(c => ({ type: c.type, resource: URI.revive(c.resource) })));
+				// A peer committed these changes to the shared database. Rebuild directory
+				// metadata before notifying consumers so they can resolve new and deleted files.
+				this.cachedFiletree = undefined;
+				const revived = changes.map(c => ({ type: c.type, resource: URI.revive(c.resource) }));
+				for (const change of revived) {
+					if (change.type === FileChangeType.DELETED) {
+						this.mtimes.delete(change.resource.toString());
+					} else {
+						this.mtimes.set(change.resource.toString(), Date.now());
+					}
+				}
+				this._onDidChangeFile.fire(revived);
 			}));
 		}
 	}

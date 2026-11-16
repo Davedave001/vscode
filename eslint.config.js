@@ -2263,7 +2263,7 @@ export default [
 					]
 				},
 				{
-					'target': 'src/vs/sessions/test/{web.test.ts,web.test.factory.ts,web.test.terminal.ts}',
+					'target': 'src/vs/sessions/test/{web.test.ts,web.test.factory.ts,web.test.terminal.ts,preview/*.ts}',
 					'layer': 'browser',
 					'restrictions': [
 						'vs/base/~',
@@ -2273,6 +2273,8 @@ export default [
 						'vs/sessions/services/*/~',
 						'vs/sessions/test/**',
 						'vs/sessions/contrib/*/~',
+						'vs/sessions/sessions.web.main.js',
+						'vs/workbench/workbench.web.main.js',
 						'vs/workbench/~',
 						'vs/workbench/browser/**',
 						'vs/workbench/services/*/~',

@@ -36,18 +36,7 @@ import { IChatSessionFileChange } from '../../workbench/common/chatSessionFileCh
 import { SessionsWorkbenchFactory } from '../browser/workbenchFactory.js';
 import { IAgentHostFilterService } from '../../workbench/contrib/sessions/common/agentHostFilter.js';
 import { ILanguageModelChatMetadata, ILanguageModelsService } from '../../workbench/contrib/chat/common/languageModels.js';
-
-/**
- * Mock files pre-seeded in the in-memory file system. These match the
- * paths in EXISTING_MOCK_FILES and are used by the ChatEditingService
- * to compute before/after diffs.
- */
-const MOCK_FS_FILES: Record<string, string> = {
-	'/mock-repo/src/index.ts': 'export function main() {\n\tconsole.log("Hello from mock repo");\n}\n',
-	'/mock-repo/src/utils.ts': 'export function add(a: number, b: number): number {\n\treturn a + b;\n}\n',
-	'/mock-repo/package.json': '{\n\t"name": "mock-repo",\n\t"version": "1.0.0"\n}\n',
-	'/mock-repo/README.md': '# Mock Repository\n\nThis is a mock repository for E2E testing.\n',
-};
+import { MOCK_WORKSPACE_FILES } from './browser/previewWorkspace.js';
 
 /**
  * Register the mock-fs:// file system provider directly in the workbench
@@ -57,11 +46,14 @@ const MOCK_FS_FILES: Record<string, string> = {
  */
 function registerMockFileSystemProvider(serviceCollection: ServiceCollection): void {
 	const fileService = serviceCollection.get(IFileService) as IFileService;
+	if (fileService.hasProvider(URI.from({ scheme: 'mock-fs', path: '/' }))) {
+		return;
+	}
 	const provider = new InMemoryFileSystemProvider();
 	fileService.registerProvider('mock-fs', provider);
 
 	// Pre-populate the files so ChatEditingService can read originals for diffs
-	for (const [filePath, content] of Object.entries(MOCK_FS_FILES)) {
+	for (const [filePath, content] of Object.entries(MOCK_WORKSPACE_FILES)) {
 		const uri = URI.from({ scheme: 'mock-fs', authority: 'mock-repo', path: filePath });
 		fileService.writeFile(uri, VSBuffer.fromString(content));
 	}

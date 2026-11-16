@@ -18,7 +18,9 @@ The ordinary server and E2E routes retain their existing behavior when this flag
 
 The Agents title-bar action invokes the preview host instead of an installed editor protocol. The IDE provides a return control at the top-left. Host messages are accepted only from the known workbench frames and the exact local origin. The mock Sessions factory now honors and disposes embedder command registrations, matching the production factory's command contract.
 
-This is a local demo. The web IDE initially opens without a local folder; it does not establish access to an agent's desktop filesystem. Native workspace handoff uses the existing desktop action, independently of the preview shell.
+With both `--mock` and `--workspace-preview`, the two workbenches register the same browser-backed `mock-fs://mock-repo/mock-repo` sample workspace before workspace services initialize. The four sample files are seeded once in an IndexedDB transaction. Saved edits survive reopening; intentionally deleted files are not recreated. Cross-window file notifications invalidate the receiving provider's cached directory metadata, so later directory and file-size queries see committed peer changes. The ordinary mock E2E entry keeps its existing in-memory provider.
+
+This is a local demo and does not establish access to an agent's desktop filesystem. The IDE opens the shared sample folder. The existing Agents mock picker still selects a GitHub-shaped Cloud session workspace and its Files panel can report a fake-credentials error; the mock agent's edit URIs nevertheless target the shared sample files. This picker mismatch remains to be addressed. Native workspace handoff uses the existing desktop action, independently of the preview shell.
 
 ## Verification
 
@@ -27,6 +29,8 @@ This is a local demo. The web IDE initially opens without a local folder; it doe
 - 81 focused browser tests passed, including mode state, toolbar focus, mouse/Enter/Space activation, disabled-action behavior, existing web workspace routing, and accessibility help.
 - The refreshed browser preview was observed rendering the actual IDE workbench, including Explorer, editor tabs, layout controls, and the return switch. A full interactive return-and-buffer-preservation workflow has not yet been verified.
 - Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Browser evidence does not establish a packaged native build.
+- Shared-workspace increment: client build, native TypeScript source check, targeted lint, and import-layer check passed. All 14 focused browser tests passed, including three new checks for cross-provider create/edit/delete cache invalidation, saved-edit persistence across reopening, and avoiding reseeding deleted samples.
+- The isolated preview on port 8097 was observed rendering the real IDE with the shared mock-repo folder, src directory, package.json, and README.md. A complete UI edit/save/return/reload workflow has not yet been verified.
 
 ## Native build prerequisite
 
