@@ -7,6 +7,7 @@ Base: upstream `598b0f1b4e1`. Development branch: `feat/agent-workspace`.
 | Check | Result |
 | --- | --- |
 | TypeScript native compiler, `src/tsconfig.json`, no emit, skip library checks | Passed with no diagnostics |
+| Additional JavaScript TypeScript 6 compiler check | Incomplete: process reached the default Node heap limit |
 | `node build/next/build-fast.ts --client-only` | Passed, including an incremental rebuild after the final source edits |
 | Targeted `node build/oxlint.ts` on changed TypeScript files | Passed |
 | `node build/checker/layersChecker.ts` | Passed |
