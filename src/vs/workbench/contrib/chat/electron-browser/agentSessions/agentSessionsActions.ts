@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import './media/openInAgents.css';
+import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
 import { $, addDisposableListener, append, EventLike, EventType, getWindow } from '../../../../../base/browser/dom.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IHoverWidget, IManagedHover } from '../../../../../base/browser/ui/hover/hover.js';
@@ -675,6 +676,7 @@ export class OpenWorkspaceInAgentsContribution extends Disposable implements IWo
 		@IContextKeyService contextKeyService: IContextKeyService,
 		@IProductService productService: IProductService,
 		@IStorageService storageService: IStorageService,
+		@IConfigurationService configurationService: IConfigurationService,
 	) {
 		super();
 		const usage = new AgentsWindowUsage(storageService);
@@ -684,7 +686,9 @@ export class OpenWorkspaceInAgentsContribution extends Disposable implements IWo
 		this._register(usage.onDidChangeCreatedSessionCount(this._store)(updateHasCreatedSession));
 
 		this._register(actionViewItemService.register(MenuId.TitleBarAdjacentCenter, OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE_BAR_COMMAND_ID, (action, options) => {
-			return instantiationService.createInstance(OpenWorkspaceInAgentsTitleBarWidget, action, options);
+			return configurationService.getValue<boolean>(WORKSPACE_MODE_SWITCH_SETTING) === false
+				? instantiationService.createInstance(OpenWorkspaceInAgentsTitleBarWidget, action, options)
+				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'ide', OPEN_AGENTS_WINDOW_COMMAND_ID);
 		}, undefined));
 	}
 }

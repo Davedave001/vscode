@@ -6,9 +6,10 @@
 import { IWorkbench, IWorkbenchConstructionOptions } from '../../workbench/browser/web.api.js';
 import { TestSessionsBrowserMain } from './web.test.js';
 import { SessionsWorkbenchFactory } from '../browser/workbenchFactory.js';
-import { IDisposable, toDisposable } from '../../base/common/lifecycle.js';
+import { DisposableStore, IDisposable, toDisposable } from '../../base/common/lifecycle.js';
 import { mark } from '../../base/common/performance.js';
 import { DeferredPromise } from '../../base/common/async.js';
+import { CommandsRegistry } from '../../platform/commands/common/commands.js';
 
 const workbenchPromise = new DeferredPromise<IWorkbench>();
 
@@ -21,6 +22,11 @@ const workbenchPromise = new DeferredPromise<IWorkbench>();
 export function create(domElement: HTMLElement, options: IWorkbenchConstructionOptions, workbenchFactory?: SessionsWorkbenchFactory): IDisposable {
 
 	mark('code/didLoadWorkbenchMain');
+	// Honor the same embedder command contract as the production Sessions factory.
+	const embedderCommands = new DisposableStore();
+	for (const command of options.commands ?? []) {
+		embedderCommands.add(CommandsRegistry.registerCommand(command.id, (_accessor, ...args) => command.handler(...args)));
+	}
 
 	let instantiatedWorkbench: IWorkbench | undefined = undefined;
 	new TestSessionsBrowserMain(domElement, options, workbenchFactory).open().then(workbench => {
@@ -29,6 +35,7 @@ export function create(domElement: HTMLElement, options: IWorkbenchConstructionO
 	});
 
 	return toDisposable(() => {
+		embedderCommands.dispose();
 		if (instantiatedWorkbench) {
 			instantiatedWorkbench.shutdown();
 		} else {

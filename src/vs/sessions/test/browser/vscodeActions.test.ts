@@ -157,7 +157,7 @@ suite('Open in Editor in Agents windows', () => {
 
 	test('shows in the main window and in chat windows, as the main window always showed it, and not in editor windows', () => {
 		const menus = new OpenInVSCodeAction().desc.menu;
-		const when = (Array.isArray(menus) ? menus : [menus]).find(menu => menu?.id === AgentsWindowMenus.TitleBarCenterRight)?.when;
+		const when = (Array.isArray(menus) ? menus : [menus]).find(menu => menu?.id === AgentsWindowMenus.TitleBarLeftLayout)?.when;
 		const contextKeyService = store.add(new ContextKeyService(new TestConfigurationService()));
 		const shows = (auxiliary: boolean, layoutMode: string | undefined) => {
 			const scoped = store.add(contextKeyService.createScoped(document.createElement('div')));

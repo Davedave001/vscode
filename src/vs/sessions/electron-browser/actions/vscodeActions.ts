@@ -30,7 +30,9 @@ import { AgentsWindowMenus } from '../../browser/agentsWindowMenus.js';
 import { resolveSessionCommandTarget } from '../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
 import { ISessionsProvidersService } from '../../../workbench/contrib/sessions/browser/sessionsProvidersService.js';
 import { IWorkbenchContribution } from '../../../workbench/common/contributions.js';
+import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { OpenInVSCodeTitleBarWidget } from '../../browser/widget/openInVSCodeWidget.js';
+import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IActionViewItemService } from '../../../platform/actions/browser/actionViewItemService.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
@@ -51,9 +53,9 @@ export class OpenSessionInVSCodeAction extends Action2 {
 			icon: Codicon.vscodeInsiders,
 			precondition: ContextKeyExpr.and(ContextKeyExpr.or(IsAuxiliaryWindowContext.toNegated(), LayoutModeContext)!, SessionsWelcomeVisibleContext.toNegated()),
 			menu: [{
-				id: AgentsWindowMenus.TitleBarCenterRight,
+				id: AgentsWindowMenus.TitleBarLeftLayout,
 				group: 'navigation',
-				order: 7,
+				order: -100,
 				when: ContextKeyExpr.and(ContextKeyExpr.or(IsAuxiliaryWindowContext.toNegated(), LayoutModeContext)!, SessionsWelcomeVisibleContext.toNegated(), IsPhoneLayoutContext.negate()),
 			}]
 		});
@@ -192,10 +194,13 @@ export class OpenInVSCodeWidgetContribution extends Disposable implements IWorkb
 	constructor(
 		@IActionViewItemService actionViewItemService: IActionViewItemService,
 		@IInstantiationService instantiationService: IInstantiationService,
+		@IConfigurationService configurationService: IConfigurationService,
 	) {
 		super();
-		this._register(actionViewItemService.register(AgentsWindowMenus.TitleBarCenterRight, OpenSessionInVSCodeAction.ID, (action, options) => {
-			return instantiationService.createInstance(OpenInVSCodeTitleBarWidget, action, options, OpenVSCodeWindowAction.ID);
+		this._register(actionViewItemService.register(AgentsWindowMenus.TitleBarLeftLayout, OpenSessionInVSCodeAction.ID, (action, options) => {
+			return configurationService.getValue<boolean>(WORKSPACE_MODE_SWITCH_SETTING) === false
+				? instantiationService.createInstance(OpenInVSCodeTitleBarWidget, action, options, OpenVSCodeWindowAction.ID)
+				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'agents', OpenSessionInVSCodeAction.ID);
 		}, undefined));
 	}
 }

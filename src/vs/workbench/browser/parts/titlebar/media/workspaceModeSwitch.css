@@ -1,0 +1,45 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench .workspace-mode-switch {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size20);
+	padding: var(--vscode-spacing-size20);
+	border: var(--vscode-strokeThickness) solid var(--vscode-widget-border, transparent);
+	border-radius: var(--vscode-cornerRadius-large);
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	white-space: nowrap;
+	touch-action: manipulation;
+	-webkit-app-region: no-drag;
+}
+
+.monaco-workbench .workspace-mode-segment {
+	padding: var(--vscode-spacing-size40) var(--vscode-spacing-size100);
+	border-radius: var(--vscode-cornerRadius-medium);
+	font-size: var(--vscode-fontSize-label1);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.monaco-workbench .workspace-mode-segment.active-mode {
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+}
+
+.monaco-workbench .workspace-mode-switch:hover:not(.disabled) {
+	border-color: var(--vscode-focusBorder);
+}
+
+.monaco-workbench .workspace-mode-switch:focus-visible {
+	outline: var(--vscode-strokeThickness) solid var(--vscode-focusBorder);
+	outline-offset: 2px;
+}
+
+.monaco-workbench .workspace-mode-switch.disabled {
+	opacity: 0.5;
+	cursor: default;
+}

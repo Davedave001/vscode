@@ -82,6 +82,7 @@ suite('Agents Window titlebar copy experiment', () => {
 			hide: () => { hoverHides++; },
 		});
 		const configuration = new TestConfigurationService({
+			'workbench.titleBar.workspaceModeSwitch': false,
 			...(richHover === undefined ? {} : { [ChatConfiguration.TitleBarOpenInAgentsWindowRichHover]: richHover }),
 			...(richHoverOnClick === undefined ? {} : { [ChatConfiguration.TitleBarOpenInAgentsWindowRichHoverOnClick]: richHoverOnClick }),
 		});

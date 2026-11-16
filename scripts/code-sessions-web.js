@@ -15,7 +15,7 @@ const APP_ROOT = path.join(__dirname, '..');
 
 async function main() {
 	const args = minimist(process.argv.slice(2), {
-		boolean: ['help', 'no-open', 'skip-welcome', 'mock', 'mobile'],
+		boolean: ['help', 'no-open', 'skip-welcome', 'mock', 'mobile', 'workspace-preview'],
 		string: ['host', 'port'],
 	});
 
@@ -27,6 +27,7 @@ async function main() {
 			'  --no-open       Do not open browser automatically\n' +
 			'  --skip-welcome  Skip the sessions welcome overlay\n' +
 			'  --mock          Load mock extension for E2E testing\n' +
+			'  --workspace-preview  Include the persistent Agents/IDE preview shell\n' +
 			'  --mobile        Serve the mobile (phone) workbench entry point\n'
 		);
 		return;
@@ -40,10 +41,16 @@ async function main() {
 
 		// Serve the sessions workbench HTML at the root
 		if (url.pathname === '/' || url.pathname === '/index.html') {
+			res.writeHead(200, { 'Content-Type': 'text/html' });
+			res.end(args['workspace-preview'] ? getWorkspaceHTML() : getSessionsHTML(HOST, PORT, collectCssFiles(path.join(APP_ROOT, 'out'), ''), args['mock'], args['mobile'], false, false));
+			return;
+		}
+
+		if (url.pathname === '/agents' || url.pathname === '/ide') {
 			// Refresh the import map on each page load to include newly compiled stylesheets.
 			const cssModules = collectCssFiles(path.join(APP_ROOT, 'out'), '');
 			res.writeHead(200, { 'Content-Type': 'text/html' });
-			res.end(getSessionsHTML(HOST, PORT, cssModules, args['mock'], args['mobile']));
+			res.end(getSessionsHTML(HOST, PORT, cssModules, args['mock'], args['mobile'], url.pathname === '/ide', args['workspace-preview']));
 			return;
 		}
 
@@ -88,7 +95,7 @@ async function main() {
 	process.on('SIGTERM', () => { server.close(); process.exit(0); });
 }
 
-function getSessionsHTML(host, port, cssModules, useMock, useMobile) {
+function getSessionsHTML(host, port, cssModules, useMock, useMobile, useIDE, useModeSwitch) {
 	const baseUrl = `http://${host}:${port}`;
 	const fileRoot = `${baseUrl}/out`;
 
@@ -115,6 +122,7 @@ function getSessionsHTML(host, port, cssModules, useMock, useMobile) {
 	const entryModule = useMobile
 		? (useMock ? 'test/agents.web.mobile.test.internal' : 'agents.web.mobile.main.internal')
 		: (useMock ? 'test/sessions.web.test.internal' : 'sessions.web.main.internal');
+	const entryPath = useIDE ? 'workbench/workbench.web.main.internal' : `sessions/${entryModule}`;
 
 	// Expose safe-area insets without disabling browser zoom.
 	const viewportMeta = useMobile
@@ -145,7 +153,7 @@ ${importMapJson}
 </head>
 <body aria-label="">
 	<script type="module">
-		import { create, URI } from '${fileRoot}/vs/sessions/${entryModule}.js';
+		import { create, URI } from '${fileRoot}/vs/${entryPath}.js';
 		create(document.body, {
 			productConfiguration: {
 				nameShort: '${useMobile ? 'Agents' : 'Sessions (Web)'}',
@@ -153,17 +161,61 @@ ${importMapJson}
 				enableTelemetry: false,
 			},
 			${additionalBuiltinExtensions}
+			${useModeSwitch ? `commands: [{
+				id: '${useIDE ? 'preview.switchToAgents' : 'sessions.openInVSCode'}',
+				label: '${useIDE ? 'Switch to Agents' : 'Switch to IDE'}',
+				handler: () => parent.postMessage({ type: 'agent-workspace.switch-mode', mode: '${useIDE ? 'agents' : 'ide'}' }, location.origin),
+			}],` : ''}
 			workspaceProvider: {
-				workspace: ${useMock
+				workspace: ${useMock && !useIDE
 			? `{ folderUri: URI.parse('mock-fs://mock-repo/mock-repo') }`
 			: 'undefined'},
 				open: async () => false,
-				payload: [['isSessionsWindow', 'true']],
+				payload: [['isSessionsWindow', '${useIDE ? 'false' : 'true'}']],
 			},
 		});
 	</script>
 </body>
 </html>`;
+}
+
+/** Keeps both workbenches mounted so mode changes preserve conversations and unsaved editor buffers. */
+function getWorkspaceHTML() {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent Workspace — Local Demo</title>
+	<style>
+		html, body { margin: 0; height: 100%; background: #181818; color: #eee; font: 13px system-ui; }
+		body { display: flex; flex-direction: column; }
+		header { display: flex; align-items: center; gap: 16px; padding: 6px 12px; border-bottom: 1px solid #444; }
+		header[hidden], iframe[hidden] { display: none; }
+		button { background: #222; color: #aaa; border: 1px solid #555; border-radius: 8px; padding: 3px; cursor: pointer; }
+		button span { display: inline-block; padding: 4px 10px; border-radius: 6px; }
+		button .selected { background: #444; color: white; }
+		button:focus-visible { outline: 2px solid #75beff; outline-offset: 2px; }
+		iframe { flex: 1; width: 100%; border: 0; min-height: 0; }
+		.demo-label { color: #aaa; }
+	</style></head><body>
+	<header hidden><button type="button" role="switch" aria-label="IDE mode" aria-checked="true"><span>Agents</span><span class="selected">IDE</span></button><span class="demo-label">Local demo · Agents stay open while you edit</span></header>
+	<iframe id="agents" title="Agents workspace" src="/agents?skip-sessions-welcome"></iframe>
+	<script>
+		const agents = document.getElementById('agents');
+		const header = document.querySelector('header');
+		let ide;
+		function switchMode(mode) {
+			if (mode === 'ide' && !ide) {
+				ide = document.createElement('iframe'); ide.id = 'ide'; ide.title = 'IDE workspace'; ide.src = '/ide'; document.body.appendChild(ide);
+			}
+			agents.hidden = mode === 'ide'; header.hidden = mode !== 'ide';
+			if (ide) { ide.hidden = mode !== 'ide'; }
+			history.replaceState(null, '', mode === 'ide' ? '/?mode=ide' : '/?skip-sessions-welcome');
+			(mode === 'ide' ? ide : agents).focus();
+		}
+		header.querySelector('button').addEventListener('click', () => switchMode('agents'));
+		window.addEventListener('message', event => {
+			if (event.origin !== location.origin || ![agents.contentWindow, ide?.contentWindow].includes(event.source)) { return; }
+			if (event.data?.type === 'agent-workspace.switch-mode' && ['agents', 'ide'].includes(event.data.mode)) { switchMode(event.data.mode); }
+		});
+		if (new URLSearchParams(location.search).get('mode') === 'ide') { switchMode('ide'); }
+	</script></body></html>`;
 }
 
 /** Recursively collect *.css paths relative to `dir`. */
