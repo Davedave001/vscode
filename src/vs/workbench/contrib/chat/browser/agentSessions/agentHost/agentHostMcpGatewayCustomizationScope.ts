@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Sequencer } from '../../../../../../base/common/async.js';
+import { equals } from '../../../../../../base/common/arrays.js';
 import { CancellationTokenSource } from '../../../../../../base/common/cancellation.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../../../base/common/lifecycle.js';
 import { autorun, derived, IObservable, observableValue, waitForState } from '../../../../../../base/common/observable.js';
@@ -69,14 +70,17 @@ export class AgentHostMcpGatewayCustomizationScope extends Disposable implements
 	}
 
 	async whenResolved(): Promise<void> {
-		if (this._error) { this._refresh(this._selectedIds); }
+		if (this._error) { this._refresh(this._selectedIds, true); }
 		await Promise.all([this._scope.whenResolved(), waitForState(this._ready, ready => ready, undefined, this._cancellation.token)]);
 		if (this._error) { throw this._error; }
 	}
 
 	getSyncedUri(sourceUri: URI): URI | undefined { return this._scope.getSyncedUri(sourceUri); }
 
-	private _refresh(ids: readonly string[]): void {
+	private _refresh(ids: readonly string[], retry = false): void {
+		// Discovery and definition updates can republish the same selection. The
+		// gateway already observes its servers; reopening it revokes active routes.
+		if (!retry && this._generation > 0 && equals(ids, this._selectedIds)) { return; }
 		this._selectedIds = ids;
 		const generation = ++this._generation;
 		this._gateway.clear();

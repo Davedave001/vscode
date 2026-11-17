@@ -93,6 +93,53 @@ suite('Agent host MCP gateway customization scope', () => {
 		assert.strictEqual(f.scope.customizations.get()[0].id, 'existing');
 	});
 
+	test('retains gateway routes and the published bundle when discovery republishes the same selected servers', async () => {
+		const f = fixture([server('second'), server('first')]);
+		await f.scope.whenResolved();
+		const refs = f.scope.customizations.get();
+		f.servers.set([server('first'), server('second')], undefined);
+		assert.strictEqual(f.gatewayDisposed, 0, 'An unchanged selection must not revoke an active Devin tool connection');
+		assert.strictEqual(f.scope.isResolved.get(), true);
+		assert.deepStrictEqual(f.scope.customizations.get(), refs);
+		assert.strictEqual(f.calls.length, 1);
+	});
+
+	test('does not reopen the gateway for a definition update that leaves eligibility unchanged', async () => {
+		const definitions = observableValue('definitions', { server: undefined, collection: upcastPartial<McpCollectionDefinition>({ provenance: McpCollectionProvenance.UserProfile }) });
+		const selected = upcastPartial<IMcpServer>({ definition: { id: 'selected', label: 'selected' }, readDefinitions: () => definitions });
+		const f = fixture([selected]);
+		await f.scope.whenResolved();
+		const refs = f.scope.customizations.get();
+		definitions.set({ server: undefined, collection: upcastPartial<McpCollectionDefinition>({ provenance: McpCollectionProvenance.UserProfile }) }, undefined);
+		assert.strictEqual(f.gatewayDisposed, 0);
+		assert.strictEqual(f.scope.isResolved.get(), true);
+		assert.deepStrictEqual(f.scope.customizations.get(), refs);
+		assert.strictEqual(f.calls.length, 1);
+	});
+
+	test('still revokes a selected server when its definition is removed', async () => {
+		const definitions = observableValue<{ server: undefined; collection: McpCollectionDefinition | undefined }>('definitions', { server: undefined, collection: upcastPartial<McpCollectionDefinition>({ provenance: McpCollectionProvenance.UserProfile }) });
+		const selected = upcastPartial<IMcpServer>({ definition: { id: 'selected', label: 'selected' }, readDefinitions: () => definitions });
+		const f = fixture([selected]);
+		await f.scope.whenResolved();
+		definitions.set({ server: undefined, collection: undefined }, undefined);
+		assert.strictEqual(f.gatewayDisposed, 1);
+		await f.scope.whenResolved();
+		assert.strictEqual(f.scope.customizations.get().length, 1);
+		assert.strictEqual(f.calls.length, 1);
+	});
+
+	test('does not restart a pending gateway for an unchanged discovery update', async () => {
+		const blocked = new DeferredPromise<void>();
+		const f = fixture([server('selected')], blocked.p);
+		f.servers.set([server('selected')], undefined);
+		assert.strictEqual(f.calls.length, 1);
+		void blocked.complete();
+		await f.scope.whenResolved();
+		assert.strictEqual(f.gatewayDisposed, 0);
+		assert.strictEqual(f.scope.customizations.get().length, 2);
+	});
+
 	test('revokes the old gateway immediately and does not publish a late replacement after disposal', async () => {
 		const f = fixture();
 		await f.scope.whenResolved();
