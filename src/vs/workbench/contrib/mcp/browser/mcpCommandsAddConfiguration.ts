@@ -30,7 +30,7 @@ import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService, IQuickPickItem, QuickPickInput } from '../../../../platform/quickinput/common/quickInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { isWorkspaceFolder, IWorkspaceContextService, IWorkspaceFolder, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
-import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { IWorkbenchLocalMcpServer, IWorkbenchMcpManagementService, WorkspaceMcpConfigKind } from '../../../services/mcp/common/mcpWorkbenchManagementService.js';
@@ -47,6 +47,7 @@ import { getMcpGenerationSchema, McpGeneratedConfiguration, normalizeMcpGenerate
 import { IMcpRegistry } from '../common/mcpRegistryTypes.js';
 import { IMcpService, McpConnectionState } from '../common/mcpTypes.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { signalCAppConnections } from '../common/signalCAppConnections.js';
 import { IWorkspaceMcpConfigurationTarget, McpConfigurationDestination } from './mcpConfigurationDestination.js';
 import { IMcpCopilotGlobalConfigurationService } from '../common/mcpCopilotGlobalConfigurationService.js';
 
@@ -58,6 +59,7 @@ export const enum AddConfigurationType {
 	PipPackage,
 	NuGetPackage,
 	DockerImage,
+	App,
 }
 
 type AssistedConfigurationType = AddConfigurationType.NpmPackage | AddConfigurationType.PipPackage | AddConfigurationType.NuGetPackage | AddConfigurationType.DockerImage;
@@ -167,11 +169,14 @@ export class McpAddConfigurationCommand {
 		@IChatWidgetService private readonly _chatWidgetService: IChatWidgetService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IMcpWorkspaceInstallTargetService private readonly _workspaceInstallTargetService: IMcpWorkspaceInstallTargetService,
+		@IDialogService private readonly _dialogService: IDialogService,
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 	) { }
 
 	private async getServerType(): Promise<AddConfigurationType | undefined> {
 		type TItem = { kind: AddConfigurationType | 'browse' | 'discovery' } & IQuickPickItem;
 		const items: QuickPickInput<TItem>[] = [
+			{ kind: AddConfigurationType.App, label: localize('mcp.serverType.app', "Connect an App (OAuth)..."), description: localize('mcp.serverType.app.description', "Choose a published app connection, including QuickBooks, Notion, Slack and GitHub") },
 			{ kind: AddConfigurationType.Stdio, label: localize('mcp.serverType.command', "Command (stdio)"), description: localize('mcp.serverType.command.description', "Run a local command that implements the MCP protocol") },
 			{ kind: AddConfigurationType.HTTP, label: localize('mcp.serverType.http', "HTTP (HTTP or Server-Sent Events)"), description: localize('mcp.serverType.http.description', "Connect to a remote HTTP server that implements the MCP protocol") }
 		];
@@ -236,6 +241,59 @@ export class McpAddConfigurationCommand {
 		}
 
 		return result?.kind;
+	}
+
+	private async getAppConfig(): Promise<{ name: string; config: IMcpServerConfiguration; localOnly?: boolean } | undefined> {
+		const app = await this._quickInputService.pick(signalCAppConnections.map(app => ({
+			label: app.name,
+			description: app.blocked ? localize('mcp.app.setupOnly', "Setup guide · connection unavailable") : app.local ? localize('mcp.app.localOAuth', "Local server · existing OAuth setup") : app.clientIdRequired ? localize('mcp.app.registeredOAuth', "OAuth · app registration required") : localize('mcp.app.oauth', "OAuth"),
+			detail: app.description,
+			app,
+		})), {
+			title: localize('mcp.app.title', "Signal-C App Connections"),
+			placeHolder: localize('mcp.app.placeholder', "Search apps. Select to review setup before adding a connection."),
+			matchOnDescription: true, matchOnDetail: true, ignoreFocusLost: true,
+		});
+		if (!app) { return undefined; }
+		const { app: connection } = app;
+		const { result } = await this._dialogService.prompt({
+			type: 'info', custom: true,
+			message: localize('mcp.app.review', "Connect {0}", connection.name),
+			detail: [connection.setup ?? localize('mcp.app.defaultSetup', "Add the official remote MCP server. Your browser opens for authorization when the server starts; permissions and availability are controlled by the app."), connection.blocked, connection.url].filter(Boolean).join('\n\n'),
+			buttons: [
+				...(!connection.blocked ? [{ label: connection.local ? localize('mcp.app.localConnect', "Connect Local Server") : localize('mcp.app.connect', "Connect with OAuth"), run: () => 'connect' as const }] : []),
+				{ label: localize('mcp.app.guide', "Open Setup Guide"), run: () => 'guide' as const },
+			],
+			cancelButton: true,
+		});
+		if (!result) { return undefined; }
+		if (result === 'guide') {
+			await this._openerService.open(URI.parse(connection.documentation));
+			return undefined;
+		}
+		if (connection.local) {
+			if (this.configurationTarget) { throw new Error(localize('mcp.app.localTarget', "This app runs on the local machine and must use local user configuration. Run Signal-C: Connect App without an explicit workspace or agent-host target.")); }
+			const entrypoint = await this._fileDialogService.showOpenDialog({ title: localize('mcp.app.localEntrypoint', "Select the built MCP server JavaScript entrypoint"), canSelectFiles: true, canSelectFolders: false, canSelectMany: false, availableFileSystems: [Schemas.file], filters: [{ name: 'JavaScript', extensions: ['js', 'cjs', 'mjs'] }] });
+			if (entrypoint?.length !== 1 || entrypoint[0].scheme !== Schemas.file) { return undefined; }
+			const tokenStore = await this._fileDialogService.showOpenDialog({ title: localize('mcp.app.localTokenStore', "Select the private OAuth token-store file (its contents stay with the MCP server)"), canSelectFiles: true, canSelectFolders: false, canSelectMany: false, availableFileSystems: [Schemas.file] });
+			if (tokenStore?.length !== 1 || tokenStore[0].scheme !== Schemas.file) { return undefined; }
+			return { name: connection.id, localOnly: true, config: { type: McpServerType.LOCAL, command: connection.local.command, args: [entrypoint[0].fsPath], env: { [connection.local.tokenStoreVariable]: tokenStore[0].fsPath } } };
+		}
+		if (!connection.url) { throw new Error(localize('mcp.app.missingUrl', "This app has no published MCP server endpoint.")); }
+		let clientId: string | undefined;
+		if (connection.clientIdRequired) {
+			clientId = await this._quickInputService.input({
+				title: localize('mcp.app.clientId.title', "{0} OAuth App Client ID", connection.name),
+				prompt: localize('mcp.app.clientId.prompt', "Enter your registered app's public client ID. Client secrets and account tokens belong in the MCP credential store, not this field."),
+				ignoreFocusLost: true,
+				validateInput: async value => !value.trim() || value.length > 2048 || /\s|[\u0000-\u001f\u007f]/.test(value.trim()) ? localize('mcp.app.clientId.invalid', "Enter a public OAuth client ID without spaces or control characters (up to 2048 characters).") : undefined,
+			});
+			if (!clientId?.trim()) { return undefined; }
+		}
+		return {
+			name: connection.id,
+			config: { type: McpServerType.REMOTE, transport: 'http', url: connection.url, ...(connection.headers ? { headers: { ...connection.headers } } : {}), ...(clientId ? { oauth: { clientId: clientId.trim() } } : {}) },
+		};
 	}
 
 	private async getStdioConfig(): Promise<IMcpStdioServerConfiguration | undefined> {
@@ -543,9 +601,9 @@ export class McpAddConfigurationCommand {
 		}
 	}
 
-	public async run(): Promise<void> {
+	public async run(connectApp = false): Promise<void> {
 		// Step 1: Choose server type
-		const serverType = await this.getServerType();
+		const serverType = connectApp ? AddConfigurationType.App : await this.getServerType();
 		if (serverType === undefined) {
 			return;
 		}
@@ -557,6 +615,13 @@ export class McpAddConfigurationCommand {
 		let inputValues: Record<string, string> | undefined;
 		let destination: McpSetupDestination | undefined;
 		switch (serverType) {
+			case AddConfigurationType.App: {
+				const app = await this.getAppConfig();
+				config = app?.config;
+				suggestedName = app?.name;
+				if (app?.localOnly) { destination = { installTarget: { kind: 'local', target: ConfigurationTarget.USER_LOCAL }, format: McpResourceFormat.Vscode }; }
+				break;
+			}
 			case AddConfigurationType.Stdio:
 				config = await this.getStdioConfig();
 				break;
@@ -596,7 +661,9 @@ export class McpAddConfigurationCommand {
 		}
 
 		// Step 3: Get server ID
-		const name = await this.getServerId(suggestedName);
+		// A second app connection should not silently replace a same-named manual or account connection.
+		const suggestion = serverType === AddConfigurationType.App && suggestedName ? `${suggestedName}-${generateUuid().slice(0, 8)}` : suggestedName;
+		const name = await this.getServerId(suggestion);
 		if (!name) {
 			return;
 		}

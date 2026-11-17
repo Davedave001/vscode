@@ -17,6 +17,7 @@ import { mock, upcastDeepPartial, upcastPartial } from '../../../../../base/test
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IRange, Range } from '../../../../../editor/common/core/range.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { IDialogService, IFileDialogService, IPrompt } from '../../../../../platform/dialogs/common/dialogs.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ContextKeyValue } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -49,7 +50,8 @@ import { ChatContextKeys } from '../../../chat/common/actions/chatContextKeys.js
 import { AICustomizationManagementCommands, AICustomizationManagementSection } from '../../../chat/common/aiCustomizationWorkspaceService.js';
 import { SessionType } from '../../../chat/common/chatSessionsService.js';
 import { TEXT_FILE_EDITOR_ID } from '../../../files/common/files.js';
-import { AddConfigurationAction, OpenRemoteUserMcpResourceCommand, OpenUserMcpResourceCommand, OpenWorkspaceFolderMcpResourceCommand } from '../../browser/mcpCommands.js';
+import { AddConfigurationAction, ConnectAppAction, OpenRemoteUserMcpResourceCommand, OpenUserMcpResourceCommand, OpenWorkspaceFolderMcpResourceCommand } from '../../browser/mcpCommands.js';
+import { signalCAppConnections } from '../../common/signalCAppConnections.js';
 import { McpConfigurationDestination } from '../../browser/mcpConfigurationDestination.js';
 import { getContextMenuActions, InstallAction, InstallInRemoteAction, InstallInWorkspaceAction, ShowServerJsonConfigurationAction } from '../../browser/mcpServerActions.js';
 import { mcpWorkspaceRootConfig } from '../../common/mcpConfiguration.js';
@@ -65,6 +67,7 @@ class TestQuickInputService extends mock<IQuickInputService>() {
 	readonly pickLabels: string[][] = [];
 	readonly questionOrder: string[] = [];
 	readonly prompts: (string | undefined)[] = [];
+	readonly inputOptions: (IInputOptions | undefined)[] = [];
 	readonly pickOptions: { placeholder?: string; descriptions: (string | undefined)[]; details: (string | undefined)[] }[] = [];
 
 	override pick<T extends IQuickPickItem>(picks: Promise<QuickPickInput<T>[]> | QuickPickInput<T>[], options?: IPickOptions<T> & { canPickMany: true }, token?: CancellationToken): Promise<T[] | undefined>;
@@ -87,10 +90,12 @@ class TestQuickInputService extends mock<IQuickInputService>() {
 	}
 
 	override async input(options?: IInputOptions): Promise<string | undefined> {
+		this.inputOptions.push(options);
 		this.prompts.push(options?.title);
 		this.questionOrder.push('input');
 		assert.ok(this.inputs.length, 'Unexpected input');
-		return this.inputs.shift();
+		const value = this.inputs.shift();
+		return value === '$suggested' ? options?.value : value;
 	}
 }
 
@@ -114,6 +119,8 @@ suite('MCP configuration entry points', () => {
 		const opened: URI[] = [];
 		const selections: (IRange | undefined)[] = [];
 		const started: string[] = [];
+		const appDialogs: IPrompt<unknown>[] = [];
+		const chosenFiles: (URI[] | undefined)[] = [];
 		const errors: Parameters<INotificationService['error']>[0][] = [];
 		const existenceChecks: string[] = [];
 		const installs: { server: IInstallableMcpServer; options: IWorkbencMcpServerInstallOptions | undefined }[] = [];
@@ -124,6 +131,14 @@ suite('MCP configuration entry points', () => {
 
 		instantiation.stub(IConfigurationService, new TestConfigurationService({ [mcpWorkspaceRootConfig]: enabled }));
 		instantiation.stub(IQuickInputService, quickInput);
+		instantiation.stub(IFileDialogService, { showOpenDialog: async () => { assert.ok(chosenFiles.length, 'Unexpected file picker'); return chosenFiles.shift(); } });
+		instantiation.stub(IDialogService, {
+			prompt: async prompt => {
+				appDialogs.push(prompt);
+				const choice = await quickInput.pick((prompt.buttons ?? []).map(button => ({ label: button.label, button })), { canPickMany: false });
+				return { result: choice ? await choice.button.run({}) : undefined };
+			},
+		});
 		instantiation.stub(IWorkspaceContextService, {
 			getWorkspace: () => workspace,
 			getWorkspaceFolder: resource => workspace.getFolder(resource),
@@ -206,8 +221,173 @@ suite('MCP configuration entry points', () => {
 				return upcastPartial<IWorkbenchMcpServer>({ id: local.id, name: local.name, local });
 			},
 		});
-		return { instantiation, quickInput, folder, secondFolder, workspace, opened, selections, started, errors, existenceChecks, installs, agentHostAdds, agentHostGlobalAdds, servers, runtimeServer, destination: instantiation.createInstance(McpConfigurationDestination) };
+		return { instantiation, quickInput, appDialogs, chosenFiles, folder, secondFolder, workspace, opened, selections, started, errors, existenceChecks, installs, agentHostAdds, agentHostGlobalAdds, servers, runtimeServer, destination: instantiation.createInstance(McpConfigurationDestination) };
 	}
+
+	test('app connections install through the existing MCP management and start flow', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('Notion', 'Connect with OAuth', 'Global');
+		fixture.quickInput.inputs.push('notion');
+		await new ConnectAppAction().run(fixture.instantiation);
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.installs.length, 1);
+		assert.deepStrictEqual(fixture.installs[0], {
+			server: { name: 'notion', config: { type: McpServerType.REMOTE, transport: 'http', url: 'https://mcp.notion.com/mcp' }, inputs: undefined },
+			options: { target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined },
+		});
+		assert.deepStrictEqual(fixture.started, ['installed:/user/mcp.json']);
+		assert.ok(fixture.quickInput.pickOptions[0].placeholder?.includes('review setup'));
+	});
+
+	test('registered OAuth apps store only a public registered client ID', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('Asana', 'Connect with OAuth', 'Global');
+		fixture.quickInput.inputs.push('  public-client-id  ', 'asana');
+		await new ConnectAppAction().run(fixture.instantiation);
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.installs.length, 1);
+		assert.deepStrictEqual(fixture.installs[0].server.config, {
+			type: McpServerType.REMOTE, transport: 'http', url: 'https://mcp.asana.com/v2/mcp', oauth: { clientId: 'public-client-id' },
+		});
+		assert.ok(String(fixture.appDialogs[0].detail).includes('Asana MCP OAuth app'));
+		assert.strictEqual(fixture.appDialogs[0].custom, true);
+		assert.ok(fixture.quickInput.prompts.includes('Asana OAuth App Client ID'));
+		assert.strictEqual(fixture.quickInput.questionOrder.filter(item => item === 'input').length, 2);
+		const validateClientId = fixture.quickInput.inputOptions[0]?.validateInput;
+		assert.ok(validateClientId);
+		assert.strictEqual(await validateClientId('public-client-id'), undefined);
+		assert.ok(await validateClientId(''));
+		assert.ok(await validateClientId('two words'));
+		assert.ok(await validateClientId('client\u0000id'));
+		assert.ok(await validateClientId('x'.repeat(2049)));
+	});
+
+	test('repeated app setup suggests distinct names to preserve existing connections', async () => {
+		const fixture = setup(true);
+		for (let index = 0; index < 2; index++) {
+			fixture.quickInput.selections.push('Notion', 'Connect with OAuth', 'Global');
+			fixture.quickInput.inputs.push('$suggested');
+			await new ConnectAppAction().run(fixture.instantiation);
+		}
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.installs.length, 2);
+		assert.ok(fixture.installs.every(install => install.server.name.startsWith('notion-')));
+		assert.notStrictEqual(fixture.installs[0].server.name, fixture.installs[1].server.name);
+	});
+
+	test('QuickBooks hosted pilot cannot install while its metadata is incompatible', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('QuickBooks Online (Hosted Pilot)', undefined);
+		await new ConnectAppAction().run(fixture.instantiation);
+		assert.deepStrictEqual(fixture.quickInput.pickLabels[1], ['Open Setup Guide']);
+		assert.ok(String(fixture.appDialogs[0].detail).includes('invitation-only pilot'));
+		assert.ok(String(fixture.appDialogs[0].detail).includes('currently unavailable in Signal-C'));
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.quickInput.inputs, []);
+	});
+
+	test('QuickBooks local configuration retains only paths and stays on the local machine', async () => {
+		const fixture = setup(true, [], false, true);
+		const entrypoint = URI.file('/official-quickbooks/dist/index.js');
+		const tokenStore = URI.file('/private/quickbooks/company.env');
+		fixture.chosenFiles.push([entrypoint], [tokenStore]);
+		fixture.quickInput.selections.push('QuickBooks Online (Local Server)', 'Connect Local Server');
+		fixture.quickInput.inputs.push('quickbooks-local');
+		await new ConnectAppAction().run(fixture.instantiation);
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.deepStrictEqual(fixture.installs.map(install => ({ config: install.server.config, options: install.options })), [{
+			config: { type: McpServerType.LOCAL, command: 'node', args: [entrypoint.fsPath], env: { QUICKBOOKS_TOKEN_STORE_PATH: tokenStore.fsPath } },
+			options: { target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined },
+		}]);
+		assert.deepStrictEqual(fixture.agentHostAdds, []);
+		assert.deepStrictEqual(fixture.agentHostGlobalAdds, []);
+		assert.deepStrictEqual(fixture.existenceChecks, []);
+	});
+
+	for (const stage of ['entrypoint', 'tokenStore']) {
+		test(`cancelling QuickBooks local ${stage} selection never installs a server`, async () => {
+			const fixture = setup(true);
+			fixture.quickInput.selections.push('QuickBooks Online (Local Server)', 'Connect Local Server');
+			if (stage === 'tokenStore') { fixture.chosenFiles.push([URI.file('/official/index.js')]); }
+			fixture.chosenFiles.push(undefined);
+			await new ConnectAppAction().run(fixture.instantiation);
+			assert.deepStrictEqual({ installs: fixture.installs, adds: fixture.agentHostAdds, errors: fixture.errors }, { installs: [], adds: [], errors: [] });
+		});
+	}
+
+	test('QuickBooks local setup refuses an explicit remote owner before collecting paths', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('QuickBooks Online (Local Server)', 'Connect Local Server');
+		await new ConnectAppAction().run(fixture.instantiation, agentHostSession);
+		assert.strictEqual(fixture.errors.length, 1);
+		assert.ok(String(fixture.errors[0]).includes('local user configuration'));
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.agentHostAdds, []);
+	});
+
+	test('opening an app setup guide does not install or start a server', async () => {
+		const fixture = setup(true);
+		const guides: string[] = [];
+		fixture.instantiation.stub(IOpenerService, { open: async resource => { guides.push(resource.toString()); return true; } });
+		fixture.quickInput.selections.push('QuickBooks Online (Hosted Pilot)', 'Open Setup Guide');
+		await new ConnectAppAction().run(fixture.instantiation);
+		assert.deepStrictEqual(guides, ['https://intuitdeveloper.github.io/intuit-3p-ai-pilot/']);
+		assert.deepStrictEqual({ installs: fixture.installs, adds: fixture.agentHostAdds, started: fixture.started, errors: fixture.errors }, { installs: [], adds: [], started: [], errors: [] });
+	});
+
+	for (const stage of ['app', 'review', 'clientId', 'name', 'destination']) {
+		test(`cancelling app connection at ${stage} leaves configuration untouched`, async () => {
+			const fixture = setup(true);
+			if (stage === 'app') { fixture.quickInput.selections.push(undefined); }
+			else {
+				fixture.quickInput.selections.push(stage === 'clientId' ? 'Asana' : 'Notion', stage === 'review' ? undefined : 'Connect with OAuth');
+				if (stage === 'clientId' || stage === 'name') { fixture.quickInput.inputs.push(undefined); }
+				if (stage === 'destination') { fixture.quickInput.inputs.push('notion'); fixture.quickInput.selections.push(undefined); }
+			}
+			await new ConnectAppAction().run(fixture.instantiation);
+			assert.deepStrictEqual({ installs: fixture.installs, adds: fixture.agentHostAdds, global: fixture.agentHostGlobalAdds, started: fixture.started, errors: fixture.errors }, { installs: [], adds: [], global: [], started: [], errors: [] });
+		});
+	}
+
+	test('manual Add Server also exposes the app connection flow', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('Connect an App (OAuth)...', 'Linear', 'Connect with OAuth', 'Global');
+		fixture.quickInput.inputs.push('linear');
+		await new AddConfigurationAction().run(fixture.instantiation);
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.installs[0].server.name, 'linear');
+		assert.strictEqual(fixture.installs[0].server.config.type, McpServerType.REMOTE);
+	});
+
+	test('app connections preserve explicit agent-host ownership and policy checks', async () => {
+		for (const blocked of [false, true]) {
+			const fixture = setup(true);
+			const selected = URI.parse('remote-example:/chosen-host?revision=4');
+			if (blocked) { fixture.instantiation.stub(IAllowedMcpServersService, { isAllowed: () => new MarkdownString('App blocked by policy') }); }
+			fixture.quickInput.selections.push('Notion', 'Connect with OAuth', 'Agent Host');
+			fixture.quickInput.inputs.push('notion');
+			await new ConnectAppAction().run(fixture.instantiation, selected);
+			assert.deepStrictEqual(fixture.installs, []);
+			assert.strictEqual(fixture.agentHostAdds.length, blocked ? 0 : 1);
+			assert.deepStrictEqual(fixture.errors.map(String), blocked ? ['Error: App blocked by policy'] : []);
+			if (!blocked) { assert.strictEqual(fixture.agentHostAdds[0].session.toString(), selected.toString()); }
+		}
+	});
+
+	test('app presets contain public HTTPS endpoints and no account credentials', () => {
+		const ids = new Set<string>();
+		for (const app of signalCAppConnections) {
+			assert.ok(!ids.has(app.id), `Duplicate app ID: ${app.id}`);
+			ids.add(app.id);
+			assert.notStrictEqual(!!app.url, !!app.local, 'Each app has exactly one remote or local transport');
+			for (const value of [app.url, app.documentation].filter((value): value is string => typeof value === 'string')) {
+				const url = new URL(value);
+				assert.strictEqual(url.protocol, 'https:');
+				assert.strictEqual(url.username + url.password + url.search + url.hash, '');
+			}
+			assert.ok(!Object.keys(app.headers ?? {}).some(header => /authorization|token|secret/i.test(header)));
+		}
+	});
 
 	for (const enabled of [false, true]) {
 		for (const hasRoot of [false, true]) {

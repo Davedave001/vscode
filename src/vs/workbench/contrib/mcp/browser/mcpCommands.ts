@@ -1155,17 +1155,17 @@ export class ResetMcpCachedTools extends Action2 {
 }
 
 export class AddConfigurationAction extends Action2 {
-	constructor() {
+	constructor(private readonly connectApp = false) {
 		super({
-			id: McpCommandIds.AddConfiguration,
-			title: localize2('mcp.addConfiguration', "Add Server..."),
+			id: connectApp ? McpCommandIds.ConnectApp : McpCommandIds.AddConfiguration,
+			title: connectApp ? localize2('mcp.connectApp', "Connect App...") : localize2('mcp.addConfiguration', "Add Server..."),
 			metadata: {
 				description: localize2('mcp.addConfiguration.description', "Adds a Model Context Protocol server to an agent host or MCP configuration file"),
 			},
-			category,
+			category: connectApp ? localize2('signalC.category', "Signal-C") : category,
 			f1: true,
 			precondition: ContextKeyExpr.and(ChatContextKeys.Setup.hidden.negate(), ChatContextKeys.Setup.disabledInWorkspace.negate()),
-			menu: {
+			menu: connectApp ? undefined : {
 				id: MenuId.EditorContent,
 				when: ContextKeyExpr.and(
 					ContextKeyExpr.or(
@@ -1190,13 +1190,17 @@ export class AddConfigurationAction extends Action2 {
 			if (configUri !== undefined && target === undefined) {
 				return;
 			}
-			await instantiationService.createInstance(McpAddConfigurationCommand, target).run();
+			await instantiationService.createInstance(McpAddConfigurationCommand, target).run(this.connectApp);
 		} catch (error) {
 			if (!isCancellationError(error)) {
 				notificationService.error(error);
 			}
 		}
 	}
+}
+
+export class ConnectAppAction extends AddConfigurationAction {
+	constructor() { super(true); }
 }
 
 export class InstallFromManifestAction extends Action2 {

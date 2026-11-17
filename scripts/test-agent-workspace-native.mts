@@ -20,8 +20,9 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string; args: string[] } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, or --keyboard');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, or --app-connections');
 const keyboard = process.argv.includes('--keyboard');
+const appConnections = process.argv.includes('--app-connections');
 const workspaceProtocol = process.argv.includes('--workspace-protocol');
 const protocol = workspaceProtocol || process.argv.includes('--protocol');
 const conversation = protocol || process.argv.includes('--conversation');
@@ -60,6 +61,7 @@ const report = {
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
 	modelRequestCount: 0,
+	appPickerVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
 try {
@@ -161,6 +163,38 @@ try {
 		}
 		return logs;
 	};
+	const checkAppConnections = async (page: Page) => {
+		stage = 'native app connections';
+		const paths = [join(profile, 'User/mcp.json'), join(profile, 'User/profiles/builtin/agents/mcp.json'), join(run, 'copilot/mcp-config.json'), ...folders.flatMap(folder => [join(folder, '.mcp.json'), join(folder, '.vscode/mcp.json')])];
+		const readConfigurations = () => Promise.all(paths.map(file => readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') { return undefined; } throw error; })));
+		const before = await readConfigurations();
+		await page.getByRole('switch', { name: 'IDE mode', exact: true }).focus();
+		await page.keyboard.press('Control+Shift+P');
+		const input = page.locator('.quick-input-widget input').first();
+		await input.fill('>Signal-C: Connect App');
+		await page.getByRole('option').filter({ hasText: 'Signal-C: Connect App' }).waitFor();
+		await input.press('Enter');
+		await page.getByText('Signal-C App Connections', { exact: true }).waitFor();
+		await input.fill('QuickBooks');
+		await page.getByText('QuickBooks Online (Local Server)', { exact: true }).waitFor();
+		const hosted = page.getByRole('option').filter({ has: page.getByText('QuickBooks Online (Hosted Pilot)', { exact: true }) });
+		await hosted.waitFor();
+		report.appPickerVerified = true;
+		await hosted.click();
+		const review = page.getByRole('dialog').filter({ hasText: 'Connect QuickBooks Online' });
+		await review.waitFor();
+		assert.ok((await review.innerText()).includes('invitation-only pilot'));
+		assert.ok((await review.innerText()).includes('subscription alone'));
+		assert.ok((await review.innerText()).includes('currently unavailable in Signal-C'));
+		assert.equal(await review.getByRole('button', { name: 'Connect with OAuth', exact: true }).count(), 0);
+		report.quickBooksRequirementsVerified = true;
+		await capture(page, 'app-connections-quickbooks.png');
+		await page.keyboard.press('Escape');
+		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		assert.deepEqual(await readConfigurations(), before, 'Cancelled app setup must not modify any fixture MCP configuration');
+		report.appSetupCancellationVerified = true;
+		await checkWindows(stage);
+	};
 	const activateSwitch = async (page: Page, roundTrip: number, sourceInput: Locator) => {
 		const control = page.getByRole('switch', { name: 'IDE mode', exact: true });
 		if (!keyboard) { await control.click(); return; }
@@ -187,6 +221,7 @@ try {
 		const agents = await launched.firstWindow({ timeout: 30000 });
 		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
 		await agents.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor();
+		if (appConnections) { await checkAppConnections(agents); }
 		let input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
 		const draft = 'Signal-C folderless draft preserved across mode switches';
 		await input.click(); await agents.keyboard.type(draft);
@@ -371,6 +406,7 @@ try {
 		stage = 'native IDE';
 		await ide.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
 		await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
+		if (appConnections) { await checkAppConnections(ide); }
 		await checkWindows('IDE ready');
 		const marker = '// Signal-C native unsaved buffer';
 		await ide.locator('body').click({ position: { x: 600, y: 400 } });

@@ -8,6 +8,7 @@
  */
 export const enum McpCommandIds {
 	AddConfiguration = 'workbench.mcp.addConfiguration',
+	ConnectApp = 'workbench.mcp.connectApp',
 	Browse = 'workbench.mcp.browseServers',
 	InstallFromManifest = 'workbench.mcp.installFromManifest',
 	BrowsePage = 'workbench.mcp.browseServersPage',
