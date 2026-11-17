@@ -305,7 +305,7 @@ suite('Devin Subscription Agent', () => {
 		assert.strictEqual(f.launches.length, 1);
 	});
 
-	test('forces an unresponsive stopped client closed and resumes the same conversation on the next turn', async () => {
+	test('a follow-up submitted during force-stop waits and resumes the same conversation', async () => {
 		const f = fixture();
 		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
 		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd], model: { id: 'swe-2-high' } });
@@ -319,16 +319,18 @@ suite('Devin Subscription Agent', () => {
 			const stopped = f.agent.chats.sendMessage(chat, 'stopped', [cwd], undefined, 'stopped-turn').then(() => undefined, error => error);
 			await started.p;
 			const history = await f.agent.chats.getMessages(chat, owner);
+			const stoppedTurn = history[0];
 			await f.agent.chats.abort(chat, owner);
+			f.onPrompt = undefined;
+			const followUp = f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'retry-turn').then(() => undefined, error => error);
 			await clock.tickAsync(2001);
 			assert.ok(isCancellationError(await stopped));
-			assert.strictEqual(history[0].state, TurnState.Cancelled);
-			const tool = history[0].responseParts[0];
+			assert.strictEqual(stoppedTurn.state, TurnState.Cancelled);
+			const tool = stoppedTurn.responseParts[0];
 			assert.ok(tool.kind === ResponsePartKind.ToolCall && tool.toolCall.status === ToolCallStatus.Completed);
 			assert.strictEqual(tool.toolCall.success, false);
 			assert.deepStrictEqual(tool.toolCall.content, [{ type: ToolResultContentType.Text, text: 'partial content' }]);
-			f.onPrompt = undefined;
-			await f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'retry-turn');
+			assert.strictEqual(await followUp, undefined);
 			assert.strictEqual(f.launches.length, 2);
 			assert.deepStrictEqual(f.launches[1].args, ['acp', '--model', 'swe-2-high']);
 			const requests = f.transports[1].sent;
@@ -337,6 +339,120 @@ suite('Devin Subscription Agent', () => {
 			assert.strictEqual(requests.filter(message => message.method === 'session/prompt').length, 1);
 		} finally { clock.restore(); }
 	});
+
+	test('a follow-up waits for graceful cancellation and is sent exactly once', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const started = new DeferredPromise<{ transport: TestAcpTransport; request: Record<string, unknown> }>();
+		f.onPrompt = (transport, request) => { void started.complete({ transport, request }); };
+		const first = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn');
+		const { transport, request } = await started.p;
+		await f.agent.chats.abort(chat, owner);
+		f.onPrompt = undefined;
+		const second = f.agent.chats.sendMessage(chat, 'second', [cwd], undefined, 'second-turn').then(() => undefined, error => error);
+		await assert.rejects(f.agent.chats.sendMessage(chat, 'competing', [cwd], undefined, 'competing-turn'), /turn is already running/);
+		assert.strictEqual(transport.sent.filter(message => message.method === 'session/prompt').length, 1);
+		transport.reply(request, { stopReason: 'cancelled' });
+		await first;
+		assert.strictEqual(await second, undefined);
+		const prompts = transport.sent.filter(message => message.method === 'session/prompt');
+		assert.strictEqual(prompts.length, 2);
+		assert.deepStrictEqual(prompts[1].params, { sessionId: 'native', prompt: [{ type: 'text', text: 'second' }] });
+		assert.strictEqual(f.launches.length, 1);
+	});
+
+	test('Stop can cancel a follow-up waiting behind the previous cancellation', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const started = new DeferredPromise<void>();
+			f.onPrompt = () => { void started.complete(); };
+			const first = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn').then(() => undefined, error => error);
+			await started.p;
+			await f.agent.chats.abort(chat, owner);
+			f.onPrompt = undefined;
+			const second = f.agent.chats.sendMessage(chat, 'cancel this too', [cwd], undefined, 'second-turn').then(() => undefined, error => error);
+			await f.agent.chats.abort(chat, owner);
+			await clock.tickAsync(2001);
+			assert.ok(isCancellationError(await first));
+			assert.ok(isCancellationError(await second));
+			assert.strictEqual(f.launches.length, 1);
+			await f.agent.chats.sendMessage(chat, 'third', [cwd], undefined, 'third-turn');
+			assert.strictEqual(f.launches.length, 2);
+			const prompts = f.transports.flatMap(transport => transport.sent.filter(message => message.method === 'session/prompt'));
+			assert.strictEqual(prompts.length, 2);
+			assert.deepStrictEqual(prompts[1].params, { sessionId: 'native', prompt: [{ type: 'text', text: 'third' }] });
+		} finally { clock.restore(); }
+	});
+
+	test('a third explicit send stays behind both cancelled operations until cleanup finishes', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const started = new DeferredPromise<void>();
+			f.onPrompt = () => { void started.complete(); };
+			const first = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn').then(() => undefined, error => error);
+			await started.p;
+			await f.agent.chats.abort(chat, owner);
+			const second = f.agent.chats.sendMessage(chat, 'cancel this too', [cwd], undefined, 'second-turn').then(() => undefined, error => error);
+			await f.agent.chats.abort(chat, owner);
+			f.onPrompt = undefined;
+			const third = f.agent.chats.sendMessage(chat, 'third', [cwd], undefined, 'third-turn').then(() => undefined, error => error);
+			await clock.tickAsync(1999);
+			assert.strictEqual(f.launches.length, 1);
+			assert.strictEqual(f.transports[0].sent.filter(message => message.method === 'session/prompt').length, 1);
+			await clock.tickAsync(2);
+			assert.ok(isCancellationError(await first));
+			assert.ok(isCancellationError(await second));
+			assert.strictEqual(await third, undefined);
+			assert.strictEqual(f.launches.length, 2);
+			assert.deepStrictEqual(f.transports[1].sent.find(message => message.method === 'session/prompt')?.params, { sessionId: 'native', prompt: [{ type: 'text', text: 'third' }] });
+		} finally { clock.restore(); }
+	});
+
+	test('a history read during failed-turn cleanup does not start a competing replay', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const started = new DeferredPromise<void>();
+		f.onPrompt = () => { void started.complete(); };
+		const send = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn').then(() => undefined, error => error);
+		await started.p;
+		f.transports[0].close();
+		const history = f.agent.chats.getMessages(chat, owner);
+		assert.strictEqual(f.launches.length, 1);
+		assert.strictEqual((await history)[0].id, 'first-turn');
+		assert.ok((await send) instanceof Error);
+	});
+
+	for (const invalidation of ['release', 'dispose', 'signOut', 'accountChanged', 'shutdown'] as const) {
+		test(`${invalidation} prevents a waiting follow-up from starting`, async () => {
+			const f = fixture();
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			const started = new DeferredPromise<void>();
+			f.onPrompt = () => { void started.complete(); };
+			const first = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn').then(() => undefined, error => error);
+			await started.p;
+			await f.agent.chats.abort(chat, owner);
+			f.onPrompt = undefined;
+			const second = f.agent.chats.sendMessage(chat, 'stale follow-up', [cwd], undefined, 'second-turn').then(() => undefined, error => error);
+			if (invalidation === 'release') { await f.agent.chats.releaseChat(chat, owner); }
+			else if (invalidation === 'dispose') { await f.agent.chats.disposeChat(chat, owner); }
+			else if (invalidation === 'signOut') { await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, ''); }
+			else if (invalidation === 'accountChanged') { await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'replacement-account-token'); }
+			else { await f.agent.shutdown(); }
+			assert.ok(isCancellationError(await first));
+			assert.ok(isCancellationError(await second));
+			assert.strictEqual(f.launches.length, 1);
+			assert.strictEqual(f.transports[0].sent.filter(message => message.method === 'session/prompt').length, 1);
+		});
+	}
 
 	test('a competing send or model change cannot change the workspace while a turn prepares', async () => {
 		const f = fixture();

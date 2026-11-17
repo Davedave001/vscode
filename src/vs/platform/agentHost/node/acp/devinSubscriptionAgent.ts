@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { execFile, spawn } from 'child_process';
+import { DeferredPromise } from '../../../../base/common/async.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { CancellationError } from '../../../../base/common/errors.js';
@@ -41,6 +42,12 @@ interface ITool {
 	confirmed: ToolCallConfirmationReason;
 }
 
+interface ISendOperation {
+	readonly finished: DeferredPromise<void>;
+	cancelled: boolean;
+	waiting: boolean;
+}
+
 interface IChat {
 	readonly chat: URI;
 	cwd: URI;
@@ -52,6 +59,7 @@ interface IChat {
 	readonly history: Turn[];
 	readonly tools: Map<string, ITool>;
 	activeTurn?: Turn;
+	send?: ISendOperation;
 	preparing?: boolean;
 	aborting?: boolean;
 	textPart?: MarkdownResponsePart;
@@ -153,7 +161,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (resource !== DEVIN_SUBSCRIPTION_RESOURCE) { return false; }
 		if (this.token !== (token || undefined)) {
 			this.authRevision++;
-			for (const chat of this.records.values()) { this.release(chat); }
+			for (const chat of this.records.values()) { this.cancelSendAndRelease(chat); }
 			this.token = token || undefined;
 			this.models.set([], undefined);
 			this.catalogIds = new Set();
@@ -185,57 +193,62 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			this.createRecord(chat, directories[0], options?.model);
 			return { provisional: true, resolvedWorkingDirectory: directories[0] };
 		},
-		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.release(record); record.store.dispose(); this.records.delete(chat.toString()); } },
-		releaseChat: async chat => { this.release(this.record(chat)); },
+		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.store.dispose(); this.records.delete(chat.toString()); } },
+		releaseChat: async chat => { this.cancelSendAndRelease(this.record(chat)); },
 		sendMessage: async (chat, prompt, directories, attachments, turnId, _sender, clientTypeOrContext, context) => {
 			if (!turnId) { throw new Error('A host turn id is required.'); }
 			const record = this.record(chat);
-			if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
-			record.preparing = true;
-			record.aborting = false;
-			try {
-				const folders = URI.isUri(directories) ? [directories] : directories;
-				if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
-				if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
-				if (record.aborting) { throw new CancellationError(); }
-				await this.ensureSession(record);
-				if (record.aborting) { throw new CancellationError(); }
-				if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
-			} finally { record.preparing = false; }
-			const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
-			const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
-			const text = instructions?.length ? `${instructions.join('\n\n')}\n\n${prompt}` : prompt;
-			const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
-			const turn: Turn = { id: turnId, startedAt: new Date().toISOString(), message: { text: prompt, attachments: attachments ? [...attachments] : undefined, origin: { kind: MessageKind.User } }, responseParts: [], usage: undefined, state: TurnState.Complete };
-			record.activeTurn = turn;
-			record.history.push(turn);
-			record.tools.clear();
-			record.textPart = undefined;
-			const started = Date.now();
-			try {
-				const result = await record.client!.request('session/prompt', { sessionId: record.nativeId, prompt: content }, { timeoutMs: 0 });
-				const cancelled = record.aborting || isObject(result) && result.stopReason === 'cancelled';
-				turn.state = cancelled ? TurnState.Cancelled : TurnState.Complete;
-				this.cancelPermissions(record);
-				for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
-				record.modifiedAt = Date.now();
-				this.dataChanged.fire({ chat, providerData: this.providerData(record) });
-				this.fire(record, { type: ActionType.ChatTurnComplete, turnId, duration: Date.now() - started });
-			} catch (error) {
-				turn.state = record.aborting ? TurnState.Cancelled : TurnState.Error;
-				throw error;
-			} finally {
-				clearTimeout(record.forceStop);
-				record.forceStop = undefined;
-				this.cancelPermissions(record);
-				for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
-				record.activeTurn = undefined;
+			return this.runSend(record, async () => {
+				if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
+				record.preparing = true;
+				record.aborting = false;
+				try {
+					const folders = URI.isUri(directories) ? [directories] : directories;
+					if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
+					if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
+					if (record.aborting) { throw new CancellationError(); }
+					await this.ensureSession(record);
+					if (record.aborting) { throw new CancellationError(); }
+					if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
+				} finally { record.preparing = false; }
+				const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
+				const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
+				const text = instructions?.length ? `${instructions.join('\n\n')}\n\n${prompt}` : prompt;
+				const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
+				const turn: Turn = { id: turnId, startedAt: new Date().toISOString(), message: { text: prompt, attachments: attachments ? [...attachments] : undefined, origin: { kind: MessageKind.User } }, responseParts: [], usage: undefined, state: TurnState.Complete };
+				record.activeTurn = turn;
+				record.history.push(turn);
+				record.tools.clear();
 				record.textPart = undefined;
-			}
+				const started = Date.now();
+				try {
+					const result = await record.client!.request('session/prompt', { sessionId: record.nativeId, prompt: content }, { timeoutMs: 0 });
+					const cancelled = record.aborting || isObject(result) && result.stopReason === 'cancelled';
+					turn.state = cancelled ? TurnState.Cancelled : TurnState.Complete;
+					this.cancelPermissions(record);
+					for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
+					record.modifiedAt = Date.now();
+					this.dataChanged.fire({ chat, providerData: this.providerData(record) });
+					this.fire(record, { type: ActionType.ChatTurnComplete, turnId, duration: Date.now() - started });
+				} catch (error) {
+					turn.state = record.aborting ? TurnState.Cancelled : TurnState.Error;
+					throw error;
+				} finally {
+					clearTimeout(record.forceStop);
+					record.forceStop = undefined;
+					this.cancelPermissions(record);
+					for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
+					record.activeTurn = undefined;
+					record.textPart = undefined;
+				}
+			});
 		},
 		abort: async chat => {
 			const record = this.record(chat);
-			if ((!record.activeTurn && !record.preparing) || record.aborting) { return; }
+			const send = record.send;
+			if (!send || send.cancelled) { return; }
+			send.cancelled = true;
+			if (send.waiting) { return; }
 			record.aborting = true;
 			this.cancelPermissions(record);
 			if (record.preparing) { this.release(record); return; }
@@ -253,7 +266,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		},
 		changeModel: async (chat, model) => {
 			const record = this.record(chat);
-			if (record.activeTurn || record.preparing) { throw new Error('Wait for the current Devin turn before changing models.'); }
+			if (record.send || record.activeTurn || record.preparing) { throw new Error('Wait for the current Devin turn before changing models.'); }
 			if (!record.modelNeedsReconciliation && record.model?.id === model.id && equals(record.model.config ?? {}, model.config ?? {})) { return; }
 			if (record.nativeId && !record.client) { await this.ensureSession(record, false); }
 			if (record.client) { await this.applyModel(record, model); }
@@ -262,8 +275,30 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			if (record.nativeId) { this.dataChanged.fire({ chat, providerData: this.providerData(record) }); }
 		},
 		changeAgent: async (_chat, agent) => { if (agent) { throw new Error('Custom agent selection is not supported by Devin Subscription.'); } },
-		getMessages: async chat => { const record = this.record(chat); if (record.nativeId && !record.client) { await this.ensureSession(record); } return record.history; },
+		getMessages: async chat => {
+			const record = this.record(chat);
+			// A reconnecting turn owns replay; a history read must not race its cleanup.
+			if (record.nativeId && !record.client && !record.send) { await this.ensureSession(record); }
+			return record.history;
+		},
 	};
+
+	private async runSend(record: IChat, run: () => Promise<void>): Promise<void> {
+		const previous = record.send;
+		if (previous && !previous.cancelled) { throw new Error('A Devin turn is already running.'); }
+		const send: ISendOperation = { finished: new DeferredPromise<void>(), cancelled: false, waiting: true };
+		record.send = send;
+		try {
+			if (previous) { await previous.finished.p; }
+			if (send.cancelled || this._store.isDisposed || record.store.isDisposed || this.records.get(record.chat.toString()) !== record) { throw new CancellationError(); }
+			send.waiting = false;
+			await run();
+		} finally {
+			// A newer explicitly submitted turn can already own this slot.
+			if (record.send === send) { record.send = undefined; }
+			void send.finished.complete();
+		}
+	}
 
 	private createRecord(chat: URI, cwd: URI, model?: ModelSelection, createdAt = Date.now(), modifiedAt = createdAt): IChat {
 		if (this.records.has(chat.toString())) { throw new Error('Devin chat already exists.'); }
@@ -524,6 +559,10 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		pending.resolve({ outcome: { outcome: 'cancelled' } });
 	}
 	private fire(record: IChat, action: ChatAction): void { this.progress.fire({ kind: 'action', resource: record.chat, action }); }
+	private cancelSendAndRelease(record: IChat): void {
+		if (record.send) { record.send.cancelled = true; record.aborting = true; }
+		this.release(record);
+	}
 	private release(record: IChat): void { this.cancelPermissions(record); clearTimeout(record.forceStop); record.forceStop = undefined; record.store.clear(); record.client = undefined; record.replaying = false; }
 	getOrCreateActiveClient(_chat: URI, _context: Parameters<IAgent['getOrCreateActiveClient']>[1], client: { clientId: string; displayName?: string }): IActiveClient { return { clientId: client.clientId, displayName: client.displayName, tools: [], customizations: [] }; }
 	removeActiveClient(): void { }
@@ -538,6 +577,6 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const record = this.records.get(chat.toString()) ?? readPersistedChat(providerData);
 		return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, model: record.model, workingDirectories: [record.cwd], project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined;
 	}
-	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.release(record); } }
-	override dispose(): void { for (const record of this.records.values()) { this.release(record); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
+	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.cancelSendAndRelease(record); } }
+	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
 }
