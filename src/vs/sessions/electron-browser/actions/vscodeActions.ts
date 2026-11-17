@@ -103,9 +103,11 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 			if (folders.length > 1) { notifyUnsupportedWorkspace(); return; }
 			return nativeHostService.openWindow({ remoteAuthority: null });
 		}
+		// Keep the host's path formatter while labeling the same resolved path the editor will open.
+		const labelUri = folder.workingDirectory.scheme === AGENT_HOST_SCHEME ? folder.workingDirectory.with({ path: folderUri.path }) : folder.workingDirectory;
 		foldersToOpen.push({
 			folderUri,
-			label: folderUri.scheme === Schemas.vscodeRemote ? labelService.getWorkspaceLabel(folder.workingDirectory, { verbose: Verbosity.LONG }) : undefined,
+			label: folderUri.scheme === Schemas.vscodeRemote ? labelService.getWorkspaceLabel(labelUri, { verbose: Verbosity.LONG }) : undefined,
 		});
 	}
 	if (new Set(foldersToOpen.map(folder => folder.folderUri.scheme === Schemas.vscodeRemote ? `remote:${folder.folderUri.authority.toLowerCase()}` : 'local')).size > 1) {

@@ -461,9 +461,14 @@ suite('VS Code Actions', () => {
 			title: 'repository [Windows dev box]',
 		}]]);
 		calls.length = 0;
-		const uncFolder = toAgentHostUri(URI.from({ scheme: 'file', authority: 'fileserver', path: '/share/project # 100%' }), authority);
-		await instantiationService.invokeFunction(openSessionInVSCode, createSession('remote-unc', true, [uncFolder]));
-		assert.deepStrictEqual(calls.map(folders => folders.map(folder => folder.uri)), [[URI.from({ scheme: 'vscode-remote', authority: 'tunnel+my-tunnel', path: '//fileserver/share/project # 100%' })]]);
+		const servers = ['fileserver', 'other-server'];
+		const uncFolders = servers.map(server => toAgentHostUri(URI.from({ scheme: 'file', authority: server, path: '/share/project # 100%' }), authority));
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('remote-unc', true, uncFolders));
+		assert.deepStrictEqual(calls, [servers.map(server => ({
+			uri: URI.from({ scheme: 'vscode-remote', authority: 'tunnel+my-tunnel', path: '//' + server + '/share/project # 100%' }),
+			label: '\\\\' + server + '\\share\\project # 100% [Windows dev box]',
+			title: 'project # 100% [Windows dev box]',
+		}))]);
 	});
 
 	test('propagates a failure to open the fallback Editor window', async () => {
