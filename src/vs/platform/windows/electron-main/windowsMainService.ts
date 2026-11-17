@@ -924,6 +924,17 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			isRestoringPaths = true;
 		}
 
+		// A mode handoff can return to a multi-root editor that already contains its active folder.
+		if (openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && isCommandLineOrAPICall && pathsToOpen.length === 1) {
+			const folder = pathsToOpen[0];
+			if (isSingleFolderWorkspacePathToOpen(folder) && !findWindowOnWorkspaceOrFolder(this.getWindows(), folder.workspace.uri)) {
+				const workspace = await this.doGetOpenWorkspaceMatchingFolders(folder.remoteAuthority, [folder], true);
+				if (workspace) {
+					pathsToOpen = [{ workspace, remoteAuthority: folder.remoteAuthority }];
+				}
+			}
+		}
+
 		// Handle the case of multiple folders being opened from CLI while we are
 		// not in `--add` or `--remove` mode by creating an untitled workspace, only if:
 		// - they all share the same remote authority
@@ -1146,14 +1157,24 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return restoreWindows;
 	}
 
-	private async doGetWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspaceIdentifier | undefined> {
-		const match = await findWindowOnWorkspaceFolders(this.getWindows(), folders.map(folder => folder.workspace.uri), remoteAuthority, workspace => this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath));
+	private async doGetOpenWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], allowAdditionalFolders = false): Promise<IWorkspaceIdentifier | undefined> {
+		const windows = this.getWindows();
+		const candidates = allowAdditionalFolders ? [...windows].sort((a, b) => b.lastFocusTime - a.lastFocusTime) : windows;
+		const match = await findWindowOnWorkspaceFolders(candidates, folders.map(folder => folder.workspace.uri), remoteAuthority, workspace => this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath), allowAdditionalFolders);
 		// Preserve the validated identity across this await, rather than substituting a later navigation.
 		const current = match?.window.openedWorkspace;
 		if (match && this.getWindows().includes(match.window) && isWorkspaceIdentifier(current)
 			&& current.id === match.workspace.id && extUriBiasedIgnorePathCase.isEqual(current.configPath, match.workspace.configPath)
 			&& match.window.remoteAuthority === remoteAuthority && !match.window.isExtensionDevelopmentHost) {
 			return match.workspace;
+		}
+		return undefined;
+	}
+
+	private async doGetWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspaceIdentifier | undefined> {
+		const openWorkspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders);
+		if (openWorkspace) {
+			return openWorkspace;
 		}
 		// Preserve the previous-session fallback when no currently open workspace matches.
 		const workspaces = (await this.doGetPathsFromLastSession()).filter(path => isWorkspacePathToOpen(path));

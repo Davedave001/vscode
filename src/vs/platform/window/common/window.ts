@@ -59,6 +59,8 @@ export interface IBaseOpenWindowsOptions {
 export interface IOpenWindowOptions extends IBaseOpenWindowsOptions {
 	readonly forceNewWindow?: boolean;
 	readonly preferNewWindow?: boolean;
+	/** Reuse an open workspace containing the requested folder for an Agents/IDE handoff. */
+	readonly reuseWorkspaceContainingFolder?: boolean;
 
 	readonly noRecentEntry?: boolean;
 

@@ -105,6 +105,7 @@ export interface IOpenConfiguration extends IBaseOpenConfiguration {
 	readonly urisToOpen?: IWindowOpenable[];
 	readonly waitMarkerFileURI?: URI;
 	readonly preferNewWindow?: boolean;
+	readonly reuseWorkspaceContainingFolder?: boolean;
 	readonly forceNewWindow?: boolean;
 	readonly forceNewTabbedWindow?: boolean;
 	readonly forceReuseWindow?: boolean;

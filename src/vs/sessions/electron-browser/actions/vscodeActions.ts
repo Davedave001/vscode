@@ -107,7 +107,7 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	if (typeof editorChatSession === 'string') {
 		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession);
 	}
-	return nativeHostService.openWindow(foldersToOpen, { forceNewWindow: true, chatSessionToOpen: URI.isUri(editorChatSession) ? editorChatSession : undefined });
+	return nativeHostService.openWindow(foldersToOpen, { forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: URI.isUri(editorChatSession) ? editorChatSession : undefined });
 }
 
 export class OpenVSCodeWindowAction extends Action2 {

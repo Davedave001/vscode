@@ -129,6 +129,18 @@ suite('WindowsFinder', () => {
 		].map(match => match?.window), [workspaceWindow, workspaceWindow]);
 	});
 
+	test('Allows a workspace member only when the handoff explicitly permits additional roots', async () => {
+		const workspaceWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
+		const member = testWorkspaceFolders[0].uri;
+		assert.deepStrictEqual([
+			await findWindowOnWorkspaceFolders([workspaceWindow], [member], undefined, localWorkspaceResolver),
+			await findWindowOnWorkspaceFolders([workspaceWindow], [member], undefined, localWorkspaceResolver, true),
+			await findWindowOnWorkspaceFolders([workspaceWindow], [URI.file('/unrelated')], undefined, localWorkspaceResolver, true),
+			await findWindowOnWorkspaceFolders([workspaceWindow], [member.with({ path: `${member.path}/nested` })], undefined, localWorkspaceResolver, true),
+			await findWindowOnWorkspaceFolders([workspaceWindow], [], undefined, localWorkspaceResolver, true),
+		].map(match => match?.window), [undefined, workspaceWindow, undefined, undefined, undefined]);
+	});
+
 	test('Returns the validated workspace identity instead of rereading a later window navigation', async () => {
 		let currentWorkspace = testWorkspace;
 		const window = upcastPartial<ICodeWindow>({
@@ -171,7 +183,9 @@ suite('WindowsFinder', () => {
 		assert.deepStrictEqual([
 			workspaceMatchesFolders(workspace, [folderUris[0].with({ path: '/repo' }), folderUris[1]], remoteAuthority),
 			workspaceMatchesFolders(workspace, folderUris, remoteAuthority),
-		], [false, true]);
+			workspaceMatchesFolders(workspace, [folderUris[0].with({ path: '/repo' })], remoteAuthority, true),
+			workspaceMatchesFolders(workspace, [folderUris[0]], remoteAuthority, true),
+		], [false, true, false, true]);
 	});
 
 	test('Does not reuse missing, transient, development-host, or mismatched remote workspaces', async () => {

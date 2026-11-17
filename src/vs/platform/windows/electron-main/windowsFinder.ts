@@ -66,15 +66,15 @@ export function findWindowOnWorkspaceOrFolder(windows: ICodeWindow[], folderOrWo
 	return undefined;
 }
 
-/** Finds a live multi-root workspace with exactly the requested folders and remote host. */
-export async function findWindowOnWorkspaceFolders(windows: readonly ICodeWindow[], folders: readonly URI[], remoteAuthority: string | undefined, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>): Promise<IWorkspaceWindowMatch | undefined> {
+/** Finds a live workspace on the requested folders/host, optionally allowing other workspace folders. */
+export async function findWindowOnWorkspaceFolders(windows: readonly ICodeWindow[], folders: readonly URI[], remoteAuthority: string | undefined, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>, allowAdditionalFolders = false): Promise<IWorkspaceWindowMatch | undefined> {
 	for (const window of windows) {
 		const workspace = window.openedWorkspace;
 		if (!isWorkspaceIdentifier(workspace) || window.isExtensionDevelopmentHost || window.remoteAuthority !== remoteAuthority) {
 			continue;
 		}
 		const resolved = await localWorkspaceResolver(workspace);
-		if (!resolved || !workspaceMatchesFolders(resolved, folders, remoteAuthority)) {
+		if (!resolved || !workspaceMatchesFolders(resolved, folders, remoteAuthority, allowAdditionalFolders)) {
 			continue;
 		}
 		// Resolving the file can outlive navigation to another workspace or remote host.
@@ -87,16 +87,16 @@ export async function findWindowOnWorkspaceFolders(windows: readonly ICodeWindow
 	return undefined;
 }
 
-/** Uses one exact folder/host comparison for live windows and previous-session fallback. */
-export function workspaceMatchesFolders(workspace: IResolvedWorkspace, folders: readonly URI[], remoteAuthority: string | undefined): boolean {
-	if (workspace.transient || workspace.remoteAuthority !== remoteAuthority || workspace.folders.length !== folders.length) {
+/** Compares folder/host identity; containing-workspace reuse requires an explicit handoff preference. */
+export function workspaceMatchesFolders(workspace: IResolvedWorkspace, folders: readonly URI[], remoteAuthority: string | undefined, allowAdditionalFolders = false): boolean {
+	if (folders.length === 0 || workspace.transient || workspace.remoteAuthority !== remoteAuthority || (!allowAdditionalFolders && workspace.folders.length !== folders.length)) {
 		return false;
 	}
 	// Only local file paths can use this machine's casing rules; remote providers may be case-sensitive.
 	const comparisonKey = (uri: URI) => (remoteAuthority === undefined && uri.scheme === Schemas.file ? extUriBiasedIgnorePathCase : extUri).getComparisonKey(uri);
 	const requested = new ResourceSet(folders, comparisonKey);
 	const resolved = new ResourceSet(workspace.folders.map(folder => folder.uri), comparisonKey);
-	return requested.size === folders.length && resolved.size === requested.size && workspace.folders.every(folder => requested.has(folder.uri));
+	return requested.size === folders.length && resolved.size === workspace.folders.length && (allowAdditionalFolders || resolved.size === requested.size) && [...requested].every(folder => resolved.has(folder));
 }
 
 /**

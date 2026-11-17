@@ -107,12 +107,13 @@ suite('VS Code Actions', () => {
 	});
 
 	test('opens every active chat workspace folder in one editor window', async () => {
-		const calls: { folders?: { uri: string; label: string | undefined }[]; forceNewWindow?: boolean; chatSessionToOpen?: string }[] = [];
+		const calls: { folders?: { uri: string; label: string | undefined }[]; forceNewWindow?: boolean; reuseWorkspaceContainingFolder?: boolean; chatSessionToOpen?: string }[] = [];
 		const nativeHostService = new class extends mock<INativeHostService>() {
 			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> {
 				calls.push({
 					folders: Array.isArray(toOpen) ? toOpen.filter(isFolderToOpen).map(openable => ({ uri: openable.folderUri.toString(), label: openable.label })) : undefined,
 					forceNewWindow: options?.forceNewWindow,
+					reuseWorkspaceContainingFolder: options?.reuseWorkspaceContainingFolder,
 					chatSessionToOpen: options?.chatSessionToOpen?.toString(),
 				});
 			}
@@ -125,8 +126,20 @@ suite('VS Code Actions', () => {
 		assert.deepStrictEqual(calls, [{
 			folders: [{ uri: 'file:///repo-b', label: undefined }, { uri: 'file:///repo-c', label: undefined }],
 			forceNewWindow: true,
+			reuseWorkspaceContainingFolder: true,
 			chatSessionToOpen: 'test:/multi-folder',
 		}]);
+	});
+
+	test('requests workspace-member reuse for an unsent draft without transferring its provisional chat', async () => {
+		const calls: (IOpenWindowOptions | undefined)[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(_toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> {
+				calls.push(options);
+			}
+		}());
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('draft', false, [URI.file('/repo')]));
+		assert.deepStrictEqual(calls, [{ forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: undefined }]);
 	});
 
 	test('opens an empty local editor window without a remote session workspace', async () => {
@@ -287,7 +300,7 @@ suite('VS Code Actions', () => {
 				notifications,
 			}, {
 				folders: [{ scheme: 'vscode-remote', path: '/remote/project', label: '/remote/project [Remote host]', title: 'project [Remote host]' }],
-				options: { forceNewWindow: true, chatSessionToOpen: sharesAgentHost ? URI.from({ scheme: 'agent-host-copilotcli', path: '/remote', fragment: 'chat' }) : undefined },
+				options: { forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: sharesAgentHost ? URI.from({ scheme: 'agent-host-copilotcli', path: '/remote', fragment: 'chat' }) : undefined },
 				notifications: sharesAgentHost ? [] : ['The session\'s folder was opened in a new editor window, but the session can\'t be opened there. This window is connected to a different agent host on the remote machine than the one its editor windows use.'],
 			});
 		});
