@@ -16,7 +16,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { localize } from '../../../../../nls.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { IPlatformCustomizationMarketplaceService } from '../../../../../platform/customizationMarketplace/common/platformCustomizationMarketplaceService.js';
-import { createLazyCustomizationMarketplaceProvider, CustomizationMarketplaceQueryProgressCallback, CustomizationMarketplaceRecoveryGroup, CustomizationMarketplaceService, ICustomizationMarketplaceBrowseSection, ICustomizationMarketplaceBrowseSections, ICustomizationMarketplaceBrowseSectionsProgress, ICustomizationMarketplacePage, ICustomizationMarketplaceQuery, ICustomizationMarketplaceQueryProgress, ICustomizationMarketplaceService, ICustomizationMarketplaceSourceInfo, ICustomizationMarketplaceSourceRecoveryAction, ICustomizationMarketplaceSourcesChangeEvent } from '../../../../../platform/customizationMarketplace/common/customizationMarketplaceService.js';
+import { createLazyCustomizationMarketplaceProvider, CustomizationMarketplaceMediaType, CustomizationMarketplaceQueryProgressCallback, CustomizationMarketplaceRecoveryGroup, CustomizationMarketplaceService, ICustomizationMarketplaceBrowseSection, ICustomizationMarketplaceBrowseSections, ICustomizationMarketplaceBrowseSectionsProgress, ICustomizationMarketplacePage, ICustomizationMarketplaceProvider, ICustomizationMarketplaceQuery, ICustomizationMarketplaceQueryProgress, ICustomizationMarketplaceService, ICustomizationMarketplaceSourceInfo, ICustomizationMarketplaceSourceRecoveryAction, ICustomizationMarketplaceSourcesChangeEvent } from '../../../../../platform/customizationMarketplace/common/customizationMarketplaceService.js';
 import { affectsCustomizationMarketplaceSources, CustomizationMarketplaceConfiguration, CustomizationMarketplaceSources, getEnabledCustomizationMarketplaceSources, queryEnabledCustomizationMarketplaceSources } from '../../../../../platform/customizationMarketplace/common/customizationMarketplaceSources.js';
 import { createMcpGalleryMarketplaceProviders, getAllMcpGalleryMarketplaceSourceInfos, getCustomizationMarketplaceSourceInfos } from '../../../../../platform/customizationMarketplace/common/mcpGalleryMarketplaceProvider.js';
 import { IDefaultAccountService } from '../../../../../platform/defaultAccount/common/defaultAccount.js';
@@ -25,6 +25,7 @@ import { IMcpGalleryManifestService } from '../../../../../platform/mcp/common/m
 import { IProductService } from '../../../../../platform/product/common/productService.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IAuthenticationService } from '../../../../services/authentication/common/authentication.js';
+import { matchesSignalCAppConnection, signalCAppConnections, signalCAppConnectionSource } from '../../../mcp/common/signalCAppConnections.js';
 import { ChatConfiguration } from '../../common/constants.js';
 import { ICustomizationHarnessService, ICustomizationMarketplaceInfo, ICustomizationMarketplaceManagementProvider, ICustomizationMarketplaceSearchProvider } from '../../common/customizationHarnessService.js';
 import { IPluginMarketplaceService } from '../../common/plugins/pluginMarketplaceService.js';
@@ -35,6 +36,29 @@ import { createPluginCustomizationMarketplaceProviders, getAllPluginCustomizatio
 export function getProviderMarketplaceSourceId(name: string): string {
 	return `providerPluginMarketplace.${encodeURIComponent(name)}`;
 }
+
+const signalCAppConnectionProvider: ICustomizationMarketplaceProvider = {
+	id: signalCAppConnectionSource.id,
+	async query({ query, mediaType, pageSize, cursor }) {
+		if (mediaType && mediaType !== CustomizationMarketplaceMediaType.McpServer) {
+			return { items: [], total: 0 };
+		}
+		const matches = query ? signalCAppConnections.filter(app => matchesSignalCAppConnection(app, query)) : signalCAppConnections;
+		const offset = Number(cursor ?? 0);
+		const end = offset + (pageSize ?? matches.length);
+		return {
+			items: matches.slice(offset, end).map(app => ({
+				identifier: app.id,
+				displayName: app.name,
+				description: app.description,
+				mediaType: CustomizationMarketplaceMediaType.McpServer,
+				tags: [], capabilities: [], representativeQueries: [],
+			})),
+			total: matches.length,
+			nextCursor: end < matches.length ? String(end) : undefined,
+		};
+	},
+};
 
 /** Compares the fields that determine a provider marketplace's source identity, availability, and queries. */
 function providerMarketplacesEqual(a: ICustomizationMarketplaceInfo, b: ICustomizationMarketplaceInfo): boolean {
@@ -168,12 +192,14 @@ export class PlatformCustomizationMarketplaceWorkbenchService implements ICustom
 }
 
 export class CustomizationMarketplaceWorkbenchService extends Disposable implements ICustomizationMarketplaceService {
+	private readonly hasSignalCAppConnections: boolean;
 	declare readonly _serviceBrand: undefined;
 	get allSources() {
 		const pluginSources = this.marketplaceManagementProvider
 			? []
 			: getAllPluginCustomizationMarketplaceSourceInfos(this.pluginMarketplaceService);
 		return [
+			...(this.hasSignalCAppConnections ? [signalCAppConnectionSource] : []),
 			...(this.platformService.allSources ?? this.platformService.sources),
 			CustomizationMarketplaceSources.AgentFinderPublicFeed,
 			CustomizationMarketplaceSources.CopilotConnectors,
@@ -193,6 +219,7 @@ export class CustomizationMarketplaceWorkbenchService extends Disposable impleme
 			? [CustomizationMarketplaceSources.AgentFinderPublicFeed]
 			: [];
 		return [
+			...(this.hasSignalCAppConnections ? [signalCAppConnectionSource] : []),
 			...this.platformService.sources.filter(source => source.id !== CustomizationMarketplaceSources.AgentFinderPublicFeed.id),
 			...harnessSources,
 			CustomizationMarketplaceSources.CopilotConnectors,
@@ -226,8 +253,10 @@ export class CustomizationMarketplaceWorkbenchService extends Disposable impleme
 		@IDefaultAccountService defaultAccountService: IDefaultAccountService,
 		@IAuthenticationService authenticationService: IAuthenticationService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
+		@IProductService productService: Pick<IProductService, '_serviceBrand' | 'applicationName'>,
 	) {
 		super();
+		this.hasSignalCAppConnections = productService.applicationName === 'signal-c';
 		this.harnessBindingCancellation = this._register(new MutableDisposable<CancellationTokenSource>());
 		this._register(autorun(reader => {
 			this.harnessService.availableHarnesses.read(reader);
@@ -411,6 +440,7 @@ export class CustomizationMarketplaceWorkbenchService extends Disposable impleme
 		if (!this.service || this.serviceSignature !== signature) {
 			this.serviceSignature = signature;
 			this.service = new CustomizationMarketplaceService([
+				...(this.hasSignalCAppConnections ? [signalCAppConnectionProvider] : []),
 				...pluginProviders,
 				...providerMarketplaceProviders,
 				...platformProviders,

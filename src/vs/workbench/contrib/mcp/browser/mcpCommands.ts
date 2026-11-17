@@ -1179,7 +1179,7 @@ export class AddConfigurationAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor, configUri?: URI | string): Promise<void> {
+	async run(accessor: ServicesAccessor, configUri?: URI | string, appId?: string): Promise<void> {
 		const instantiationService = accessor.get(IInstantiationService);
 		const notificationService = accessor.get(INotificationService);
 		try {
@@ -1190,7 +1190,7 @@ export class AddConfigurationAction extends Action2 {
 			if (configUri !== undefined && target === undefined) {
 				return;
 			}
-			await instantiationService.createInstance(McpAddConfigurationCommand, target).run(this.connectApp);
+			await instantiationService.createInstance(McpAddConfigurationCommand, target).run(this.connectApp, appId);
 		} catch (error) {
 			if (!isCancellationError(error)) {
 				notificationService.error(error);

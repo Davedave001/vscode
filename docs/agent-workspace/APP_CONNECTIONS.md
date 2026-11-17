@@ -8,7 +8,9 @@ Registered-client providers such as Asana, Slack, Canva and HubSpot ask for a pu
 
 ## Available apps
 
-The catalog covers 36 apps. Intercom has US and EU endpoints, PayPal has production and sandbox endpoints, and QuickBooks has an official local server and a hosted-pilot setup entry.
+Open **Customizations → Browse** and choose **Signal-C App Connections** from the source dropdown, or select **View All** in its gallery section. Search for an app and choose **Connect** to open its setup review. The hosted QuickBooks pilot card opens its setup requirements.
+
+The catalog covers 42 apps. Intercom and Amplitude have separate US and EU endpoints. Datadog has an entry for each supported site, PayPal has production and sandbox endpoints, and QuickBooks has an official local server and a hosted-pilot setup entry.
 
 | App | Route | Provider setup guide |
 | --- | --- | --- |
@@ -48,6 +50,12 @@ The catalog covers 36 apps. Intercom has US and EU endpoints, PayPal has product
 | Xero | Registered OAuth with PKCE | [Xero](https://developer.xero.com/documentation/guides/remote-mcp/overview) |
 | PayPal | Separate production and sandbox remote HTTP OAuth connections | [PayPal](https://developer.paypal.com/ai-tools/mcp-server/) |
 | PostHog | Remote HTTP with OAuth and provider-managed region selection | [PostHog](https://posthog.com/docs/model-context-protocol/vscode) |
+| GitLab.com | Remote HTTP with OAuth; MCP access enabled in the top-level group | [GitLab](https://docs.gitlab.com/user/model_context_protocol/mcp_server/) |
+| Netlify | Remote HTTP with OAuth | [Netlify](https://docs.netlify.com/build/build-with-ai/agent-setup-guides/agent-setup-overview/) |
+| Cal.com | Remote HTTP with OAuth | [Cal.com](https://cal.com/docs/mcp-server) |
+| Apollo | Remote HTTP with OAuth; disable model training for the model account or client | [Apollo](https://docs.apollo.io/docs/apollo-mcp) |
+| Amplitude | Separate US and EU remote HTTP OAuth connections | [Amplitude](https://www.amplitude.com/docs/amplitude-ai/amplitude-mcp/other-clients) |
+| Datadog | OAuth endpoints for US1, US3, US5, EU1, AP1, AP2 and UK1 | [Datadog](https://docs.datadoghq.com/mcp_server/setup/) |
 
 For Google Workspace, enable the relevant MCP APIs in a Cloud project, configure consent, and mark the OAuth client for an AI-powered agent. Register Signal-C's redirect URLs. Chat also needs a configured Chat app; follow the Classroom test prerequisites when testing that service. Each entry points to the provider's setup guide before collecting a public client ID.
 

@@ -4,6 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize } from '../../../../nls.js';
+import { ICustomizationMarketplaceSourceInfo } from '../../../../platform/customizationMarketplace/common/customizationMarketplaceService.js';
+import { CustomizationMarketplaceConfiguration } from '../../../../platform/customizationMarketplace/common/customizationMarketplaceSources.js';
+
+export const signalCAppConnectionSource = {
+	id: 'signalCAppConnections',
+	displayName: localize('apps.source', "Signal-C App Connections"),
+	enablementSetting: CustomizationMarketplaceConfiguration.MarketplaceEnabled,
+} satisfies ICustomizationMarketplaceSourceInfo;
 
 export interface ISignalCAppConnection {
 	readonly id: string;
@@ -18,8 +26,24 @@ export interface ISignalCAppConnection {
 	readonly local?: { readonly command: string; readonly tokenStoreVariable: string };
 }
 
+export function matchesSignalCAppConnection(app: ISignalCAppConnection, query: string): boolean {
+	const searchable = `${app.name} ${app.description}`.toLowerCase();
+	return query.trim().toLowerCase().split(/\s+/).every(term => searchable.includes(term));
+}
+
 const googleWorkspaceDocumentation = 'https://developers.google.com/workspace/guides/configure-mcp-servers';
 const googleWorkspaceSetup = localize('apps.googleWorkspace.setup', "Enable the relevant Workspace MCP APIs in your Google Cloud project, configure its OAuth consent screen, and register an OAuth client with the redirect URLs shown by Signal-C. Select Use this client for an AI-powered agent in Google Auth Platform. Enter the public client ID here; provide any client secret through the MCP credential flow. Workspace administrator controls may apply.");
+const amplitudeDocumentation = 'https://www.amplitude.com/docs/amplitude-ai/amplitude-mcp/other-clients';
+const datadogSites = [
+	['US1', 'datadoghq.com'],
+	['US3', 'us3.datadoghq.com'],
+	['US5', 'us5.datadoghq.com'],
+	['EU1', 'datadoghq.eu'],
+	['AP1', 'ap1.datadoghq.com'],
+	['AP2', 'ap2.datadoghq.com'],
+	['UK1', 'uk1.datadoghq.com'],
+] as const;
+const datadogSetup = localize('apps.datadog.setup', "Choose the site that hosts your Datadog organization. Sign in and select that organization. Tool access follows your Datadog permissions.");
 
 /** Vendor-published MCP connection presets. OAuth and connection state remain owned by the MCP services. */
 export const signalCAppConnections: readonly ISignalCAppConnection[] = [
@@ -86,4 +110,26 @@ export const signalCAppConnections: readonly ISignalCAppConnection[] = [
 		setup: localize('apps.paypal.sandbox.setup', "Sign in with a PayPal sandbox test account to work with test payments and invoices."),
 	},
 	{ id: 'posthog', name: 'PostHog', description: localize('apps.posthog', "Product analytics, feature flags and experiments"), url: 'https://mcp.posthog.com/mcp', documentation: 'https://posthog.com/docs/model-context-protocol/vscode' },
+	{
+		id: 'gitlab-com', name: 'GitLab.com',
+		description: localize('apps.gitlab', "Projects, issues, merge requests and pipelines"),
+		url: 'https://gitlab.com/api/v4/mcp', documentation: 'https://docs.gitlab.com/user/model_context_protocol/mcp_server/',
+		setup: localize('apps.gitlab.setup', "Enable MCP server access in your GitLab.com top-level group. Sign in with the GitLab account you want to authorize."),
+	},
+	{ id: 'netlify', name: 'Netlify', description: localize('apps.netlify', "Sites, deployments, build logs and hosting"), url: 'https://mcp.netlify.com/mcp', documentation: 'https://docs.netlify.com/build/build-with-ai/agent-setup-guides/agent-setup-overview/' },
+	{ id: 'cal-com', name: 'Cal.com', description: localize('apps.calCom', "Availability, bookings and event types"), url: 'https://mcp.cal.com/mcp', documentation: 'https://cal.com/docs/mcp-server' },
+	{
+		id: 'apollo', name: 'Apollo',
+		description: localize('apps.apollo', "Sales accounts, contacts, lists and outreach"),
+		url: 'https://mcp.apollo.io/mcp', documentation: 'https://docs.apollo.io/docs/apollo-mcp',
+		setup: localize('apps.apollo.setup', "Confirm model training is disabled for the model account or client that will use Apollo data. Sign in to the Apollo workspace you want to authorize. Your plan, permissions and credits apply."),
+	},
+	{ id: 'amplitude-us', name: 'Amplitude (US)', description: localize('apps.amplitude.us', "US-hosted product analytics, experiments and project data"), url: 'https://mcp.amplitude.com/mcp', documentation: amplitudeDocumentation },
+	{ id: 'amplitude-eu', name: 'Amplitude (EU)', description: localize('apps.amplitude.eu', "EU-hosted product analytics, experiments and project data"), url: 'https://mcp.eu.amplitude.com/mcp', documentation: amplitudeDocumentation },
+	...datadogSites.map(([site, domain]) => ({
+		id: `datadog-${site.toLowerCase()}`, name: `Datadog (${site})`,
+		description: localize('apps.datadog', "Metrics, logs, traces and incidents"),
+		url: `https://mcp.${domain}/v1/mcp`, documentation: 'https://docs.datadoghq.com/mcp_server/setup/',
+		setup: datadogSetup,
+	})),
 ];

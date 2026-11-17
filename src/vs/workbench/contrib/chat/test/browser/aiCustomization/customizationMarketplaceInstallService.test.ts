@@ -30,6 +30,7 @@ import { TestInstantiationService } from '../../../../../../platform/instantiati
 import { ILogService, NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IGalleryMcpServer, mcpGalleryServiceUrlConfig } from '../../../../../../platform/mcp/common/mcpManagement.js';
 import { IMcpGalleryManifest, IMcpGalleryManifestService } from '../../../../../../platform/mcp/common/mcpGalleryManifest.js';
+import { IProductService } from '../../../../../../platform/product/common/productService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { IChatEntitlementService } from '../../../../../services/chat/common/chatEntitlementService.js';
@@ -403,6 +404,7 @@ suite('CustomizationMarketplaceInstallService', () => {
 			override get sources() { return sources.map(source => ({ ...source })); }
 		}());
 		instantiationService.stub(IConfigurationService, configurationService);
+		instantiationService.stub(IProductService, { applicationName: 'code-oss' });
 		instantiationService.stub(IFileService, fileService);
 		instantiationService.stub(ILogService, logService);
 		const telemetryService = new TestDataTelemetryService();

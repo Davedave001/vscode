@@ -29,6 +29,8 @@ import { ICopilotConnector, ICopilotConnectorsService } from '../../../browser/a
 import { CustomizationMarketplaceWorkbenchService, getProviderMarketplaceSourceId } from '../../../browser/aiCustomization/customizationMarketplaceWorkbenchService.js';
 import { getPluginCustomizationMarketplaceSourceId } from '../../../browser/aiCustomization/pluginCustomizationMarketplaceProvider.js';
 import { TestDataTelemetryService } from '../../../../../../platform/telemetry/test/common/testTelemetryService.js';
+import { IProductService } from '../../../../../../platform/product/common/productService.js';
+import { signalCAppConnectionSource } from '../../../../mcp/common/signalCAppConnections.js';
 
 suite('CustomizationMarketplaceWorkbenchService', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -88,6 +90,7 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 		instantiationService.stub(IAuthenticationService, new class extends mock<IAuthenticationService>() {
 			override readonly onDidChangeSessions = Event.None;
 		}());
+		instantiationService.stub(IProductService, { applicationName: 'code-oss' });
 	}
 
 	function createService(
@@ -106,6 +109,7 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			override readonly onDidChangeSessions = Event.None;
 		}(),
 		activeSessionResource = observableValue<URI>('activeSessionResource', URI.parse('vscode-chat-session://local/session')),
+		applicationName = 'code-oss',
 	): CustomizationMarketplaceWorkbenchService {
 		const platformSources = platformService.allSources ?? platformService.sources ?? [CustomizationMarketplaceSources.AgentFinderPublicFeed];
 		const normalizedPlatformService = new class extends mock<ICustomizationMarketplaceService>() {
@@ -138,10 +142,11 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			defaultAccountService,
 			authenticationService,
 			telemetryService,
+			{ _serviceBrand: undefined, applicationName },
 		));
 	}
 
-	function createMixedFixture(enabledIds: readonly string[]) {
+	function createMixedFixture(enabledIds: readonly string[], applicationName = 'code-oss') {
 		const configuration = createConfiguration(enabledIds);
 		const publicEntries: ICustomizationMarketplaceEntry[] = Array.from({ length: 45 }, (_, index) => ({
 			identifier: `public-${index}`, displayName: `Mail server ${index}`, description: '', score: 100 - index,
@@ -170,10 +175,29 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			override readonly allSources = this.sources;
 			override async query() { return { items: [], total: 0 }; }
 		}();
-		const service = createService(configuration, platformService, connectorsService, harnessProvider);
+		const service = createService(configuration, platformService, connectorsService, harnessProvider, undefined, undefined, undefined, undefined, undefined, undefined, undefined, applicationName);
 		return { configuration, service, publicEntries, connectors, connectorsService, nativeRequests, connectorCalls };
 	}
 
+
+	test('searches and pages the built-in Signal-C source without querying other sources', async () => {
+		const { service, configuration, nativeRequests, connectorCalls } = createMixedFixture([CustomizationMarketplaceSources.CopilotConnectors.id], 'signal-c');
+		const options = { sourceIds: [signalCAppConnectionSource.id], query: 'amplitude', pageSize: 1 };
+		const first = await service.query(options, CancellationToken.None);
+		assert.ok(first.nextCursor);
+		const second = await service.query({ ...options, cursor: first.nextCursor }, CancellationToken.None);
+		assert.deepStrictEqual([...first.items, ...second.items].map(item => [item.sourceId, item.identifier]).sort(), [
+			[signalCAppConnectionSource.id, 'amplitude-eu'], [signalCAppConnectionSource.id, 'amplitude-us'],
+		]);
+		assert.strictEqual(second.nextCursor, undefined);
+		assert.deepStrictEqual(nativeRequests, []);
+		assert.deepStrictEqual(connectorCalls, []);
+
+		const plugins = await service.query({ ...options, mediaType: CustomizationMarketplaceMediaType.CopilotPlugin }, CancellationToken.None);
+		assert.deepStrictEqual(plugins.items, []);
+		await setEnabled(configuration, CustomizationMarketplaceConfiguration.MarketplaceEnabled, false);
+		await assert.rejects(service.query(options, CancellationToken.None), isCancellationError);
+	});
 
 	test('Local omits the GitHub Feed while keeping existing platform registries', async () => {
 		const configuration = new TestConfigurationService({

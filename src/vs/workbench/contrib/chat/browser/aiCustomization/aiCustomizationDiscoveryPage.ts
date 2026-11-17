@@ -47,6 +47,8 @@ import { verifiedPublisherIcon } from '../../../../services/extensionManagement/
 import { AccessibilityVerbositySettingId } from '../../../accessibility/browser/accessibilityConfiguration.js';
 import { SuggestEnabledInput } from '../../../codeEditor/browser/suggestEnabledInput/suggestEnabledInput.js';
 import { IMcpWorkbenchService, McpServerInstallState } from '../../../mcp/common/mcpTypes.js';
+import { McpCommandIds } from '../../../mcp/common/mcpCommandIds.js';
+import { matchesSignalCAppConnection, signalCAppConnections, signalCAppConnectionSource } from '../../../mcp/common/signalCAppConnections.js';
 import { CustomizationMarketplaceInstallationTarget, CustomizationMarketplaceInstallState, ICustomizationMarketplaceInstallationSnapshot, ICustomizationMarketplaceInstallService, IRecordedCustomizationMarketplaceResource, RecordedCustomizationMarketplaceInstallState } from '../../common/customizationMarketplaceInstallService.js';
 import { AICustomizationManagementSection, AICustomizationSources, IWelcomePageFeatures } from '../../common/aiCustomizationWorkspaceService.js';
 import { customizationSearchMatchesAny } from '../../common/aiCustomizationSearch.js';
@@ -530,6 +532,18 @@ function getInstallActionLabel(state: CustomizationMarketplaceInstallState, hasS
 	}
 }
 
+function getSignalCApp(resource: ICustomizationMarketplaceResource) {
+	return resource.sourceId === signalCAppConnectionSource.id ? signalCAppConnections.find(app => app.id === resource.identifier) : undefined;
+}
+
+function getCatalogActionLabel(resource: ICustomizationMarketplaceResource, state: CustomizationMarketplaceInstallState, hasSetupUrl: boolean): string {
+	const app = getSignalCApp(resource);
+	if (app && state.kind === 'available') {
+		return app.blocked ? localize('customizationDiscovery.viewSetup', "View Setup") : localize('customizationDiscovery.connectorConnect', "Connect");
+	}
+	return getInstallActionLabel(state, hasSetupUrl, isCopilotConnectorResource(resource));
+}
+
 function isCancellableConnectorOperation(resource: ICustomizationMarketplaceResource | undefined, state: CustomizationMarketplaceInstallState): boolean {
 	return isCopilotConnectorResource(resource) && (state.kind === 'installing' || state.kind === 'repairing');
 }
@@ -827,7 +841,7 @@ class DiscoveryResultRenderer implements IListRenderer<DiscoveryListEntry, IDisc
 			const setupUrl = state.kind === 'unavailable' ? state.setupUrl : undefined;
 			const cancellable = isCancellableConnectorOperation(element.resource, state);
 			const button = templateData.elementDisposables.add(new Button(templateData.actions, { ...defaultButtonStyles, secondary: true, small: true }));
-			button.label = getInstallActionLabel(state, !!setupUrl, isCopilotConnectorResource(element.resource));
+			button.label = getCatalogActionLabel(element.resource, state, !!setupUrl);
 			button.enabled = isInstallActionEnabled(element.resource, state, !!setupUrl);
 			button.setAriaLabel(cancellable
 				? localize('customizationDiscovery.cancelConnectorOperationLabel', "Cancel connecting {0}", element.resource.displayName)
@@ -1850,10 +1864,10 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 			onUnexpectedError(error);
 		}
 
-		const connectorSourceId = CustomizationMarketplaceSources.CopilotConnectors.id;
+		const sourceOrder = (id: string) => id === signalCAppConnectionSource.id ? 0 : id === CustomizationMarketplaceSources.CopilotConnectors.id ? 1 : 2;
 		const sources = this.marketplaceSources
 			.filter(source => source.id !== CustomizationMarketplaceSources.AgentFinderPublicFeed.id && source.id !== curatedSourceId)
-			.sort((first, second) => first.id === connectorSourceId ? -1 : second.id === connectorSourceId ? 1 : 0);
+			.sort((first, second) => sourceOrder(first.id) - sourceOrder(second.id));
 		const sections: ISourceBrowseSection[] = [];
 		for (const source of sources) {
 			if (token.isCancellationRequested) {
@@ -2213,10 +2227,11 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 		const query = this.query.text;
 		const matching = this.deduplicateMarketplaceResources([...resources.values()].filter(resource => {
 			const type = getCatalogType(resource);
+			const app = getSignalCApp(resource);
 			return !!type
 				&& this.matchesMarketplaceResource(resource)
 				&& (!this.selectedSourceId || resource.sourceId === this.selectedSourceId)
-				&& customizationSearchMatchesAny(query, [resource.displayName, resource.description, getTypeLabel(type), this.getMarketplaceSourceLabel(resource.sourceId)]);
+				&& (app ? matchesSignalCAppConnection(app, query) : customizationSearchMatchesAny(query, [resource.displayName, resource.description, getTypeLabel(type), this.getMarketplaceSourceLabel(resource.sourceId)]));
 		}));
 		return this.isBlankCanvasBrowse()
 			? matching
@@ -2623,7 +2638,7 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 		}
 		const cancellable = isCancellableConnectorOperation(item, state);
 		const install = this.browseDisposables.add(new Button(actions, { ...defaultButtonStyles, secondary: true, small: true }));
-		install.label = getInstallActionLabel(state, !!setupUrl, isCopilotConnectorResource(item));
+		install.label = getCatalogActionLabel(item, state, !!setupUrl);
 		install.enabled = isInstallActionEnabled(item, state, !!setupUrl);
 		install.setAriaLabel(cancellable
 			? localize('customizationDiscovery.cancelConnectorOperationLabel', "Cancel connecting {0}", item.displayName)
@@ -2646,6 +2661,23 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 
 	private async install(resource: ICustomizationMarketplaceResource): Promise<void> {
 		const resourceKey = getCustomizationMarketplaceResourceKey(resource);
+		const app = getSignalCApp(resource);
+		if (app) {
+			if (this.pendingInstalls.has(resourceKey)) {
+				return;
+			}
+			this.pendingInstalls.add(resourceKey);
+			try {
+				await this.commandService.executeCommand(McpCommandIds.ConnectApp, undefined, app.id);
+			} catch (error) {
+				if (!isCancellationError(error)) {
+					this.notificationService.error(error);
+				}
+			} finally {
+				this.pendingInstalls.delete(resourceKey);
+			}
+			return;
+		}
 		if (this.pendingInstalls.has(resourceKey) || this.installService.getInstallState(resource).kind !== 'available') {
 			return;
 		}
@@ -2855,7 +2887,7 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 	}
 
 	private getInstallState(resource: ICustomizationMarketplaceResource): CustomizationMarketplaceInstallState {
-		const state = this.installService.getInstallState(resource);
+		const state = getSignalCApp(resource) ? { kind: 'available' as const } : this.installService.getInstallState(resource);
 		const resourceKey = getCustomizationMarketplaceResourceKey(resource);
 		if (this.pendingInstalls.has(resourceKey) && state.kind === 'available') {
 			return { kind: 'installing' };
@@ -2864,6 +2896,10 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 	}
 
 	private openMarketplaceItem(resource: ICustomizationMarketplaceResource, mode: ICustomizationMarketplaceOrigin['mode']): void {
+		if (getSignalCApp(resource)) {
+			void this.install(resource);
+			return;
+		}
 		this.callbacks.openMarketplaceItem(resource, {
 			resourceKey: getCustomizationMarketplaceResourceKey(resource),
 			mode,

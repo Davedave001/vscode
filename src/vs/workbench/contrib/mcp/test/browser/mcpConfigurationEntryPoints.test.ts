@@ -243,6 +243,19 @@ suite('MCP configuration entry points', () => {
 		['PayPal (Production)', 'paypal', 'https://mcp.paypal.com/http'],
 		['PayPal (Sandbox)', 'paypal-sandbox', 'https://mcp.sandbox.paypal.com/http'],
 		['PostHog', 'posthog', 'https://mcp.posthog.com/mcp'],
+		['GitLab.com', 'gitlab-com', 'https://gitlab.com/api/v4/mcp'],
+		['Netlify', 'netlify', 'https://mcp.netlify.com/mcp'],
+		['Cal.com', 'cal-com', 'https://mcp.cal.com/mcp'],
+		['Apollo', 'apollo', 'https://mcp.apollo.io/mcp'],
+		['Amplitude (US)', 'amplitude-us', 'https://mcp.amplitude.com/mcp'],
+		['Amplitude (EU)', 'amplitude-eu', 'https://mcp.eu.amplitude.com/mcp'],
+		['Datadog (US1)', 'datadog-us1', 'https://mcp.datadoghq.com/v1/mcp'],
+		['Datadog (US3)', 'datadog-us3', 'https://mcp.us3.datadoghq.com/v1/mcp'],
+		['Datadog (US5)', 'datadog-us5', 'https://mcp.us5.datadoghq.com/v1/mcp'],
+		['Datadog (EU1)', 'datadog-eu1', 'https://mcp.datadoghq.eu/v1/mcp'],
+		['Datadog (AP1)', 'datadog-ap1', 'https://mcp.ap1.datadoghq.com/v1/mcp'],
+		['Datadog (AP2)', 'datadog-ap2', 'https://mcp.ap2.datadoghq.com/v1/mcp'],
+		['Datadog (UK1)', 'datadog-uk1', 'https://mcp.uk1.datadoghq.com/v1/mcp'],
 	]) {
 		test(`${name} installs its own endpoint using OAuth discovery`, async () => {
 			const fixture = setup(true);
@@ -280,6 +293,28 @@ suite('MCP configuration entry points', () => {
 		assert.ok(await validateClientId('two words'));
 		assert.ok(await validateClientId('client\u0000id'));
 		assert.ok(await validateClientId('x'.repeat(2049)));
+	});
+
+	test('a gallery card opens its selected app review directly', async () => {
+		const fixture = setup(true);
+		fixture.quickInput.selections.push('Connect with OAuth', 'Global');
+		fixture.quickInput.inputs.push('$suggested');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'datadog-eu1');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.appDialogs.length, 1);
+		assert.strictEqual(fixture.appDialogs[0].message, 'Connect Datadog (EU1)');
+		assert.deepStrictEqual(fixture.installs[0].server.config, {
+			type: McpServerType.REMOTE, transport: 'http', url: 'https://mcp.datadoghq.eu/v1/mcp',
+		});
+		assert.ok(fixture.quickInput.pickLabels.every(labels => !labels.includes('Datadog (EU1)')));
+	});
+
+	test('an unknown gallery app ID leaves configuration untouched', async () => {
+		const fixture = setup(true);
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'unknown-app');
+		assert.deepStrictEqual(fixture.appDialogs, []);
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.quickInput.pickLabels, []);
 	});
 
 	test('repeated app setup suggests distinct names to preserve existing connections', async () => {

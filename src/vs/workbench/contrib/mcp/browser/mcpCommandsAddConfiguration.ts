@@ -243,8 +243,8 @@ export class McpAddConfigurationCommand {
 		return result?.kind;
 	}
 
-	private async getAppConfig(): Promise<{ name: string; config: IMcpServerConfiguration; localOnly?: boolean } | undefined> {
-		const app = await this._quickInputService.pick(signalCAppConnections.map(app => ({
+	private async getAppConfig(appId?: string): Promise<{ name: string; config: IMcpServerConfiguration; localOnly?: boolean } | undefined> {
+		const connection = appId !== undefined ? signalCAppConnections.find(app => app.id === appId) : (await this._quickInputService.pick(signalCAppConnections.map(app => ({
 			label: app.name,
 			description: app.blocked ? localize('mcp.app.setupOnly', "Setup guide · connection unavailable") : app.local ? localize('mcp.app.localOAuth', "Local server · existing OAuth setup") : app.clientIdRequired ? localize('mcp.app.registeredOAuth', "OAuth · app registration required") : localize('mcp.app.oauth', "OAuth"),
 			detail: app.description,
@@ -253,9 +253,8 @@ export class McpAddConfigurationCommand {
 			title: localize('mcp.app.title', "Signal-C App Connections"),
 			placeHolder: localize('mcp.app.placeholder', "Search apps. Select to review setup before adding a connection."),
 			matchOnDescription: true, matchOnDetail: true, ignoreFocusLost: true,
-		});
-		if (!app) { return undefined; }
-		const { app: connection } = app;
+		}))?.app;
+		if (!connection) { return undefined; }
 		const { result } = await this._dialogService.prompt({
 			type: 'info', custom: true,
 			message: localize('mcp.app.review', "Connect {0}", connection.name),
@@ -601,7 +600,7 @@ export class McpAddConfigurationCommand {
 		}
 	}
 
-	public async run(connectApp = false): Promise<void> {
+	public async run(connectApp = false, appId?: string): Promise<void> {
 		// Step 1: Choose server type
 		const serverType = connectApp ? AddConfigurationType.App : await this.getServerType();
 		if (serverType === undefined) {
@@ -616,7 +615,7 @@ export class McpAddConfigurationCommand {
 		let destination: McpSetupDestination | undefined;
 		switch (serverType) {
 			case AddConfigurationType.App: {
-				const app = await this.getAppConfig();
+				const app = await this.getAppConfig(connectApp ? appId : undefined);
 				config = app?.config;
 				suggestedName = app?.name;
 				if (app?.localOnly) { destination = { installTarget: { kind: 'local', target: ConfigurationTarget.USER_LOCAL }, format: McpResourceFormat.Vscode }; }

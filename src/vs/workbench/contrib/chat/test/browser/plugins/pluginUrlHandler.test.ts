@@ -304,6 +304,7 @@ suite('PluginUrlHandler', () => {
 				override readonly onDidChangeSessions = Event.None;
 			}(),
 			NullTelemetryService,
+			{ _serviceBrand: undefined, applicationName: 'code-oss' },
 		));
 		const sourceId = getProviderMarketplaceSourceId('catalog');
 		const before = marketplaceService.sources.some(source => source.id === sourceId);

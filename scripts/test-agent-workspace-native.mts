@@ -63,8 +63,8 @@ const report = {
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
 	modelRequestCount: 0,
-	appPickerVerified: false, payPalSandboxVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
-	appHeaderVerified: false, googleOAuthSetupVerified: false,
+	appPickerVerified: false, payPalSandboxVerified: false, datadogRegionVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
+	appHeaderVerified: false, googleOAuthSetupVerified: false, browseAppConnectionsVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
 try {
@@ -81,6 +81,7 @@ try {
 		'agents.subscriptions.devinExecutable': join(run, 'not-installed-devin.exe'),
 		'sessions.useWorktree': false, 'files.autoSave': 'off',
 		'extensions.autoUpdate': false, 'extensions.autoCheckUpdates': false,
+		...(appConnections ? { 'chat.customizations.marketplace.enabled': true } : {}),
 		...(protocol ? { 'security.promptForLocalFileProtocolHandling': false, 'security.promptForRemoteFileProtocolHandling': false } : {}),
 	};
 	for (const file of [join(profile, 'User', 'settings.json'), join(profile, 'User', 'profiles', 'builtin', 'agents', 'settings.json')]) {
@@ -208,6 +209,20 @@ try {
 		await page.keyboard.press('Escape');
 		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
 		await openAppPicker();
+		await input.fill('Datadog');
+		const datadogUs = page.getByRole('option').filter({ has: page.getByText('Datadog (US1)', { exact: true }) });
+		const datadogEu = page.getByRole('option').filter({ has: page.getByText('Datadog (EU1)', { exact: true }) });
+		await Promise.all([datadogUs.waitFor(), datadogEu.waitFor()]);
+		await datadogEu.click();
+		const datadogReview = page.getByRole('dialog').filter({ hasText: 'Connect Datadog (EU1)' });
+		await datadogReview.waitFor();
+		const datadogDetails = await datadogReview.innerText();
+		assert.ok(datadogDetails.includes('https://mcp.datadoghq.eu/v1/mcp'));
+		assert.ok(datadogDetails.includes('site that hosts your Datadog organization'));
+		report.datadogRegionVerified = true;
+		await page.keyboard.press('Escape');
+		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		await openAppPicker();
 		await input.fill('QuickBooks');
 		await page.getByText('QuickBooks Online (Local Server)', { exact: true }).waitFor();
 		const hosted = page.getByRole('option').filter({ has: page.getByText('QuickBooks Online (Hosted Pilot)', { exact: true }) });
@@ -254,6 +269,23 @@ try {
 		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
 		assert.ok(await connectApp.evaluate(element => element.ownerDocument.activeElement === element), 'Cancelled app setup must restore focus to its MCP header button');
 		report.googleOAuthSetupVerified = true;
+		stage = 'Browse customizations app connections';
+		await editor.locator('button.sidebar-home-button').getByText('Browse', { exact: true }).click();
+		const gallery = editor.locator('.customization-discovery');
+		await gallery.getByText('Browse customizations', { exact: true }).waitFor();
+		await gallery.getByRole('button', { name: 'View all customizations from Signal-C App Connections', exact: true }).waitFor();
+		await capture(page, 'browse-customizations-app-connections.png');
+		await gallery.getByRole('button', { name: 'Customization source: All Sources', exact: true }).click();
+		await page.getByRole('menu').getByText('Signal-C App Connections', { exact: true }).click();
+		await gallery.locator('.customization-discovery-search').click({ position: { x: 80, y: 12 } });
+		await page.keyboard.type('Datadog EU1');
+		const connectDatadog = gallery.getByRole('button', { name: 'Connect Datadog (EU1)', exact: true });
+		await connectDatadog.press('Enter');
+		await datadogReview.waitFor();
+		assert.ok((await datadogReview.innerText()).includes('https://mcp.datadoghq.eu/v1/mcp'));
+		await page.keyboard.press('Escape');
+		await datadogReview.waitFor({ state: 'hidden' });
+		report.browseAppConnectionsVerified = true;
 		await page.keyboard.press('Control+w');
 		await editor.waitFor({ state: 'hidden' });
 		assert.deepEqual(await readConfigurations(), before, 'Cancelled app setup must not modify any fixture MCP configuration');
