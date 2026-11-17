@@ -1893,7 +1893,9 @@ export class NewChatWidget extends Disposable {
 					this.selectNoWorkspace(target, { userSelection: false, preserveNavigation: true });
 				} else {
 					// An automatic fallback must not persist a user choice or supersede a window-open workspace.
-					this._createdSessionId = (this._detached ? this._openQuickChat(target, true) : this.sessionsService.openQuickChat(target, true))?.sessionId;
+					this._createdSessionId = (this._detached
+						? this._openQuickChat(target, true)
+						: this.sessionsService.openQuickChat(target, true, isTypingInEditableElement()))?.sessionId;
 				}
 			}
 		} catch (error) {
@@ -2183,16 +2185,17 @@ export class NewChatWidget extends Disposable {
 		// What a hosted composer selects on its own is not the main composer's selection.
 		this._workspacePicker.selectNoWorkspace(userSelection, userSelection || !this._draftHost);
 		const environment = this._environment.get();
+		const preserveFocus = !userSelection && isTypingInEditableElement();
 		const session = environment?.kind === 'cloud' || environment?.kind === 'container'
-			? this._createQuickChat(options ?? this._workspaceOptOutTarget.get(), selectionOptions?.preserveNavigation)
-			: this._openQuickChat(options, selectionOptions?.preserveNavigation);
+			? this._createQuickChat(options ?? this._workspaceOptOutTarget.get(), selectionOptions?.preserveNavigation, preserveFocus)
+			: this._openQuickChat(options, selectionOptions?.preserveNavigation, preserveFocus);
 		if (session && environment && (environment.kind === 'container' || !environment.providerIds.includes(session.providerId))) {
 			this._reconcileWorkspaceEnvironment({ providerId: session.providerId });
 		}
 		return session;
 	}
 
-	private _openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean): ISession | undefined {
+	private _openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): ISession | undefined {
 		const environment = this._environment.get();
 		if (!options && environment) {
 			options = this._workspaceOptOutTarget.get();
@@ -2201,10 +2204,10 @@ export class NewChatWidget extends Disposable {
 				return undefined;
 			}
 		}
-		return this._createQuickChat(options, preserveNavigation);
+		return this._createQuickChat(options, preserveNavigation, preserveFocus);
 	}
 
-	private _createQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean): ISession | undefined {
+	private _createQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): ISession | undefined {
 		if (this._detached) {
 			try {
 				const session = this._draftSlot.createQuickChat(options);
@@ -2217,7 +2220,7 @@ export class NewChatWidget extends Disposable {
 				return undefined;
 			}
 		}
-		return this.sessionsService.openQuickChat(options, preserveNavigation);
+		return this.sessionsService.openQuickChat(options, preserveNavigation, preserveFocus);
 	}
 
 	/**

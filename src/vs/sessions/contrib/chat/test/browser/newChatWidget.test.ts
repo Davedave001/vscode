@@ -463,8 +463,8 @@ interface ISelectNoWorkspaceHarness {
 	readonly _workspacePicker: { selectNoWorkspace(userSelection?: boolean): void };
 	readonly sessionsService: { openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): { readonly sessionId: string } };
 	readonly logService: Pick<ILogService, 'trace' | 'error'>;
-	_openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean): { readonly sessionId: string } | undefined;
-	_createQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean): { readonly sessionId: string } | undefined;
+	_openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): { readonly sessionId: string } | undefined;
+	_createQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): { readonly sessionId: string } | undefined;
 	_reconcileWorkspaceEnvironment?(options: { providerId: string }): void;
 }
 
@@ -502,7 +502,7 @@ interface IRestoreNoWorkspaceDraftHarness {
 	readonly sessionsService: {
 		readonly activeSession: IObservable<ITestSessionWithChat | undefined>;
 		readonly initialRestoreComplete: IObservable<boolean>;
-		openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean): ITestSessionWithChat | undefined;
+		openQuickChat(options?: ICreateNewSessionOptions, preserveNavigation?: boolean, preserveFocus?: boolean): ITestSessionWithChat | undefined;
 	};
 	readonly sessionsManagementService: { isQuickChatTargetAvailable(): boolean };
 	selectNoWorkspace(options?: ICreateNewSessionOptions, selectionOptions?: ISelectNoWorkspaceOptions): void;
@@ -2419,9 +2419,10 @@ suite('NewChatWidget', () => {
 		});
 	});
 
-	test('programmatic No workspace selection preserves navigation', () => {
+	test('programmatic No workspace selection preserves navigation and active input focus', () => {
 		const userSelections: boolean[] = [];
 		const preserveNavigation: (boolean | undefined)[] = [];
+		const preserveFocus: (boolean | undefined)[] = [];
 		const harness: ISelectNoWorkspaceHarness = {
 			_environment: constObservable(undefined),
 			_workspaceOptOutTarget: constObservable(undefined),
@@ -2429,21 +2430,31 @@ suite('NewChatWidget', () => {
 			_newSessionCreation: disposables.add(new MutableDisposable()),
 			_workspacePicker: { selectNoWorkspace: userSelection => userSelections.push(userSelection ?? true) },
 			sessionsService: {
-				openQuickChat: (_options, preserve) => {
+				openQuickChat: (_options, preserve, keepFocus) => {
 					preserveNavigation.push(preserve);
+					preserveFocus.push(keepFocus);
 					return { sessionId: 'quick-chat' };
 				},
 			},
-			_openQuickChat: (options, preserve) => openQuickChat.call(harness, options, preserve),
+			_openQuickChat: (options, preserve, keepFocus) => openQuickChat.call(harness, options, preserve, keepFocus),
 			_createQuickChat: createQuickChat,
 			logService: { trace: () => { }, error: () => assert.fail('Unexpected quick-chat preparation error') },
 		};
 
-		selectNoWorkspace.call(harness, undefined, { userSelection: false, preserveNavigation: true });
+		const input = append(mainWindow.document.body, $('input'));
+		try {
+			input.focus();
+			assert.strictEqual(mainWindow.document.activeElement, input);
+			selectNoWorkspace.call(harness, undefined, { userSelection: false, preserveNavigation: true });
+			selectNoWorkspace.call(harness);
+		} finally {
+			input.remove();
+		}
 
-		assert.deepStrictEqual({ userSelections, preserveNavigation }, {
-			userSelections: [false],
-			preserveNavigation: [true],
+		assert.deepStrictEqual({ userSelections, preserveNavigation, preserveFocus }, {
+			userSelections: [false, true],
+			preserveNavigation: [true, undefined],
+			preserveFocus: [true, false],
 		});
 	});
 
@@ -2495,6 +2506,7 @@ suite('NewChatWidget', () => {
 			const initialRestoreComplete = observableValue('initialRestoreComplete', true);
 			const opened: string[] = [];
 			const openedTargets: (ICreateNewSessionOptions | undefined)[] = [];
+			const preservedFocus: (boolean | undefined)[] = [];
 			const noWorkspaceSelections: (ISelectNoWorkspaceOptions | undefined)[] = [];
 			let quickChatAvailable = true;
 			let noWorkspaceSelected = false;
@@ -2525,7 +2537,10 @@ suite('NewChatWidget', () => {
 				sessionsService: {
 					activeSession,
 					initialRestoreComplete,
-					openQuickChat: (options, preserveNavigation) => open(preserveNavigation ? 'automatic' : 'explicit', options),
+					openQuickChat: (options, preserveNavigation, preserveFocus) => {
+						preservedFocus.push(preserveFocus);
+						return open(preserveNavigation ? 'automatic' : 'explicit', options);
+					},
 				},
 				sessionsManagementService: { isQuickChatTargetAvailable: () => quickChatAvailable },
 				selectNoWorkspace: (options, selectionOptions) => {
@@ -2534,7 +2549,7 @@ suite('NewChatWidget', () => {
 				},
 			};
 			return {
-				harness, activeSession, initialRestoreComplete, opened, openedTargets, noWorkspaceSelections,
+				harness, activeSession, initialRestoreComplete, opened, openedTargets, noWorkspaceSelections, preservedFocus,
 				set quickChatAvailable(value: boolean) { quickChatAvailable = value; },
 				set noWorkspaceSelected(value: boolean) { noWorkspaceSelected = value; },
 				set selectedFolderUri(value: URI | undefined) { selectedFolderUri = value; },
@@ -2748,6 +2763,24 @@ suite('NewChatWidget', () => {
 				beforeRestore: [],
 				afterRestore: ['automatic'],
 			});
+		});
+
+		test('an automatic quick chat preserves input focus acquired during startup', async () => {
+			const state = createRestoreHarness();
+			const discovery = new DeferredPromise<boolean>();
+			state.workspaceRestored = discovery.p;
+			const restoring = state.restore();
+			const input = append(mainWindow.document.body, $('input'));
+			try {
+				input.focus();
+				assert.strictEqual(mainWindow.document.activeElement, input);
+				await discovery.complete(true);
+				await restoring;
+				assert.deepStrictEqual(state.opened, ['automatic']);
+				assert.deepStrictEqual(state.preservedFocus, [true]);
+			} finally {
+				input.remove();
+			}
 		});
 
 		test('cancels pending restoration when the composer is disposed', async () => {
