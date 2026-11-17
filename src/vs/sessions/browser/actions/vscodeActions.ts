@@ -118,7 +118,8 @@ export class OpenInVSCodeAction extends Action2 {
 			await openerService.open(URI.from({
 				scheme,
 				authority: Schemas.file,
-				path: folderUri.path,
+				// The editor reconstructs a file URI from this path, including its UNC server.
+				path: folderUri.scheme === Schemas.file && folderUri.authority ? `//${folderUri.authority}${folderUri.path}` : folderUri.path,
 				query: params.toString(),
 			}), { openExternal: true });
 		}

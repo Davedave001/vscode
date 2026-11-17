@@ -45,16 +45,18 @@ suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
 	for (const status of [SessionStatus.Completed, SessionStatus.Untitled]) {
-		for (const explicit of [false, true]) {
-			test(`opens the ${explicit ? 'clicked' : 'focused'} chat workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'}`, async () => {
+		for (const { explicit, network } of [{ explicit: false, network: false }, { explicit: true, network: false }, { explicit: false, network: true }, { explicit: true, network: true }]) {
+			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'}`, async () => {
 				const instantiation = store.add(new TestInstantiationService());
 				const mainFolder = URI.file('/main project');
-				const folder = URI.file(explicit ? '/clicked project' : '/nested project');
+				const folder = network
+					? URI.from({ scheme: 'file', authority: 'fileserver', path: explicit ? '/shared projects/clicked # & 100%/项目' : '/shared projects/nested # & 100%/项目' })
+					: URI.file(explicit ? '/clicked project' : '/nested project');
 				const mainChat = upcastPartial<IChat>({ resource: URI.parse('test:/main-chat'), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: mainFolder, workingDirectory: mainFolder, name: 'main', description: undefined }] })) });
 				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
 				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(status), mainChat: constObservable(mainChat) });
 				const focused = upcastPartial<ISessionHost>({ session: constObservable(session), chat: constObservable(explicit ? mainChat : chat) });
-				const opened: { authority: string; path: string; session: string | null }[] = [];
+				const opened: { authority: string; path: string; folder: string; session: string | null }[] = [];
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
 				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => focused }));
 				instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
@@ -66,12 +68,13 @@ suite('Web Open in Editor', () => {
 				instantiation.stub(ITelemetryService, NullTelemetryService);
 				instantiation.stub(IProductService, upcastPartial<IProductService>({ urlProtocol: 'vscode-test' }));
 				instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async resource => {
-					const uri = typeof resource === 'string' ? URI.parse(resource) : resource;
-					opened.push({ authority: uri.authority, path: uri.path, session: new URLSearchParams(uri.query).get('session') });
+					const uri = URI.parse(resource.toString());
+					// The native protocol handler reconstructs the file URI from the link's fsPath.
+					opened.push({ authority: uri.authority, path: uri.path, folder: URI.file(uri.fsPath).toString(), session: new URLSearchParams(uri.query).get('session') });
 					return true;
 				} }));
 				await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, explicit ? { session, chat } : undefined));
-				assert.deepStrictEqual(opened, [{ authority: 'file', path: folder.path, session: status === SessionStatus.Untitled ? null : chat.resource.toString() }]);
+				assert.deepStrictEqual(opened, [{ authority: 'file', path: network ? `//fileserver${folder.path}` : folder.path, folder: folder.toString(), session: status === SessionStatus.Untitled ? null : chat.resource.toString() }]);
 			});
 		}
 	}
