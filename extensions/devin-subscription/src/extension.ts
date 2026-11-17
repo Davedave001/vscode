@@ -15,6 +15,7 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	readonly onDidChangeSessions = this.changeEmitter.event;
 	private pending: Promise<vscode.AuthenticationSession> | undefined;
 	private readonly controllers = new Set<AbortController>();
+	private storageMutation: Promise<void> = Promise.resolve();
 
 	constructor(private readonly secrets: vscode.SecretStorage) { }
 
@@ -42,13 +43,25 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 			const disposable = cancellation.onCancellationRequested(() => controller.abort());
 			try {
 				const token = await signInToDevin({ openExternal: url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))), signal: controller.signal });
-				controller.signal.throwIfAborted();
-				const previous = await this.getSessions();
-				const id = previous[0]?.id ?? randomUUID();
-				const session: vscode.AuthenticationSession = { id, accessToken: token, account: { id, label: vscode.l10n.t('Devin account') }, scopes: [] };
-				await this.secrets.store(SESSION_KEY, JSON.stringify(session));
-				this.changeEmitter.fire({ added: previous.length ? [] : [session], changed: previous.length ? [session] : [], removed: [] });
-				return session;
+				return await this.mutateStorage(async () => {
+					controller.signal.throwIfAborted();
+					const previous = await this.getSessions();
+					controller.signal.throwIfAborted();
+					// The response does not identify the account. A new login may be
+					// another person, so never inherit the previous account's grants.
+					const id = randomUUID();
+					const session: vscode.AuthenticationSession = { id, accessToken: token, account: { id, label: vscode.l10n.t('Devin account') }, scopes: [] };
+					await this.secrets.store(SESSION_KEY, JSON.stringify(session));
+					if (controller.signal.aborted) {
+						if (previous.length) { await this.secrets.store(SESSION_KEY, JSON.stringify(previous[0])); } else { await this.secrets.delete(SESSION_KEY); }
+						controller.signal.throwIfAborted();
+					}
+					this.changeEmitter.fire({ added: [session], changed: [], removed: previous });
+					return session;
+				});
+			} catch (error) {
+				if (controller.signal.aborted) { throw new vscode.CancellationError(); }
+				throw error;
 			} finally {
 				disposable.dispose();
 				this.controllers.delete(controller);
@@ -57,12 +70,21 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	}
 
 	async removeSession(id: string): Promise<void> {
-		const sessions = await this.getSessions();
-		const removed = sessions.filter(session => session.id === id);
-		if (removed.length) {
-			await this.secrets.delete(SESSION_KEY);
-			this.changeEmitter.fire({ added: [], changed: [], removed });
-		}
+		for (const controller of this.controllers) { controller.abort(); }
+		await this.mutateStorage(async () => {
+			const sessions = await this.getSessions();
+			const removed = sessions.filter(session => session.id === id);
+			if (removed.length) {
+				await this.secrets.delete(SESSION_KEY);
+				this.changeEmitter.fire({ added: [], changed: [], removed });
+			}
+		});
+	}
+
+	private mutateStorage<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.storageMutation.then(operation);
+		this.storageMutation = result.then(() => { }, () => { });
+		return result;
 	}
 
 	dispose(): void {

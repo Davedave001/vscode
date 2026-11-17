@@ -7,11 +7,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-// These public endpoints and client id match the installed SimpleRAG browser
-// sign-in implementation. Credentials are exchanged only in the HTTPS body.
+// These endpoints match SimpleRAG and Devin's current public browser flow.
+// The installed official client exchanges only a code and PKCE verifier.
 export const DEVIN_AUTHORIZE_URL = 'https://app.devin.ai/auth/cli/continue';
 export const DEVIN_TOKEN_URL = 'https://api.devin.ai/auth/cli/token';
-const DEVIN_CLIENT_ID = '3GUryQ7ldAeKEuD2obYnppsnmj58eP5u';
 
 export interface SignInOptions {
 	readonly openExternal: (url: string) => Promise<boolean>;
@@ -88,7 +87,7 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 		const response = await (options.request ?? fetch)(DEVIN_TOKEN_URL, {
 			method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'error',
 			signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-			body: JSON.stringify({ grant_type: 'authorization_code', client_id: DEVIN_CLIENT_ID, code, redirect_uri: redirectUri, code_verifier: verifier, cli_pkce_marker: '1' }),
+			body: JSON.stringify({ code, code_verifier: verifier }),
 		});
 		if (!response.ok) {
 			throw new Error(`Devin token exchange failed (HTTP ${response.status}).`);
@@ -98,7 +97,7 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 			throw new Error('Devin did not return a valid sign-in response.');
 		}
 		const record = data as Record<string, unknown>;
-		const token = record.devin_session_token ?? record.session_token ?? record.access_token ?? record.token;
+		const token = record.session_token;
 		if (typeof token !== 'string' || !token.trim()) {
 			throw new Error('Devin did not return a session token.');
 		}

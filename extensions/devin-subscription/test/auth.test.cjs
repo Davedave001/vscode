@@ -41,9 +41,9 @@ test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting
 			assert.strictEqual(options.redirect, 'error');
 			const body = JSON.parse(options.body);
 			assert.strictEqual(body.code, 'test-authorization-code');
-			assert.strictEqual(body.redirect_uri, authorize.searchParams.get('redirect_uri'));
+			assert.deepStrictEqual(Object.keys(body).sort(), ['code', 'code_verifier']);
 			assert.strictEqual(createHash('sha256').update(body.code_verifier).digest('base64url'), authorize.searchParams.get('code_challenge'));
-			return Response.json({ devin_session_token: 'test-session-token' });
+			return Response.json({ session_token: 'test-session-token' });
 		},
 	});
 	assert.strictEqual(token, 'test-session-token');
@@ -116,6 +116,7 @@ for (const [name, response, expected] of [
 	['HTTP failure', new Response('private response contents', { status: 401 }), /HTTP 401/],
 	['error response', Response.json({ error: 'private error details' }), /valid sign-in response/],
 	['missing token', Response.json({ nested: { arbitrary_session: 'must-not-be-used' } }), /session token/],
+	['unrelated token field', Response.json({ access_token: 'must-not-be-used' }), /session token/],
 ]) {
 	test(`rejects ${name} without treating it as a connected account`, async () => {
 		await assert.rejects(signInToDevin({

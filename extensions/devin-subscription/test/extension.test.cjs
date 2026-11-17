@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const { test } = require('node:test');
 
-function activateProvider(signIn) {
+function activateProvider(signIn, storageHooks = {}) {
 	const originalLoad = Module._load;
 	const secrets = new Map();
 	const events = [];
@@ -15,10 +15,15 @@ function activateProvider(signIn) {
 	let cancellation;
 	const context = {
 		subscriptions: [],
-		secrets: { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } },
+		secrets: {
+			get: async key => { await storageHooks.beforeGet?.(); return secrets.get(key); },
+			store: async (key, value) => { secrets.set(key, value); await storageHooks.afterStore?.(value); },
+			delete: async key => { secrets.delete(key); },
+		},
 	};
 	const vscode = {
 		EventEmitter: class { event() { } fire(event) { events.push(event); } dispose() { } },
+		CancellationError: class extends Error { constructor() { super('Cancelled'); this.name = 'Canceled'; } },
 		l10n: { t: value => value }, ProgressLocation: { Notification: 15 },
 		window: { withProgress: async (_options, callback) => callback({}, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
 		env: { openExternal: async () => true }, Uri: { parse: value => value },
@@ -51,7 +56,7 @@ test('stores a browser session in SecretStorage and removes only the requested a
 	} finally { setup.dispose(); }
 });
 
-test('coalesces concurrent sign-in requests and preserves the account id on reauthentication', async () => {
+test('coalesces concurrent sign-in requests and assigns a new account id on reauthentication', async () => {
 	let calls = 0;
 	let release;
 	const setup = activateProvider(async () => { calls++; return new Promise(resolve => { release = resolve; }); });
@@ -64,9 +69,63 @@ test('coalesces concurrent sign-in requests and preserves the account id on reau
 		assert.strictEqual(a.id, b.id);
 		const again = setup.provider.createSession([]);
 		release('test-next-token');
-		assert.strictEqual((await again).id, a.id);
-		assert.strictEqual(setup.events[1].changed[0].accessToken, 'test-next-token');
+		const replacement = await again;
+		assert.notStrictEqual(replacement.account.id, a.account.id);
+		assert.notStrictEqual(replacement.id, a.id);
+		assert.strictEqual(setup.events[1].added[0].accessToken, 'test-next-token');
+		assert.strictEqual(setup.events[1].removed[0].id, a.id);
+		assert.deepStrictEqual(setup.events[1].changed, []);
 	} finally { setup.dispose(); }
+});
+
+function deferred() {
+	let resolve;
+	const promise = new Promise(complete => { resolve = complete; });
+	return { promise, resolve };
+}
+
+test('cancellation while reading the previous session preserves the original account', { timeout: 2000 }, async () => {
+	const reading = deferred();
+	const release = deferred();
+	let hold = false;
+	let calls = 0;
+	const setup = activateProvider(async () => ++calls === 1 ? 'first-token' : 'replacement-token', {
+		beforeGet: async () => { if (hold) { reading.resolve(); await release.promise; } },
+	});
+	try {
+		const original = await setup.provider.createSession([]);
+		hold = true;
+		const replacement = setup.provider.createSession([]);
+		await reading.promise;
+		setup.cancel();
+		release.resolve();
+		await assert.rejects(replacement, { name: 'Canceled' });
+		hold = false;
+		assert.deepStrictEqual(await setup.provider.getSessions(), [original]);
+		assert.strictEqual(setup.events.length, 1);
+	} finally { release.resolve(); setup.dispose(); }
+});
+
+test('sign-out wins against an in-progress credential write without resurrecting the account', { timeout: 2000 }, async () => {
+	const writing = deferred();
+	const release = deferred();
+	let calls = 0;
+	const setup = activateProvider(async () => ++calls === 1 ? 'first-token' : 'replacement-token', {
+		afterStore: async value => { if (JSON.parse(value).accessToken === 'replacement-token') { writing.resolve(); await release.promise; } },
+	});
+	try {
+		const original = await setup.provider.createSession([]);
+		const replacement = setup.provider.createSession([]);
+		await writing.promise;
+		const removal = setup.provider.removeSession(original.id);
+		release.resolve();
+		await assert.rejects(replacement, { name: 'Canceled' });
+		await removal;
+		assert.deepStrictEqual(await setup.provider.getSessions(), []);
+		assert.strictEqual(setup.events.length, 2);
+		assert.deepStrictEqual(setup.events[1].removed, [original]);
+		assert.deepStrictEqual(setup.events[1].added, []);
+	} finally { release.resolve(); setup.dispose(); }
 });
 
 test('does not persist a session when cancellation wins the token-return race', async () => {
