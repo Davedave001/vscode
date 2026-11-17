@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { _electron, type ElectronApplication, type Page } from 'playwright';
+import { _electron, type ElectronApplication, type Locator, type Page } from 'playwright';
 
 assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Windows development runtime');
 const require = createRequire(import.meta.url);
@@ -20,7 +20,8 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string; args: string[] } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, or --workspace-protocol');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, or --keyboard');
+const keyboard = process.argv.includes('--keyboard');
 const workspaceProtocol = process.argv.includes('--workspace-protocol');
 const protocol = workspaceProtocol || process.argv.includes('--protocol');
 const conversation = protocol || process.argv.includes('--conversation');
@@ -57,6 +58,7 @@ const report = {
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
 	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
+	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
@@ -138,7 +140,7 @@ try {
 		'--agent-cli-fallback-dir', cliFallback,
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
-		...(protocol ? ['--log', 'trace'] : [])];
+		...(protocol || keyboard ? ['--log', 'trace'] : [])];
 	app = await _electron.launch({ executablePath: executable, args: [root, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
 	const launched = app;
 	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
@@ -164,6 +166,38 @@ try {
 		report.windowChecks.push({ stage: label, windows });
 		assert.ok(windows.every(window => window.hidden), 'Every fixture window must remain hidden');
 		return windows.map(window => window.id).sort((a, b) => a - b);
+	};
+	const rendererLogs = async () => {
+		const logs: string[] = [];
+		for (const log of await readdir(join(profile, 'logs'), { withFileTypes: true })) {
+			if (!log.isDirectory()) { continue; }
+			for (const window of await readdir(join(profile, 'logs', log.name), { withFileTypes: true })) {
+				if (!window.isDirectory() || !window.name.startsWith('window')) { continue; }
+				logs.push(await readFile(join(profile, 'logs', log.name, window.name, 'renderer.log'), 'utf8').catch(() => ''));
+			}
+		}
+		return logs;
+	};
+	const activateSwitch = async (page: Page, roundTrip: number, sourceInput: Locator) => {
+		const control = page.getByRole('switch', { name: 'IDE mode', exact: true });
+		if (!keyboard) { await control.click(); return; }
+		const toAgents = await control.getAttribute('aria-checked') === 'true';
+		const commandId = toAgents ? 'workbench.action.openWorkspaceInAgentsWindow' : 'agents.openSessionInVSCode';
+		const countCommands = async () => (await rendererLogs()).reduce((total, log) => total + log.split(/\r?\n/).filter(line => line.endsWith(`CommandService#executeCommand ${commandId}`)).length, 0);
+		const before = await countCommands();
+		if (roundTrip === 1) {
+			await sourceInput.click();
+			await page.keyboard.press('Control+k');
+			await page.keyboard.press('Control+Shift+a');
+		} else {
+			await control.focus();
+			assert.ok(await control.evaluate(element => element.ownerDocument.activeElement === element), 'Keyboard activation must focus the production switch');
+			await page.keyboard.press(toAgents ? 'Enter' : 'Space');
+		}
+		const timeout = Date.now() + 15000;
+		while (await countCommands() === before && Date.now() < timeout) { await new Promise(resolve => setTimeout(resolve, 100)); }
+		assert.equal(await countCommands(), before + 1, 'Each keyboard activation must dispatch exactly one mode command');
+		report.keyboardActivations.push({ stage, method: roundTrip === 1 ? 'global-shortcut' : toAgents ? 'Enter' : 'Space', commandId });
 	};
 	if (emptyWorkspace) {
 		stage = 'empty Agents';
@@ -221,13 +255,8 @@ try {
 		if (protocol) {
 			stage = 'warm editor protocol';
 			let chatResource: string | undefined;
-			for (const log of await readdir(join(profile, 'logs'), { withFileTypes: true })) {
-				if (!log.isDirectory()) { continue; }
-				for (const window of await readdir(join(profile, 'logs', log.name), { withFileTypes: true })) {
-					if (!window.isDirectory() || !window.name.startsWith('window')) { continue; }
-					const renderer = await readFile(join(profile, 'logs', log.name, window.name, 'renderer.log'), 'utf8').catch(() => '');
-					for (const match of renderer.matchAll(/vscode:openChatSession\s+(\S+)/g)) { chatResource = match[1]; }
-				}
+			for (const renderer of await rendererLogs()) {
+				for (const match of renderer.matchAll(/vscode:openChatSession\s+(\S+)/g)) { chatResource = match[1]; }
 			}
 			assert.ok(chatResource, 'The first native handoff must record its conversation identity');
 			const product = JSON.parse(await readFile(join(root, 'product.json'), 'utf8')) as { urlProtocol: string };
@@ -282,14 +311,14 @@ try {
 		}
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `empty return to Agents ${roundTrip}`;
-			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await activateSwitch(ide, roundTrip, ide.getByRole('code').getByText(marker, { exact: false }));
 			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds);
 			if (conversation) { await agents.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor(); }
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
 			report.agentsDraftRetained = true;
 			stage = `empty return to IDE ${roundTrip}`;
-			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await activateSwitch(agents, roundTrip, input);
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'A folderless handoff must reuse the existing editor');
 			if (conversation) { await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor(); }
@@ -383,7 +412,7 @@ try {
 		await capture(agents, 'agents-draft.png');
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `return to IDE ${roundTrip}`;
-			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await activateSwitch(agents, roundTrip, input);
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'The handoff must not open another editor window');
 			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
@@ -392,7 +421,7 @@ try {
 			report.windowReuseVerified = true; report.dirtyBufferRetained = true;
 			await capture(ide, `ide-return-${roundTrip}.png`);
 			stage = `return to Agents ${roundTrip}`;
-			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await activateSwitch(ide, roundTrip, ide.getByRole('code').getByText(marker, { exact: false }));
 			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds);
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The original Agents draft must remain');
@@ -401,6 +430,7 @@ try {
 		}
 		await capture(agents, 'agents-returned.png');
 	}
+	if (keyboard) { assert.equal(report.keyboardActivations.length, 4, 'The native fixture must exercise both modes by shortcut and focused control'); }
 } catch (error) {
 	const failedApp = app;
 	await Promise.all((failedApp?.windows() ?? []).map(async (page, i) => {
