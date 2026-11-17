@@ -183,7 +183,20 @@ suite('VS Code Actions', () => {
 		await instantiationService.invokeFunction(openSessionInVSCode, createSession('no-workspace', true));
 		await instantiationService.invokeFunction(openSessionInVSCode, createSession('empty-workspace', true, []));
 
-		assert.deepStrictEqual(calls, Array.from({ length: 3 }, () => ({ remoteAuthority: null, reuseExistingWindow: true })));
+		assert.deepStrictEqual(calls, [
+			{ remoteAuthority: null, reuseExistingWindow: true },
+			{ remoteAuthority: null, reuseExistingWindow: true, chatSessionToOpen: URI.parse('test:/no-workspace') },
+			{ remoteAuthority: null, reuseExistingWindow: true, chatSessionToOpen: URI.parse('test:/empty-workspace') },
+		]);
+	});
+
+	test('keeps a folderless nested draft in Agents while requesting its editor window', async () => {
+		const calls: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { calls.push(toOpen); }
+		}());
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('parent', true, [URI.file('/parent')]), createSession('draft', false).mainChat.get());
+		assert.deepStrictEqual(calls, [{ remoteAuthority: null, reuseExistingWindow: true }]);
 	});
 
 	for (const [connection, remoteAuthority] of [
@@ -214,9 +227,9 @@ suite('VS Code Actions', () => {
 
 			const toOpen = { remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true };
 			assert.deepStrictEqual(calls, [
-				{ toOpen, options: undefined },
-				{ toOpen, options: undefined },
-				{ toOpen, options: undefined },
+				{ toOpen: { ...toOpen, chatSessionToOpen: URI.parse('test:/no-workspace') }, options: undefined },
+				{ toOpen: { ...toOpen, chatSessionToOpen: URI.parse('test:/empty-workspace') }, options: undefined },
+				{ toOpen: { ...toOpen, chatSessionToOpen: URI.parse('test:/nested/chat') }, options: undefined },
 			]);
 		});
 	}
@@ -246,6 +259,32 @@ suite('VS Code Actions', () => {
 
 		assert.deepStrictEqual(calls, [{ folders: ['file:///nested'], chat: 'test:/nested-chat' }]);
 	});
+
+	for (const [connection, serverType, remoteAuthority, reason] of [
+		[{ type: RemoteAgentHostEntryType.SSH, address: 'ssh:host', hostName: 'host' }, 'standalone', 'ssh-remote+host', undefined],
+		[{ type: RemoteAgentHostEntryType.SSH, address: 'ssh:host', hostName: 'host' }, 'editor', 'ssh-remote+host', 'differentAgentHost'],
+		[{ type: RemoteAgentHostEntryType.WSL, address: 'wsl:Ubuntu', distro: 'Ubuntu' }, undefined, 'wsl+Ubuntu', undefined],
+		[{ type: RemoteAgentHostEntryType.WebSocket, address: 'ws:host' }, undefined, null, 'unsupported'],
+	] satisfies [IRemoteAgentHostEntry['connection'], TunnelGatewayServerType | undefined, string | null, 'differentAgentHost' | 'unsupported' | undefined][]) {
+		test(`preserves the host and validates the identity for a folderless ${connection.type} conversation (${serverType ?? 'default'})`, async () => {
+			const entry: IRemoteAgentHostEntry = { name: 'Remote host', connection };
+			const address = getEntryAddress(entry);
+			const authority = agentHostAuthority(address);
+			const resource = URI.from({ scheme: remoteAgentHostSessionTypeId(authority, 'copilotcli'), path: '/folderless', fragment: 'nested-chat' });
+			const calls: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
+			instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+				override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { calls.push(toOpen); }
+			}());
+			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
+			instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
+			instantiationService.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => entry }));
+			instantiationService.stub(IAgentHostConnectionsService, upcastPartial<IAgentHostConnectionsService>({ resolveSessionResourceIdentity: () => ({ connectionAuthority: authority, backendSession: URI.parse('copilotcli:/folderless') }) }));
+			instantiationService.stub(ISSHRemoteAgentHostService, upcastPartial<ISSHRemoteAgentHostService>({ connections: [upcastPartial<ISSHAgentHostConnection>({ localAddress: address, serverType })] }));
+			await instantiationService.invokeFunction(openSessionInVSCode, createSession('remote', true, undefined, resource));
+			assert.deepStrictEqual(calls, [{ remoteAuthority, reuseExistingWindow: true, ...(!reason ? { chatSessionToOpen: resource.with({ scheme: 'agent-host-copilotcli' }) } : {}) }]);
+			assert.deepStrictEqual(notifications, reason === 'differentAgentHost' ? ['This chat can\'t be opened in the editor because it uses a different agent host on the remote machine.'] : reason === 'unsupported' ? ['Editor windows can\'t open chats from this kind of remote.'] : []);
+		});
+	}
 
 	for (const folders of [
 		[toAgentHostUri(URI.file('C:\\Users\\test\\project'), agentHostAuthority('cloudsandbox:environment'))],

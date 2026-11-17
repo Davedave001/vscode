@@ -180,8 +180,14 @@ export function getEditorWindowSessionResource(
 	return resource.with({ scheme: sessionType });
 }
 
-/** Explains why the editor window opened for a session's folder does not open the session as well. */
-export function notifyEditorWindowSessionUnsupported(notificationService: INotificationService, reason: EditorWindowSessionUnsupportedReason): void {
+/** Explains why an editor window cannot open the session's chat. */
+export function notifyEditorWindowSessionUnsupported(notificationService: INotificationService, reason: EditorWindowSessionUnsupportedReason, hasWorkspace = true): void {
+	if (!hasWorkspace) {
+		notificationService.info(reason === 'differentAgentHost'
+			? localize('openInVSCode.folderlessDifferentAgentHost', "This chat can't be opened in the editor because it uses a different agent host on the remote machine.")
+			: localize('openInVSCode.folderlessUnsupported', "Editor windows can't open chats from this kind of remote."));
+		return;
+	}
 	notificationService.info(reason === 'differentAgentHost'
 		? localize('openInVSCode.differentAgentHostSessionUnsupported', "The session's folder was opened in a new editor window, but the session can't be opened there. This window is connected to a different agent host on the remote machine than the one its editor windows use.")
 		: localize('openInVSCode.sessionUnsupported', "The session's folder was opened in a new editor window, but editor windows can't open sessions from this kind of remote."));

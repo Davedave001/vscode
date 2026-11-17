@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
+import { sendChatSessionToWindow } from './windowChatSession.js';
 import { exec } from 'child_process';
 import { app, BrowserWindow, clipboard, contentTracing, desktopCapturer, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, nativeImage, Notification, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, powerSaveBlocker, SaveDialogOptions, SaveDialogReturnValue, screen, shell, systemPreferences, webContents } from 'electron';
 import { arch, cpus, freemem, loadavg, platform, release, totalmem, type } from 'os';
@@ -360,22 +361,16 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 				forceTempProfile: options.forceTempProfile,
 			});
 
-			// Hand off a chat session to the opened window so it restores both the
-			// folder and the session (e.g. the Agents window "Open in VS Code" flow).
-			// Only meaningful when exactly one window is opened so the session is
-			// not sent to an ambiguous target.
-			const chatSessionToOpen = options.chatSessionToOpen;
-			if (chatSessionToOpen && windows.length === 1) {
-				windows[0].sendWhenReady('vscode:openChatSession', CancellationToken.None, URI.revive(chatSessionToOpen).toString());
-			}
+			sendChatSessionToWindow(windows, options.chatSessionToOpen);
 		}
 	}
 
 	private async doOpenEmptyWindow(windowId: number | undefined, options?: IOpenEmptyWindowOptions): Promise<void> {
-		await this.windowsMainService.openEmptyWindow({
+		const windows = await this.windowsMainService.openEmptyWindow({
 			context: OpenContext.API,
 			contextWindowId: windowId
 		}, options);
+		sendChatSessionToWindow(windows, options?.chatSessionToOpen);
 	}
 
 	async openAgentsWindow(windowId: number | undefined, options?: IOpenAgentsWindowOptions): Promise<void> {

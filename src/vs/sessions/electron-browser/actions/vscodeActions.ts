@@ -84,12 +84,11 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	const notificationService = accessor.get(INotificationService);
 	const labelService = accessor.get(ILabelService);
 
-	const folders = (chat ?? session?.mainChat.get())?.workspace.get()?.folders;
-	if (!session || !folders?.length) {
-		const remoteAuthority = session && resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService);
-		return nativeHostService.openWindow({ remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true });
+	if (!session) {
+		return nativeHostService.openWindow({ remoteAuthority: null, reuseExistingWindow: true });
 	}
 
+	const folders = (chat ?? session.mainChat.get())?.workspace.get()?.folders ?? [];
 	const foldersToOpen: IFolderToOpen[] = [];
 	for (const folder of folders) {
 		const folderUri = resolveRemoteFolderUri(folder.workingDirectory, session.providerId, sessionsProvidersService, remoteAgentHostService);
@@ -105,7 +104,11 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	const chatSessionToOpen = getChatSessionToOpenInEditor(session, chat);
 	const editorChatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, session.providerId, sessionsProvidersService, remoteAgentHostService, agentHostConnectionsService, tunnelAgentHostService, accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService));
 	if (typeof editorChatSession === 'string') {
-		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession);
+		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession, folders.length > 0);
+	}
+	if (!foldersToOpen.length) {
+		const remoteAuthority = resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService);
+		return nativeHostService.openWindow({ remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true, ...(URI.isUri(editorChatSession) ? { chatSessionToOpen: editorChatSession } : {}) });
 	}
 	return nativeHostService.openWindow(foldersToOpen, { forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: URI.isUri(editorChatSession) ? editorChatSession : undefined });
 }
