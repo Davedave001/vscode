@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 
@@ -17,7 +17,7 @@ assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Wind
 const require = createRequire(import.meta.url);
 const { startServer, registerScenario } = require('./chat-simulation/common/mock-llm-server.ts') as typeof import('./chat-simulation/common/mock-llm-server.ts');
 const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(server: { url: string }): Record<string, string> };
-const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string } };
+const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string; args: string[] } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
 assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, or --workspace-protocol');
@@ -56,6 +56,7 @@ const report = {
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
 	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
+	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
@@ -123,10 +124,18 @@ try {
 	assert.equal(execFileSync(process.execPath, ['-p', 'require("node:os").homedir()'], { env, windowsHide: true, encoding: 'utf8' }).trim(), fixtureHome);
 	const inspectArgs = await allocateInspectorArgs();
 	stage = 'launching';
-	const executable = createLaunchOptions(root, workspace, true, {}).executable;
+	const launch = createLaunchOptions(root, workspace, true, {});
+	const executable = launch.executable;
+	const fallbackIndex = launch.args.indexOf('--agent-cli-fallback-dir');
+	assert.ok(fallbackIndex >= 0, 'The native fixture requires the installed official Claude CLI fallback');
+	const cliFallback = launch.args[fallbackIndex + 1];
+	const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH';
+	// Startup must restore the fallback without help from the parent process's PATH.
+	env[pathKey] = (env[pathKey] ?? '').split(delimiter).filter(entry => entry.toLowerCase() !== cliFallback.toLowerCase()).join(delimiter);
 	const commonArgs = ['--hidden-window', '--extensionTestsPath', runner, '--enable-smoke-test-driver',
 		'--user-data-dir', profile, '--shared-data-dir', join(run, 'shared'), '--extensions-dir', join(run, 'extensions'),
 		'--agent-codex-home', join(run, 'codex'), '--agent-claude-config-dir', join(run, 'claude'),
+		'--agent-cli-fallback-dir', cliFallback,
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
 		...(protocol ? ['--log', 'trace'] : [])];
@@ -302,6 +311,12 @@ try {
 			const coldApp = app;
 			await coldApp.firstWindow({ timeout: 45000 });
 			assert.deepEqual(await coldApp.evaluate(() => ({ codex: process.env.CODEX_HOME, claude: process.env.CLAUDE_CONFIG_DIR })), { codex: join(run, 'codex'), claude: join(run, 'claude') }, 'Cold URL startup must restore explicit agent homes without launcher environment variables');
+			assert.ok(await coldApp.evaluate((_electron, directory) => (process.env.PATH ?? '').split(';').some(entry => entry.toLowerCase() === directory.toLowerCase()), cliFallback), 'Cold URL startup must restore the explicit CLI fallback without the launcher PATH');
+			report.coldClaudeCliVersion = await coldApp.evaluate(() => new Promise<string>((resolve, reject) => {
+				process.getBuiltinModule('child_process').execFile('claude.exe', ['--version'], { windowsHide: true, timeout: 15000 }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
+			}));
+			assert.match(report.coldClaudeCliVersion, /Claude Code/);
+			report.coldCliFallbackVerified = true;
 			let coldIDE: Page | undefined;
 			const restored = Date.now() + 60000;
 			while (!coldIDE && Date.now() < restored) {

@@ -46,6 +46,8 @@ test('makes the installed official Claude CLI a fallback without replacing PATH 
 		fs.writeFileSync(path.join(native, 'claude.exe'), '');
 		const inherited = { Path: 'existing-client-directory', CLAUDE_CONFIG_DIR: 'another-client-home' };
 		const launch = createLaunchOptions(root, root, false, inherited);
+		assert.ok(launch.args.includes('--agent-cli-fallback-dir'));
+		assert.strictEqual(launch.args[launch.args.indexOf('--agent-cli-fallback-dir') + 1], native);
 		assert.strictEqual(launch.environment.Path, `existing-client-directory${path.delimiter}${native}`);
 		assert.strictEqual(launch.environment.PATH, undefined);
 		assert.strictEqual(launch.environment.CLAUDE_CONFIG_DIR, path.join(root, '.build', 'agent-workspace-claude'));
@@ -53,7 +55,9 @@ test('makes the installed official Claude CLI a fallback without replacing PATH 
 		const alreadyAvailable = createLaunchOptions(root, root, false, { Path: native });
 		assert.strictEqual(alreadyAvailable.environment.Path, native);
 		fs.unlinkSync(path.join(native, 'claude.exe'));
-		assert.strictEqual(createLaunchOptions(root, root, false, inherited).environment.Path, inherited.Path);
+		const unavailable = createLaunchOptions(root, root, false, inherited);
+		assert.strictEqual(unavailable.environment.Path, inherited.Path);
+		assert.strictEqual(unavailable.args.includes('--agent-cli-fallback-dir'), false);
 	} finally {
 		assert.strictEqual(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
 		fs.rmSync(root, { recursive: true, force: true });

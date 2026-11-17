@@ -20,10 +20,11 @@ suite('Windows protocol handler arguments', () => {
 			assert.deepStrictEqual(getWindowsProtocolHandlerArguments(environment), [...(isBuilt ? [] : [environment.appRoot]), '--open-url', '--']);
 		});
 		test(`preserves explicit storage and agent home paths for ${isBuilt ? 'packaged' : 'development'} launches`, () => {
-			assert.deepStrictEqual(getWindowsProtocolHandlerArguments({ ...environment, args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared', 'agent-codex-home': '/resolved codex', 'agent-claude-config-dir': '/resolved claude' } }), [
+			assert.deepStrictEqual(getWindowsProtocolHandlerArguments({ ...environment, args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared', 'agent-codex-home': '/resolved codex', 'agent-claude-config-dir': '/resolved claude', 'agent-cli-fallback-dir': '/resolved cli' } }), [
 				...(isBuilt ? [] : [environment.appRoot]),
 				'--user-data-dir', environment.userDataPath, '--extensions-dir', environment.extensionsPath, '--shared-data-dir', environment.appSharedDataHome.fsPath,
 				'--agent-codex-home', '/resolved codex', '--agent-claude-config-dir', '/resolved claude',
+				'--agent-cli-fallback-dir', '/resolved cli',
 				'--open-url', '--',
 			]);
 		});

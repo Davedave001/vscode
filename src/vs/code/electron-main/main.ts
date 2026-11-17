@@ -34,7 +34,7 @@ import { DiagnosticsService } from '../../platform/diagnostics/node/diagnosticsS
 import { NativeParsedArgs } from '../../platform/environment/common/argv.js';
 import { EnvironmentMainService, IEnvironmentMainService } from '../../platform/environment/electron-main/environmentMainService.js';
 import { addArg, parseMainProcessArgv } from '../../platform/environment/node/argvHelper.js';
-import { applyAgentHomeArguments } from '../../platform/environment/node/agentHomeArguments.js';
+import { applyAgentEnvironmentArguments } from '../../platform/environment/node/agentEnvironmentArguments.js';
 import { createWaitMarkerFileSync } from '../../platform/environment/node/wait.js';
 import { IFileService } from '../../platform/files/common/files.js';
 import { FileService } from '../../platform/files/common/fileService.js';
@@ -309,7 +309,7 @@ class CodeMain {
 			}
 		});
 
-		applyAgentHomeArguments(environmentMainService.args, instanceEnvironment, cwd());
+		applyAgentEnvironmentArguments(environmentMainService.args, instanceEnvironment, cwd(), process.env);
 		Object.assign(process.env, instanceEnvironment);
 
 		return instanceEnvironment;

@@ -25,6 +25,7 @@ const extensions = join(probeDirectory, 'extensions');
 const shared = join(probeDirectory, 'shared') + '\\';
 const codexHome = join(probeDirectory, 'codex home');
 const claudeHome = join(probeDirectory, 'claude home');
+const cliFallback = join(probeDirectory, 'cli fallback') + '\\';
 const controlProfile = join(run, 'control-profile');
 for (const folder of [home, probeDirectory, profile, extensions, shared, controlProfile]) { await mkdir(folder, { recursive: true }); }
 const controlMain = join(run, 'control.cjs');
@@ -55,20 +56,22 @@ async function registryEntry(protocol: string, commandOnly = true): Promise<stri
 		throw error;
 	}
 }
-type ProtocolEnvironment = { isBuilt: boolean; appRoot: string; userDataPath: string; extensionsPath: string; appSharedDataHome: { fsPath: string }; args: { _: string[]; 'user-data-dir': string; 'extensions-dir': string; 'shared-data-dir': string; 'agent-codex-home': string; 'agent-claude-config-dir': string } };
+type ProtocolEnvironment = { isBuilt: boolean; appRoot: string; userDataPath: string; extensionsPath: string; appSharedDataHome: { fsPath: string }; args: { _: string[]; 'user-data-dir': string; 'extensions-dir': string; 'shared-data-dir': string; 'agent-codex-home': string; 'agent-claude-config-dir': string; 'agent-cli-fallback-dir': string } };
 // Load compiled code without importing the workbench's ambient type environment into this standalone script.
 const { getWindowsProtocolHandlerArguments } = await import(pathToFileURL(join(root, 'out/vs/platform/url/node/protocolHandlerArguments.js')).href) as { getWindowsProtocolHandlerArguments(environment: ProtocolEnvironment): string[] };
 const { URI } = await import(pathToFileURL(join(root, 'out/vs/base/common/uri.js')).href) as { URI: { file(path: string): { fsPath: string } } };
-const args = getWindowsProtocolHandlerArguments({ isBuilt: false, appRoot: probeMain, userDataPath: profile, extensionsPath: extensions, appSharedDataHome: URI.file(shared), args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared', 'agent-codex-home': codexHome, 'agent-claude-config-dir': claudeHome } });
+const args = getWindowsProtocolHandlerArguments({ isBuilt: false, appRoot: probeMain, userDataPath: profile, extensionsPath: extensions, appSharedDataHome: URI.file(shared), args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared', 'agent-codex-home': codexHome, 'agent-claude-config-dir': claudeHome, 'agent-cli-fallback-dir': cliFallback } });
 assert.equal(args[args.indexOf('--agent-codex-home') + 1], codexHome);
 assert.equal(args[args.indexOf('--agent-claude-config-dir') + 1], claudeHome);
+assert.equal(args[args.indexOf('--agent-cli-fallback-dir') + 1], cliFallback);
 const protocol = `signal-c-argument-check-${process.pid}-${randomUUID()}`;
 assert.equal(await registryEntry(protocol, false), undefined, 'The test protocol must not already exist');
 const originalSignalCCommand = await registryEntry('signal-c');
 const executable = createLaunchOptions(root, root, true, {}).executable;
 let control: ElectronApplication | undefined;
 let registered = false;
-const report = { argumentsVerified: false, hiddenControlWindow: false, testProtocolRemoved: false, signalCProtocolUnchanged: false };
+let registeredCommand: string | undefined;
+const report = { argumentsVerified: false, hiddenControlWindow: false, testProtocolRemoved: false, registryCleanupRequired: false, signalCProtocolUnchanged: false };
 try {
 	control = await _electron.launch({ executablePath: executable, args: [controlMain, '--user-data-dir', controlProfile], env, timeout: 30000 });
 	await control.firstWindow();
@@ -78,6 +81,7 @@ try {
 	assert.ok(registered, 'The fixture protocol registration must succeed');
 	const command = await registryEntry(protocol);
 	assert.ok(command);
+	registeredCommand = command;
 	const prefix = command.startsWith(`"${executable}" `) ? `"${executable}" ` : `${executable} `;
 	assert.ok(command.startsWith(prefix), 'The registered command must use the fixture runtime');
 	const suffix = command.slice(prefix.length);
@@ -98,6 +102,15 @@ try {
 	try {
 		if (registered && control) {
 			assert.ok(await control.evaluate(({ app }, options) => app.removeAsDefaultProtocolClient(options.protocol, options.executable, options.args), { protocol, executable, args }));
+			if (await registryEntry(protocol, false) !== undefined) {
+				// Chromium's string registry reader is limited to 1024 characters. Electron can
+				// return true without removing a longer command; delete only this verified fixture.
+				assert.ok(registeredCommand);
+				assert.equal(await registryEntry(protocol), registeredCommand, 'Never delete a fixture key whose owner changed');
+				assert.match(protocol, /^signal-c-argument-check-\d+-[0-9a-f-]+$/);
+				await execute('reg.exe', ['delete', `HKCU\\Software\\Classes\\${protocol}`, '/f'], { windowsHide: true, timeout: 10000 });
+				report.registryCleanupRequired = true;
+			}
 			report.testProtocolRemoved = await registryEntry(protocol, false) === undefined;
 			assert.ok(report.testProtocolRemoved, 'The fixture protocol registry key must be removed');
 		}
