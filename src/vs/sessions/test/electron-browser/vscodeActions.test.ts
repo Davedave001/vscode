@@ -290,7 +290,7 @@ suite('VS Code Actions', () => {
 		[toAgentHostUri(URI.file('C:\\Users\\test\\project'), agentHostAuthority('cloudsandbox:environment'))],
 		[URI.file('/local/project'), toAgentHostUri(URI.file('/remote/project'), agentHostAuthority('ws:host'))],
 	]) {
-		test(`opens only an empty new Editor for unsupported remote folders (${folders.length} folders)`, async () => {
+		test(`handles unsupported remote folders without opening a partial workspace (${folders.length} folders)`, async () => {
 			const calls: { toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]; options?: IOpenWindowOptions }[] = [];
 			const session = createSession('unsupported', true, folders);
 			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: 'cloudsandbox:environment' });
@@ -309,13 +309,48 @@ suite('VS Code Actions', () => {
 			await instantiationService.invokeFunction(openSessionInVSCode, session);
 			assert.deepStrictEqual({
 				calls,
+				notifications,
 				session: session.resource.toString(),
 				folders: session.mainChat.get().workspace.get()?.folders.map(folder => folder.workingDirectory.toString()),
 			}, {
-				calls: [{ toOpen: { remoteAuthority: null }, options: undefined }],
+				calls: folders.length === 1 ? [{ toOpen: { remoteAuthority: null }, options: undefined }] : [],
+				notifications: folders.length === 1 ? [] : ['This workspace cannot be opened in one editor window because its folders use unsupported or different remote connections.'],
 				session: 'test:/unsupported',
 				folders: folders.map(folder => folder.toString()),
 			});
+		});
+	}
+	for (const [name, otherRoot] of [
+		['another wrapped agent host', toAgentHostUri(URI.file('/other'), agentHostAuthority('ssh:other'))],
+		['another editor remote', URI.parse('vscode-remote://ssh-remote+other/other')],
+		['a local folder', URI.file('/local')],
+	] as const) {
+		test(`rejects a multi-root remote workspace containing ${name} before opening windows`, async () => {
+			const address = 'ssh:host';
+			const folders = [toAgentHostUri(URI.file('/project'), agentHostAuthority(address)), otherRoot];
+			const session = createSession('mixed-hosts', true, folders);
+			let opens = 0;
+			instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+				override async openWindow(): Promise<void> { opens++; }
+			}());
+			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
+			instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
+			instantiationService.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => ({ name: 'Remote host', connection: { type: RemoteAgentHostEntryType.SSH, address, hostName: 'host' } }) }));
+			await instantiationService.invokeFunction(openSessionInVSCode, session);
+			assert.deepStrictEqual({ opens, notifications, folders: session.mainChat.get().workspace.get()?.folders.map(folder => folder.workingDirectory.toString()) }, { opens: 0, notifications: ['This workspace cannot be opened in one editor window because its folders use unsupported or different remote connections.'], folders: folders.map(folder => folder.toString()) });
+		});
+	}
+	for (const folders of [
+		[URI.file('/local'), URI.parse('file://fileserver/share/project')],
+		[URI.parse('vscode-remote://wsl+Ubuntu/one'), URI.parse('vscode-remote://WSL+ubuntu/two')],
+	]) {
+		test(`retains all compatible ${folders[0].scheme} roots`, async () => {
+			const opened: string[][] = [];
+			instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+				override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { opened.push(Array.isArray(toOpen) ? toOpen.filter(isFolderToOpen).map(folder => folder.folderUri.toString()) : []); }
+			}());
+			await instantiationService.invokeFunction(openSessionInVSCode, createSession('compatible-hosts', true, folders));
+			assert.deepStrictEqual({ opened, notifications }, { opened: [folders.map(folder => folder.toString())], notifications: [] });
 		});
 	}
 

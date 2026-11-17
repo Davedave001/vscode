@@ -10,7 +10,7 @@ import { URI } from '../../../base/common/uri.js';
 import { Schemas } from '../../../base/common/network.js';
 import { ServicesAccessor } from '../../../editor/browser/editorExtensions.js';
 import { EditorContextKeys } from '../../../editor/common/editorContextKeys.js';
-import { localize2 } from '../../../nls.js';
+import { localize, localize2 } from '../../../nls.js';
 import { Action2 } from '../../../platform/actions/common/actions.js';
 import { IRemoteAgentHostService } from '../../../platform/agentHost/common/remoteAgentHostService.js';
 import { IAgentHostConnectionsService } from '../../../platform/agentHost/common/agentHostConnectionsService.js';
@@ -42,6 +42,7 @@ import { IFolderToOpen, IOpenedMainWindow } from '../../../platform/window/commo
 import { ILabelService, Verbosity } from '../../../platform/label/common/label.js';
 import { OPEN_VSCODE_WINDOW_COMMAND_ID, RETURN_TO_VSCODE_EDITOR_COMMAND_ID, SHOULD_SHOW_RETURN_TO_VSCODE_EDITOR_COMMAND_ID } from '../../../workbench/contrib/sessions/common/sessionCommands.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
+import { AGENT_HOST_SCHEME } from '../../../platform/agentHost/common/agentHostUri.js';
 
 export class OpenSessionInVSCodeAction extends Action2 {
 	static readonly ID = 'agents.openSessionInVSCode';
@@ -89,16 +90,27 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	}
 
 	const folders = (chat ?? session.mainChat.get())?.workspace.get()?.folders ?? [];
+	const notifyUnsupportedWorkspace = () => notificationService.info(localize('openInEditor.unsupportedWorkspaceHosts', "This workspace cannot be opened in one editor window because its folders use unsupported or different remote connections."));
+	// Check wrapped ownership before remote resolution can map every root onto the session's host.
+	if (new Set(folders.filter(folder => folder.workingDirectory.scheme === AGENT_HOST_SCHEME).map(folder => folder.workingDirectory.authority)).size > 1) {
+		notifyUnsupportedWorkspace();
+		return;
+	}
 	const foldersToOpen: IFolderToOpen[] = [];
 	for (const folder of folders) {
 		const folderUri = resolveRemoteFolderUri(folder.workingDirectory, session.providerId, sessionsProvidersService, remoteAgentHostService);
 		if (!folderUri) {
+			if (folders.length > 1) { notifyUnsupportedWorkspace(); return; }
 			return nativeHostService.openWindow({ remoteAuthority: null });
 		}
 		foldersToOpen.push({
 			folderUri,
 			label: folderUri.scheme === Schemas.vscodeRemote ? labelService.getWorkspaceLabel(folder.workingDirectory, { verbose: Verbosity.LONG }) : undefined,
 		});
+	}
+	if (new Set(foldersToOpen.map(folder => folder.folderUri.scheme === Schemas.vscodeRemote ? `remote:${folder.folderUri.authority.toLowerCase()}` : 'local')).size > 1) {
+		notifyUnsupportedWorkspace();
+		return;
 	}
 
 	const chatSessionToOpen = getChatSessionToOpenInEditor(session, chat);
