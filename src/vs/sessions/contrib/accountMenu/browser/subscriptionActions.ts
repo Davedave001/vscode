@@ -106,16 +106,33 @@ export class AgentSubscriptionsAction extends Action2 {
 		const devin = accessor.get(IDevinSubscriptionConnection);
 		const notifications = accessor.get(INotificationService);
 		const codex = accessor.get(ICodexAccountService).account;
+		const devinStatus = devin.status.get();
+		const devinDescriptions = {
+			checking: localize('subscriptions.devinChecking', "Checking connection"),
+			signedOut: localize('subscriptions.devinSignedOut', "Not signed in"),
+			signingIn: localize('subscriptions.devinSigningIn', "Browser sign-in in progress"),
+			connecting: localize('subscriptions.devinConnecting', "Sign-in saved · connecting"),
+			unavailable: localize('subscriptions.devinUnavailable', "Sign-in saved · agent unavailable"),
+			failed: localize('subscriptions.devinFailed', "Connection needs attention"),
+			ready: devinStatus.kind === 'ready' ? localize('subscriptions.devinModelsReady', "{0} models ready", devinStatus.modelCount) : '',
+		};
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
 			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), description: localize('subscriptions.claudePlan', "Claude subscription"), detail: localize('subscriptions.claudeDetail', "Use the official Claude Code client with your Claude account.") },
-			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: localize('subscriptions.devinBrowser', "Browser account sign-in"), detail: localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. A saved sign-in is reused.") },
+			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: devinDescriptions[devinStatus.kind], detail: devinStatus.kind === 'unavailable' ? localize('subscriptions.devinUnavailableDetail', "Check the Devin executable setting and restart the local agent host. Your saved sign-in will be reused.") : localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. Select again to retry; a saved sign-in is reused.") },
 			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });
 		if (!provider) { return; }
 		if (provider.id === 'devin-subscription') {
 			await devin.connect();
-			notifications.info(localize('subscriptions.devinConnected', "Devin models loaded. Choose Devin Subscription in the agent picker, then select a model. Devin CLI remains available separately."));
+			const status = devin.status.get();
+			if (status.kind === 'ready') {
+				notifications.info(localize('subscriptions.devinConnected', "Devin Subscription has {0} models ready. Choose Devin Subscription in the agent picker, then select a model.", status.modelCount));
+			} else if (status.kind === 'signedOut') {
+				notifications.info(localize('subscriptions.devinDisconnected', "Devin Subscription is signed out. Open Agent Subscriptions to sign in."));
+			} else {
+				notifications.info(localize('subscriptions.devinPending', "Devin models have not appeared yet. Reopen Agent Subscriptions to check the connection or retry."));
+			}
 			return;
 		}
 		if (provider.id === 'codex') {

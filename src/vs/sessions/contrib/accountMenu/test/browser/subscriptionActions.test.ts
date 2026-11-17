@@ -19,7 +19,7 @@ import { TerminalLocation } from '../../../../../platform/terminal/common/termin
 import { IWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { ITerminalInstance, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService } from '../../../../../workbench/services/agentHost/browser/codexAccountService.js';
-import { IDevinSubscriptionConnection } from '../../browser/devinSubscriptionConnection.js';
+import { DevinSubscriptionStatus, IDevinSubscriptionConnection } from '../../browser/devinSubscriptionConnection.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { IChat, ISessionWorkspace } from '../../../../../workbench/services/sessions/common/session.js';
 import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
@@ -36,7 +36,7 @@ suite('Agent Subscriptions', () => {
 			const calls: unknown[] = [];
 			instantiation.stub(IQuickInputService, quickInput);
 			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
-			instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ connect: async () => { calls.push('connect-provider'); } }));
+			instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable({ kind: 'signedOut' }), connect: async () => { calls.push('connect-provider'); } }));
 			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: () => { calls.push('connected'); } }));
 			try {
 				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
@@ -44,6 +44,39 @@ suite('Agent Subscriptions', () => {
 				assert.ok(Array.isArray(items));
 				assert.deepStrictEqual(items.map(item => item.label), ['Codex', 'Anthropic', 'Devin Subscription', 'Devin CLI']);
 				assert.deepStrictEqual(calls, cancelled ? [] : ['connect-provider', 'connected']);
+			} finally { picker.restore(); }
+		});
+	}
+
+	const devinStatuses: { status: DevinSubscriptionStatus; description: string }[] = [
+		{ status: { kind: 'checking' }, description: 'Checking connection' },
+		{ status: { kind: 'signedOut' }, description: 'Not signed in' },
+		{ status: { kind: 'signingIn' }, description: 'Browser sign-in in progress' },
+		{ status: { kind: 'connecting' }, description: 'Sign-in saved · connecting' },
+		{ status: { kind: 'unavailable' }, description: 'Sign-in saved · agent unavailable' },
+		{ status: { kind: 'failed' }, description: 'Connection needs attention' },
+		{ status: { kind: 'ready', modelCount: 7 }, description: '7 models ready' },
+	];
+	for (const { status, description } of devinStatuses) {
+		test(`reports ${status.kind} in the picker without announcing models before readiness`, async () => {
+			const instantiation = store.add(new TestInstantiationService());
+			const quickInput = new TestQuickInputService();
+			const picker = sinon.stub(quickInput, 'pick').resolves({ id: 'devin-subscription', label: 'Devin Subscription' });
+			const notices: string[] = [];
+			instantiation.stub(IQuickInputService, quickInput);
+			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+			instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable(status), connect: async () => { } }));
+			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notices.push(String(message)); } }));
+			try {
+				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+				const items = picker.firstCall.args[0];
+				assert.ok(Array.isArray(items));
+				const devin = items.find(item => item.label === 'Devin Subscription');
+				assert.ok(devin && devin.type !== 'separator');
+				assert.strictEqual(devin.description, description);
+				if (status.kind === 'unavailable') { assert.match(devin.detail ?? '', /executable setting.*restart/); }
+				assert.strictEqual(notices.length, 1);
+				assert.match(notices[0], status.kind === 'ready' ? /has 7 models ready/ : status.kind === 'signedOut' ? /is signed out/ : /models have not appeared yet/);
 			} finally { picker.restore(); }
 		});
 	}
