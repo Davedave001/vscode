@@ -109,6 +109,11 @@ export function resolveRemoteFolderUri(
 	if (findDevContainerSample(folderUri)) {
 		throw new Error(localize('devContainerSample.notPrepared', "Send the first prompt to prepare this Dev Container sample before opening it in the editor."));
 	}
+	if (folderUri.scheme === Schemas.vscodeRemote) {
+		const remoteAuthority = resolveRemoteAuthority(providerId, sessionsProvidersService, remoteAgentHostService);
+		// Preserve explicit destinations only when they do not conflict with the provider's resolved host.
+		return remoteAuthority && !isEqualAuthority(folderUri.authority, remoteAuthority) ? undefined : folderUri;
+	}
 	if (folderUri.scheme !== AGENT_HOST_SCHEME) {
 		return folderUri;
 	}

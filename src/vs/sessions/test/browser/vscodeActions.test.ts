@@ -234,6 +234,10 @@ suite('Web Open in Editor', () => {
 					assert.deepStrictEqual({ links, notifications }, { links: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
 				}
 			}
+			sessions.length = 0; notifications.length = 0; links.length = 0;
+			const explicitOther = URI.parse('vscode-remote://ssh-remote+other/second');
+			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: explicitOther, workingDirectory: explicitOther, name: 'other', description: undefined }] })) } }));
+			assert.deepStrictEqual({ links: links.map(link => ({ authority: link.authority, path: link.path, query: link.query })), sessions, notifications }, { links: [{ authority: '', path: '', query: 'windowId=_blank' }], sessions: [null], notifications: [] });
 		});
 	}
 });

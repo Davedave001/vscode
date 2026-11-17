@@ -280,11 +280,14 @@ suite('resolveRemoteAuthority', () => {
 			const path = URI.file('/project # 100%');
 			const folder = toAgentHostUri(path, agentHostAuthority(address));
 			const own = resolveRemoteFolderUri(folder, 'agenthost-test', providers, remoteService);
+			const editorFolder = URI.from({ scheme: 'vscode-remote', authority: resolveRemoteAuthority('agenthost-test', providers, remoteService), path: path.path });
 			assert.deepStrictEqual({
 				own: own && { scheme: own.scheme, authority: own.authority, path: own.path },
+				explicitOwn: resolveRemoteFolderUri(editorFolder, 'agenthost-test', providers, remoteService),
+				explicitForeign: resolveRemoteFolderUri(editorFolder.with({ authority: 'ssh-remote+other-host' }), 'agenthost-test', providers, remoteService),
 				foreign: resolveRemoteFolderUri(toAgentHostUri(path, agentHostAuthority('ssh:other-host')), 'agenthost-test', providers, remoteService),
 				local: resolveRemoteFolderUri(URI.from({ scheme: AGENT_HOST_SCHEME, authority: LOCAL_AGENT_HOST_AUTHORITY, path: path.path }), 'agenthost-test', providers, remoteService),
-			}, { own: { scheme: 'vscode-remote', authority: resolveRemoteAuthority('agenthost-test', providers, remoteService), path: path.path }, foreign: undefined, local: undefined });
+			}, { own: { scheme: 'vscode-remote', authority: resolveRemoteAuthority('agenthost-test', providers, remoteService), path: path.path }, explicitOwn: editorFolder, explicitForeign: undefined, foreign: undefined, local: undefined });
 		});
 	}
 
