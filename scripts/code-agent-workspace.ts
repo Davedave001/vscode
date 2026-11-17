@@ -73,7 +73,7 @@ function main() {
 	fs.mkdirSync(path.dirname(settings), { recursive: true });
 	try {
 		fs.writeFileSync(settings, JSON.stringify({
-			'chat.agentHost.codexAgent.enabled': false,
+			'chat.agentHost.codexAgent.enabled': true,
 			'chat.agentHost.claudeAgent.enabled': false,
 		}, null, '\t') + '\n', { flag: 'wx' });
 	} catch (error) {

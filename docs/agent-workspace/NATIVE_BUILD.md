@@ -8,7 +8,7 @@ node scripts/code-agent-workspace.ts
 
 Use `--ide` to start in the editor, `--workspace "D:\Your Project"` to choose an existing folder, or `--dry-run` to inspect the executable and arguments without creating profiles or opening a window. The launcher requires a prepared `.build/electron/Code - OSS.exe` and compiled client/extensions. Node 24 can run its TypeScript directly.
 
-The launcher places editor settings, installed extensions, shared storage, Codex configuration, and Claude configuration under separate `agent-workspace-*` directories in `.build`. It clears inherited `VSCODE_*` variables and `ELECTRON_RUN_AS_NODE` so the fork does not reuse another editor's IPC or runtime overrides. A new isolated profile starts with the optional Codex and Claude agents disabled; users can enable and configure them in this profile. Existing settings are never replaced. Credentials are not copied into these directories.
+The launcher places editor settings, installed extensions, shared storage, Codex configuration, and Claude configuration under separate `agent-workspace-*` directories in `.build`. It clears inherited `VSCODE_*` variables and `ELECTRON_RUN_AS_NODE` so the fork does not reuse another editor's IPC or runtime overrides. A new isolated profile enables native Codex; connect a ChatGPT account through Agent Subscriptions. The optional Claude Agent SDK provider starts disabled; Claude subscriptions use the official Claude Code client through that same menu. Existing settings are never replaced. Credentials are not copied into these directories.
 
 ## Native library preparation on this machine
 
