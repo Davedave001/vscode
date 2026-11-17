@@ -37,12 +37,24 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	}
 
 	private async signIn(): Promise<vscode.AuthenticationSession> {
-		return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Signing in to Devin Subscription…'), cancellable: true }, async (_progress, cancellation) => {
+		return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: vscode.l10n.t('Signing in to Devin Subscription…'), cancellable: true }, async (progress, cancellation) => {
 			const controller = new AbortController();
 			this.controllers.add(controller);
 			const disposable = cancellation.onCancellationRequested(() => controller.abort());
 			try {
-				const token = await signInToDevin({ openExternal: url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))), signal: controller.signal });
+				const token = await signInToDevin({
+					openExternal: url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
+					signal: controller.signal,
+					onProgress: stage => {
+						const message = stage === 'waitingForBrowser'
+							? vscode.l10n.t('Waiting for approval in the Devin browser page. Keep this window open.')
+							: vscode.l10n.t('Browser approval received. Connecting to Devin…');
+						progress.report({ message });
+						// Record phases only; callback URLs, authorization codes and tokens are private.
+						console.info(`[Devin Subscription] ${stage}`);
+					},
+				});
+				progress.report({ message: vscode.l10n.t('Saving Devin sign-in securely…') });
 				return await this.mutateStorage(async () => {
 					controller.signal.throwIfAborted();
 					const previous = await this.getSessions();

@@ -15,6 +15,7 @@ export const DEVIN_TOKEN_URL = 'https://api.devin.ai/auth/cli/token';
 export interface SignInOptions {
 	readonly openExternal: (url: string) => Promise<boolean>;
 	readonly signal: AbortSignal;
+	readonly onProgress?: (stage: 'waitingForBrowser' | 'exchangingCode') => void;
 	readonly timeoutMs?: number;
 	readonly request?: typeof fetch;
 }
@@ -83,7 +84,9 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 		if (!await options.openExternal(authorize.toString())) {
 			throw new Error('The Devin sign-in page could not be opened.');
 		}
+		options.onProgress?.('waitingForBrowser');
 		const code = await callback;
+		options.onProgress?.('exchangingCode');
 		const response = await (options.request ?? fetch)(DEVIN_TOKEN_URL, {
 			method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'error',
 			signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),

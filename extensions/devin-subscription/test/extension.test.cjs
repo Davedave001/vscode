@@ -11,6 +11,7 @@ function activateProvider(signIn, storageHooks = {}) {
 	const originalLoad = Module._load;
 	const secrets = new Map();
 	const events = [];
+	const progressMessages = [];
 	let provider;
 	let cancellation;
 	const context = {
@@ -25,7 +26,7 @@ function activateProvider(signIn, storageHooks = {}) {
 		EventEmitter: class { event() { } fire(event) { events.push(event); } dispose() { } },
 		CancellationError: class extends Error { constructor() { super('Cancelled'); this.name = 'Canceled'; } },
 		l10n: { t: value => value }, ProgressLocation: { Notification: 15 },
-		window: { withProgress: async (_options, callback) => callback({}, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
+		window: { withProgress: async (_options, callback) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
 		env: { openExternal: async () => true }, Uri: { parse: value => value },
 		authentication: { registerAuthenticationProvider: (id, label, instance) => { assert.strictEqual(id, 'devin-subscription'); assert.strictEqual(label, 'Devin Subscription'); provider = instance; return { dispose() { } }; } },
 	};
@@ -36,8 +37,24 @@ function activateProvider(signIn, storageHooks = {}) {
 	};
 	delete require.cache[require.resolve('../out/extension.js')];
 	try { require('../out/extension.js').activate(context); } finally { Module._load = originalLoad; }
-	return { provider, secrets, events, cancel: () => cancellation(), dispose: () => { for (const item of context.subscriptions) { item.dispose(); } } };
+	return { provider, secrets, events, progressMessages, cancel: () => cancellation(), dispose: () => { for (const item of context.subscriptions) { item.dispose(); } } };
 }
+
+test('reports browser approval and secure storage phases without displaying credentials', async () => {
+	const setup = activateProvider(async options => {
+		options.onProgress('waitingForBrowser');
+		options.onProgress('exchangingCode');
+		return 'test-private-token';
+	});
+	try {
+		await setup.provider.createSession([]);
+		assert.deepStrictEqual(setup.progressMessages, [
+			'Waiting for approval in the Devin browser page. Keep this window open.',
+			'Browser approval received. Connecting to Devin…',
+			'Saving Devin sign-in securely…',
+		]);
+	} finally { setup.dispose(); }
+});
 
 test('stores a browser session in SecretStorage and removes only the requested account', async () => {
 	const setup = activateProvider(async () => 'test-secret-token');

@@ -21,8 +21,10 @@ function callbackUrl(authorize, changes = {}) {
 test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting a CLI', async () => {
 	let authorize;
 	let redirect;
+	const stages = [];
 	const token = await signInToDevin({
 		signal: new AbortController().signal,
+		onProgress: stage => stages.push(stage),
 		openExternal: async value => {
 			authorize = new URL(value);
 			assert.strictEqual(authorize.origin + authorize.pathname, DEVIN_AUTHORIZE_URL);
@@ -36,6 +38,7 @@ test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting
 			return true;
 		},
 		request: async (url, options) => {
+			assert.deepStrictEqual(stages, ['waitingForBrowser', 'exchangingCode']);
 			assert.strictEqual(url, DEVIN_TOKEN_URL);
 			assert.strictEqual(options.method, 'POST');
 			assert.strictEqual(options.redirect, 'error');
@@ -47,6 +50,7 @@ test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting
 		},
 	});
 	assert.strictEqual(token, 'test-session-token');
+	assert.deepStrictEqual(stages, ['waitingForBrowser', 'exchangingCode']);
 	await assert.rejects(fetch(redirect), /fetch failed/);
 });
 
