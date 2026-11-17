@@ -23,28 +23,32 @@ const cwd = URI.file('/project with spaces');
 suite('Devin Subscription Agent', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function fixture() {
+	function fixture(modelCatalog = catalog) {
 		const transports: TestAcpTransport[] = [];
 		const launches: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
 		const events: AgentSignal[] = [];
 		let onPrompt: ((transport: TestAcpTransport, request: Record<string, unknown>) => void) | undefined;
 		let onLoad: typeof onPrompt;
+		let onConfig: typeof onPrompt;
 		const agent = store.add(new DevinSubscriptionAgent('devin.exe', {
-			listModels: async () => catalog,
+			listModels: async () => modelCatalog,
 			createClient: (_cwd, args, env) => {
+				const configOptions = [{ id: 'model-choice', category: 'model', type: 'select', currentValue: 'swe-2-high', options: [{ value: 'swe-2-high', name: 'SWE-2' }] }];
 				launches.push({ args, env });
 				const transport = new TestAcpTransport();
 				transports.push(transport);
 				transport.handle = request => {
 					switch (request.method) {
 						case 'initialize': transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); break;
-						case 'session/new': transport.reply(request, { sessionId: 'native', configOptions: [{ id: 'model-choice', category: 'model' }] }); break;
+						case 'session/new': transport.reply(request, { sessionId: 'native', configOptions }); break;
 						case 'session/load':
 							if (onLoad) { onLoad(transport, request); break; }
 							transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'original' } } } });
 							transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'restored' } } } });
-							transport.reply(request, { configOptions: [{ id: 'model-choice', category: 'model' }] }); break;
-						case 'session/set_config_option': transport.reply(request, {}); break;
+							transport.reply(request, { configOptions }); break;
+						case 'session/set_config_option':
+							if (onConfig) { onConfig(transport, request); } else { transport.reply(request, { configOptions }); }
+							break;
 						case 'session/prompt': if (onPrompt) { onPrompt(transport, request); } else { transport.reply(request, { stopReason: 'end_turn' }); } break;
 					}
 				};
@@ -52,7 +56,7 @@ suite('Devin Subscription Agent', () => {
 			},
 		}));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
-		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; } };
+		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; } };
 	}
 
 	test('keeps subscription credentials separate from inherited CLI credentials and parses a live catalog shape', () => {
@@ -255,5 +259,38 @@ suite('Devin Subscription Agent', () => {
 		assert.strictEqual(savedMetadata?.startTime, live?.startTime);
 		assert.strictEqual(savedMetadata?.modifiedTime, live?.modifiedTime);
 		assert.strictEqual(savedMetadata?.project?.uri.toString(), cwd.toString());
+	});
+
+	test('persists an unconfirmed model change and reconciles the previous model after a new host loads it', async () => {
+		const modelCatalog = { families: [{ variants: [...catalog.families[0].variants, { model_uid: 'swe-2-max', label: 'SWE-2 Max', max_context_tokens: 262000 }] }] };
+		const f = fixture(modelCatalog);
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'swe-2-high' }));
+		let saved: string | undefined;
+		store.add(f.agent.onDidChangeChatData(event => { saved = event.providerData; }));
+		f.onConfig = transport => transport.close();
+		await assert.rejects(f.agent.chats.changeModel(chat, { id: 'swe-2-max' }, owner), /peer exited/);
+		assert.ok(saved);
+		assert.strictEqual(JSON.parse(saved).modelNeedsReconciliation, true);
+		assert.strictEqual(JSON.parse(saved).model, 'swe-2-high');
+		const resumed = fixture(modelCatalog);
+		await resumed.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await resumed.agent.materializeChat(chat, owner, saved);
+		let recovered: string | undefined;
+		store.add(resumed.agent.onDidMaterializeChat(event => { recovered = event.result?.providerData; }));
+		await resumed.agent.chats.getMessages(chat, owner);
+		assert.ok(resumed.transports[0].sent.some(request => request.method === 'session/set_config_option'));
+		assert.ok(recovered);
+		assert.strictEqual(JSON.parse(recovered).modelNeedsReconciliation, undefined);
+		assert.strictEqual(JSON.parse(recovered).model, 'swe-2-high');
+	});
+
+	test('allows selecting an available model when the previous unconfirmed model is no longer in the catalog', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'retired-model', modelNeedsReconciliation: true }));
+		await f.agent.chats.changeModel(chat, { id: 'swe-2-high' }, owner);
+		assert.deepStrictEqual((await f.agent.getChatMetadata(chat, owner))?.model, { id: 'swe-2-high' });
+		assert.ok(f.transports[0].sent.some(request => request.method === 'session/set_config_option'));
 	});
 });

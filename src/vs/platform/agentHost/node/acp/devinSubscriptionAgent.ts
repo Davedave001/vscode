@@ -19,6 +19,7 @@ import { type ModelSelection, type Turn, type MarkdownResponsePart, type ToolCal
 import { AcpClient, initializeAcp, isAcpRecord as isObject } from './acpClient.js';
 import { AcpStdioTransport } from './acpStdioTransport.js';
 import { resolveAcpPrompt, type IAcpPromptCapabilities } from './acpPromptResolver.js';
+import { applyDevinModelConfiguration, DevinModelConfigurationError, readDevinConfigOptions, type IDevinSelectConfig } from './devinModelConfiguration.js';
 
 export const DEVIN_SUBSCRIPTION_PROVIDER = DevinSubscriptionProviderId;
 export const DEVIN_SUBSCRIPTION_RESOURCE = DevinSubscriptionResource;
@@ -48,6 +49,8 @@ interface IChat {
 	lastReplayUserId?: string;
 	modelConfigId?: string;
 	legacyModels: boolean;
+	configOptions: readonly IDevinSelectConfig[];
+	modelNeedsReconciliation?: boolean;
 	promptCapabilities?: IAcpPromptCapabilities;
 	forceStop?: ReturnType<typeof setTimeout>;
 	readonly createdAt: number;
@@ -60,6 +63,7 @@ interface IPersistedChat {
 	readonly model?: ModelSelection;
 	readonly createdAt: number;
 	readonly modifiedAt: number;
+	readonly modelNeedsReconciliation?: boolean;
 }
 
 /** Metadata is needed before materializeChat runs, including before account reconnect. */
@@ -71,7 +75,7 @@ function readPersistedChat(data: string | undefined): IPersistedChat | undefined
 		if (cwd.scheme !== 'file') { return undefined; }
 		const createdAt = typeof value.createdAt === 'number' && Number.isFinite(value.createdAt) && value.createdAt >= 0 ? value.createdAt : 0;
 		const modifiedAt = typeof value.modifiedAt === 'number' && Number.isFinite(value.modifiedAt) && value.modifiedAt >= createdAt ? value.modifiedAt : createdAt;
-		return { sessionId: value.sessionId, cwd, model: typeof value.model === 'string' && value.model ? { id: value.model } : undefined, createdAt, modifiedAt };
+		return { sessionId: value.sessionId, cwd, model: typeof value.model === 'string' && value.model ? { id: value.model } : undefined, createdAt, modifiedAt, modelNeedsReconciliation: value.modelNeedsReconciliation === true };
 	} catch { return undefined; }
 }
 
@@ -125,6 +129,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	private readonly permissions = new Map<string, { chat: IChat; resolve: (value: unknown) => void; allow?: string; deny?: string }>();
 	private token: string | undefined;
 	private authRevision = 0;
+	private catalogIds: ReadonlySet<string> = new Set();
 
 	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter) { super(); }
 
@@ -141,6 +146,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			for (const chat of this.records.values()) { this.release(chat); }
 			this.token = token || undefined;
 			this.models.set([], undefined);
+			this.catalogIds = new Set();
 		}
 		if (this.token) { await this.refreshModels(); }
 		return true;
@@ -158,7 +164,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		}));
 		const models = parseDevinModels(value);
 		if (!models.length) { throw new Error('Devin returned an empty model catalog.'); }
-		if (revision === this.authRevision) { this.models.set(models, undefined); }
+		if (revision === this.authRevision) { this.catalogIds = new Set(models.map(model => model.id)); this.models.set(models, undefined); }
 	}
 
 	readonly chats: IAgentChats = {
@@ -178,6 +184,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
 			if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
 			await this.ensureSession(record);
+			if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
 			if (record.activeTurn) { throw new Error('A Devin turn is already running.'); }
 			const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
 			const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
@@ -221,9 +228,10 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		changeModel: async (chat, model) => {
 			const record = this.record(chat);
 			if (record.activeTurn) { throw new Error('Wait for the current Devin turn before changing models.'); }
-			if (record.model?.id === model.id && equals(record.model.config ?? {}, model.config ?? {})) { return; }
-			if (record.nativeId && !record.client) { await this.ensureSession(record); }
+			if (!record.modelNeedsReconciliation && record.model?.id === model.id && equals(record.model.config ?? {}, model.config ?? {})) { return; }
+			if (record.nativeId && !record.client) { await this.ensureSession(record, false); }
 			if (record.client) { await this.applyModel(record, model); }
+			record.modelNeedsReconciliation = false;
 			record.model = model;
 			if (record.nativeId) { this.dataChanged.fire({ chat, providerData: this.providerData(record) }); }
 		},
@@ -233,7 +241,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 
 	private createRecord(chat: URI, cwd: URI, model?: ModelSelection, createdAt = Date.now(), modifiedAt = createdAt): IChat {
 		if (this.records.has(chat.toString())) { throw new Error('Devin chat already exists.'); }
-		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, createdAt, modifiedAt };
+		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, configOptions: [], createdAt, modifiedAt };
 		this.records.set(chat.toString(), record);
 		return record;
 	}
@@ -248,7 +256,9 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (this.records.has(chat.toString())) { return; }
 		const value = readPersistedChat(data);
 		if (!value) { throw new Error('Invalid persisted Devin chat.'); }
-		this.createRecord(chat, value.cwd, value.model, value.createdAt, value.modifiedAt).nativeId = value.sessionId;
+		const record = this.createRecord(chat, value.cwd, value.model, value.createdAt, value.modifiedAt);
+		record.nativeId = value.sessionId;
+		record.modelNeedsReconciliation = value.modelNeedsReconciliation;
 	}
 
 	async setWorkingDirectory(chat: URI, _context: Parameters<IAgent['setWorkingDirectory']>[1], cwd: URI): Promise<void> {
@@ -257,16 +267,16 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		record.cwd = cwd;
 	}
 
-	private providerData(record: IChat): string { return JSON.stringify({ version: 1, sessionId: record.nativeId, cwd: record.cwd.toString(), model: record.model?.id, createdAt: record.createdAt, modifiedAt: record.modifiedAt }); }
+	private providerData(record: IChat): string { return JSON.stringify({ version: 1, sessionId: record.nativeId, cwd: record.cwd.toString(), model: record.model?.id, createdAt: record.createdAt, modifiedAt: record.modifiedAt, ...(record.modelNeedsReconciliation ? { modelNeedsReconciliation: true } : {}) }); }
 
-	private async ensureSession(record: IChat): Promise<void> {
+	private async ensureSession(record: IChat, reconcileModel = true): Promise<void> {
 		if (record.initializing) { return record.initializing; }
 		if (record.client) { return; }
-		record.initializing = this.start(record);
+		record.initializing = this.start(record, reconcileModel);
 		try { await record.initializing; } finally { record.initializing = undefined; }
 	}
 
-	private async start(record: IChat): Promise<void> {
+	private async start(record: IChat, reconcileModel: boolean): Promise<void> {
 		const token = this.token;
 		if (!token) { throw new Error(localize('devin.signInRequired', "Connect Devin Subscription from Agent Subscriptions before starting a session.")); }
 		const args = ['acp', ...(record.model ? ['--model', record.model.id] : [])];
@@ -301,8 +311,10 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const modelOption = Array.isArray(result.configOptions) ? result.configOptions.find(option => isObject(option) && option.category === 'model') : undefined;
 			record.modelConfigId = isObject(modelOption) && typeof modelOption.id === 'string' ? modelOption.id : undefined;
 			record.legacyModels = isObject(result.models);
+			record.configOptions = readDevinConfigOptions(result.configOptions);
 			// session/load restores the native model and its separate reasoning/speed
 			// selectors. Catalog variant ids are not necessarily model-selector values.
+			if (reconcileModel && record.modelNeedsReconciliation && record.model) { await this.applyModel(record, record.model); record.modelNeedsReconciliation = false; }
 			this.materialized.fire({ chat: record.chat, result: { providerData: this.providerData(record), resolvedWorkingDirectory: record.cwd }, workingDirectories: [record.cwd], project: undefined });
 		} catch (error) {
 			this.release(record);
@@ -315,12 +327,27 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	}
 
 	private async applyModel(record: IChat, model: ModelSelection): Promise<void> {
-		if (record.modelConfigId) { await record.client!.request('session/set_config_option', { sessionId: record.nativeId, configId: record.modelConfigId, value: model.id }); }
+		if (record.configOptions.some(option => option.category === 'model')) {
+			try {
+				record.configOptions = await applyDevinModelConfiguration(model.id, this.catalogIds, record.configOptions, async (configId, value) => {
+					const result = await record.client!.request('session/set_config_option', { sessionId: record.nativeId, configId, value });
+					record.configOptions = readDevinConfigOptions(isObject(result) ? result.configOptions : undefined);
+					return record.configOptions;
+				});
+			} catch (error) {
+				if (error instanceof DevinModelConfigurationError && error.requiresReconciliation) {
+					record.modelNeedsReconciliation = true;
+					this.dataChanged.fire({ chat: record.chat, providerData: this.providerData(record) });
+				}
+				throw error;
+			}
+		} else if (record.modelConfigId) { throw new Error(localize('devin.invalidModelSelector', "Devin returned an unsupported model selector. Update the official client and reconnect.")); }
 		else if (record.legacyModels) { await record.client!.request('session/set_model', { sessionId: record.nativeId, modelId: model.id }); }
 		else { throw new Error('Devin did not advertise model selection for this session.'); }
 	}
 
 	private update(record: IChat, update: Record<string, unknown>): void {
+		if (update.sessionUpdate === 'config_option_update') { record.configOptions = readDevinConfigOptions(update.configOptions); return; }
 		if (update.sessionUpdate === 'user_message_chunk' && record.replaying && isObject(update.content) && typeof update.content.text === 'string') {
 			const id = typeof update.messageId === 'string' ? update.messageId : undefined;
 			const previous = record.history.at(-1);
