@@ -13,6 +13,7 @@ import { autorunSelfDisposable } from '../../../../base/common/observable.js';
 import { basename, isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { hasKey } from '../../../../base/common/types.js';
 import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -62,6 +63,9 @@ export const enum AddConfigurationType {
 type AssistedConfigurationType = AddConfigurationType.NpmPackage | AddConfigurationType.PipPackage | AddConfigurationType.NuGetPackage | AddConfigurationType.DockerImage;
 
 type McpInstallTarget = { kind: 'local'; target: ConfigurationTarget | IWorkspaceFolder } | { kind: 'agentHost'; session: URI };
+
+/** A bound host session supplies the host candidate while setup still offers storage choices. */
+export type McpAddConfigurationTarget = IWorkspaceMcpConfigurationTarget | { readonly sessionResource: URI };
 
 export const AssistedTypes = {
 	[AddConfigurationType.NpmPackage]: {
@@ -139,7 +143,7 @@ type McpSetupDestination = {
 
 export class McpAddConfigurationCommand {
 	constructor(
-		private readonly configurationTarget: IWorkspaceMcpConfigurationTarget | undefined,
+		private readonly configurationTarget: McpAddConfigurationTarget | undefined,
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
 		@IWorkbenchMcpManagementService private readonly _mcpManagementService: IWorkbenchMcpManagementService,
 		@IWorkspaceContextService private readonly _workspaceService: IWorkspaceContextService,
@@ -289,8 +293,8 @@ export class McpAddConfigurationCommand {
 	}
 
 	private async getInstallTarget(): Promise<McpInstallTarget | undefined> {
-		if (this.configurationTarget) {
-			return { kind: 'local', target: this.configurationTarget.folder };
+		if (this.workspaceConfigurationTarget) {
+			return { kind: 'local', target: this.workspaceConfigurationTarget.folder };
 		}
 
 		const options: (IQuickPickItem & { target: McpInstallTarget })[] = [];
@@ -298,7 +302,8 @@ export class McpAddConfigurationCommand {
 		if (session) {
 			options.push({
 				target: { kind: 'agentHost', session },
-				label: localize('mcp.target.agentHost', "Add to Current Agent Session"),
+				label: localize('mcp.target.agentHost', "Agent Host"),
+				description: localize('mcp.target.agentHost.description', "Available to sessions on this agent host"),
 			});
 		}
 
@@ -344,6 +349,9 @@ export class McpAddConfigurationCommand {
 	}
 
 	private getCurrentAgentHostSession(): URI | undefined {
+		if (this.configurationTarget && hasKey(this.configurationTarget, { sessionResource: true })) {
+			return this.configurationTarget.sessionResource;
+		}
 		const focusedSession = this._chatWidgetService.lastFocusedWidget?.viewModel?.sessionResource;
 		if (focusedSession && isAgentHostTarget(getChatSessionType(focusedSession))) {
 			return focusedSession;
@@ -361,6 +369,10 @@ export class McpAddConfigurationCommand {
 			session = candidate;
 		}
 		return session;
+	}
+
+	private get workspaceConfigurationTarget(): IWorkspaceMcpConfigurationTarget | undefined {
+		return this.configurationTarget && hasKey(this.configurationTarget, { folder: true }) ? this.configurationTarget : undefined;
 	}
 
 	private async getSetupDestination(): Promise<McpSetupDestination | undefined> {
@@ -561,7 +573,7 @@ export class McpAddConfigurationCommand {
 				}
 				const installTarget = destination.installTarget;
 				if (installTarget.kind === 'local' && isWorkspaceFolder(installTarget.target)) {
-					const workspaceConfig = await this._instantiationService.createInstance(McpConfigurationDestination).selectForAdd(installTarget.target, undefined, this.configurationTarget?.kind);
+					const workspaceConfig = await this._instantiationService.createInstance(McpConfigurationDestination).selectForAdd(installTarget.target, undefined, this.workspaceConfigurationTarget?.kind);
 					if (workspaceConfig === undefined) {
 						return;
 					}
@@ -599,6 +611,10 @@ export class McpAddConfigurationCommand {
 		if (installTarget.kind === 'agentHost') {
 			if (Object.hasOwn(AssistedTypes, serverType) && (inputs?.length || JSON.stringify(config).includes('${input:'))) {
 				throw new Error(localize('mcp.agentHost.inputsUnsupported', "This server requires VS Code input variables. Add it to a VS Code configuration file instead of the current agent session."));
+			}
+			const allowed = this._allowedMcpServersService.isAllowed({ name, config, inputs });
+			if (allowed !== true) {
+				throw new Error(allowed.value);
 			}
 			this._agentHostCustomizations.addMcpServer(installTarget.session, name, config);
 			return;
@@ -638,8 +654,8 @@ export class McpAddConfigurationCommand {
 		}
 		const workspaceConfig = isWorkspaceFolder(target)
 			? destination.workspaceConfig === undefined
-				? await this._instantiationService.createInstance(McpConfigurationDestination).selectForAdd(target, installable, this.configurationTarget?.kind)
-				: await this._instantiationService.createInstance(McpConfigurationDestination).checkGenerated(target, installable, destination.workspaceConfig, !!this.configurationTarget)
+				? await this._instantiationService.createInstance(McpConfigurationDestination).selectForAdd(target, installable, this.workspaceConfigurationTarget?.kind)
+				: await this._instantiationService.createInstance(McpConfigurationDestination).checkGenerated(target, installable, destination.workspaceConfig, !!this.workspaceConfigurationTarget)
 			: undefined;
 		if (isWorkspaceFolder(target) && workspaceConfig === undefined) {
 			return;

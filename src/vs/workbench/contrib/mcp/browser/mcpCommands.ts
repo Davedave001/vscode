@@ -75,7 +75,8 @@ import { IMcpCopilotGlobalConfigurationService } from '../common/mcpCopilotGloba
 import { IMcpRegistry } from '../common/mcpRegistryTypes.js';
 import { HasInstalledMcpServersContext, IMcpSamplingService, IMcpServer, IMcpServerStartOpts, IMcpService, IMcpWorkbenchService, InstalledMcpServersViewId, LazyCollectionState, McpCapability, McpCollectionDefinition, McpConnectionState, McpDefinitionReference, mcpOAuthClientSecretStorageKey, mcpPromptPrefix, McpServerCacheState, McpStartServerInteraction } from '../common/mcpTypes.js';
 import { startServerAndWaitForLiveTools } from '../common/mcpTypesUtils.js';
-import { McpAddConfigurationCommand, McpInstallFromManifestCommand } from './mcpCommandsAddConfiguration.js';
+import { McpAddConfigurationCommand, type McpAddConfigurationTarget, McpInstallFromManifestCommand } from './mcpCommandsAddConfiguration.js';
+import { isAgentHostSessionResource } from '../../chat/common/chatSessionsService.js';
 import { McpConfigurationDestination } from './mcpConfigurationDestination.js';
 import { McpResourceQuickAccess, McpResourceQuickPick } from './mcpResourceQuickAccess.js';
 import './media/mcpServerAction.css';
@@ -1159,7 +1160,7 @@ export class AddConfigurationAction extends Action2 {
 			id: McpCommandIds.AddConfiguration,
 			title: localize2('mcp.addConfiguration', "Add Server..."),
 			metadata: {
-				description: localize2('mcp.addConfiguration.description', "Installs a new Model Context protocol to the mcp.json settings"),
+				description: localize2('mcp.addConfiguration.description', "Adds a Model Context Protocol server to an agent host or MCP configuration file"),
 			},
 			category,
 			f1: true,
@@ -1182,7 +1183,10 @@ export class AddConfigurationAction extends Action2 {
 		const instantiationService = accessor.get(IInstantiationService);
 		const notificationService = accessor.get(INotificationService);
 		try {
-			const target = configUri === undefined ? undefined : await instantiationService.createInstance(McpConfigurationDestination).getExplicitTarget(configUri);
+			const resource = typeof configUri === 'string' ? URI.parse(configUri) : configUri;
+			const target: McpAddConfigurationTarget | undefined = resource === undefined ? undefined
+				: isAgentHostSessionResource(resource) ? { sessionResource: resource }
+					: await instantiationService.createInstance(McpConfigurationDestination).getExplicitTarget(resource);
 			if (configUri !== undefined && target === undefined) {
 				return;
 			}

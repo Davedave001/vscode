@@ -339,7 +339,7 @@ suite('MCP configuration entry points', () => {
 	}
 
 	for (const enabled of [false, true]) {
-		for (const selection of ['Add to Current Agent Session', 'Global', 'Remote', 'Workspace', ...(enabled ? ['Workspace (second)'] : [])]) {
+		for (const selection of ['Agent Host', 'Global', 'Remote', 'Workspace', ...(enabled ? ['Workspace (second)'] : [])]) {
 			test(`agent-host target is shown alongside persistent targets: ${selection}, root=${enabled}`, async () => {
 				const fixture = setup(enabled, [], true, true);
 				fixture.instantiation.stub(IWorkbenchEnvironmentService, { remoteAuthority: 'ssh-remote+test' });
@@ -355,11 +355,11 @@ suite('MCP configuration entry points', () => {
 					installs: fixture.installs.map(install => install.options),
 					errors: fixture.errors,
 				}, {
-					targets: ['Add to Current Agent Session', 'Global', 'Remote', 'Workspace', ...(enabled ? [`Workspace (${fixture.folder.name})`, `Workspace (${fixture.secondFolder.name})`] : [])],
-					descriptions: [undefined, 'Available in all workspaces, runs locally', 'Available on this remote machine, runs on Test Remote', 'Available in this workspace, runs on Test Remote', ...(enabled ? ['Workspace Folder', 'Workspace Folder'] : [])],
+					targets: ['Agent Host', 'Global', 'Remote', 'Workspace', ...(enabled ? [`Workspace (${fixture.folder.name})`, `Workspace (${fixture.secondFolder.name})`] : [])],
+					descriptions: ['Available to sessions on this agent host', 'Available in all workspaces, runs locally', 'Available on this remote machine, runs on Test Remote', 'Available in this workspace, runs on Test Remote', ...(enabled ? ['Workspace Folder', 'Workspace Folder'] : [])],
 					prompts: ['Choose the type of MCP server to add', 'Enter Command', 'Enter Server ID', 'Select the configuration target'],
-					agentHostAdds: selection === 'Add to Current Agent Session' ? [{ session: agentHostSession, name: installable.name, config: installable.config }] : [],
-					installs: selection === 'Add to Current Agent Session' ? [] : [{
+					agentHostAdds: selection === 'Agent Host' ? [{ session: agentHostSession, name: installable.name, config: installable.config }] : [],
+					installs: selection === 'Agent Host' ? [] : [{
 						target: selection === 'Global' ? ConfigurationTarget.USER_LOCAL
 							: selection === 'Remote' ? ConfigurationTarget.USER_REMOTE
 								: selection === 'Workspace' ? ConfigurationTarget.WORKSPACE : fixture.secondFolder,
@@ -373,6 +373,57 @@ suite('MCP configuration entry points', () => {
 
 	const secondAgentHostSession = agentHostSession.with({ path: '/second-session' });
 	const localSession = URI.from({ scheme: SessionType.Local, path: '/local-session' });
+	for (const asString of [false, true]) {
+		test(`explicit native management target wins over another focused chat (string=${asString})`, async () => {
+			const fixture = setup(true);
+			const selected = URI.parse('agent-host-devin-subscription:/opaque-selection');
+			fixture.instantiation.stub(IChatWidgetService, {
+				lastFocusedWidget: chatWidget(agentHostSession),
+				getAllWidgets: () => [chatWidget(agentHostSession), chatWidget(secondAgentHostSession)],
+			});
+			fixture.quickInput.selections.push('Command (stdio)', 'Agent Host');
+			fixture.quickInput.inputs.push('node server.js', installable.name);
+			await new AddConfigurationAction().run(fixture.instantiation, asString ? selected.toString() : selected);
+			assert.deepStrictEqual({ adds: fixture.agentHostAdds.map(add => ({ ...add, session: add.session.toString() })), installs: fixture.installs, errors: fixture.errors }, {
+				adds: [{ session: selected.toString(), name: installable.name, config: installable.config }], installs: [], errors: [],
+			});
+			assert.deepStrictEqual(fixture.quickInput.pickLabels[1], ['Agent Host', 'Global', 'Workspace']);
+		});
+	}
+
+	test('an explicit remote management target still permits a local destination', async () => {
+		const fixture = setup(true);
+		const selected = URI.parse('remote-example:/opaque-selection?revision=2');
+		fixture.quickInput.selections.push('Command (stdio)', 'Global');
+		fixture.quickInput.inputs.push('node server.js', installable.name);
+		await new AddConfigurationAction().run(fixture.instantiation, selected);
+		assert.deepStrictEqual({ adds: fixture.agentHostAdds, installs: fixture.installs.map(install => install.options), errors: fixture.errors }, {
+			adds: [], installs: [{ target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined }], errors: [],
+		});
+	});
+
+	test('an explicit remote management target preserves the selected opaque URI', async () => {
+		const fixture = setup(true, [], false, true);
+		const selected = URI.parse('remote-example:/opaque-selection?revision=2');
+		fixture.quickInput.selections.push('Command (stdio)', 'Agent Host');
+		fixture.quickInput.inputs.push('node server.js', installable.name);
+		await new AddConfigurationAction().run(fixture.instantiation, selected);
+		assert.deepStrictEqual({ adds: fixture.agentHostAdds.map(add => ({ ...add, session: add.session.toString() })), installs: fixture.installs, errors: fixture.errors }, {
+			adds: [{ session: selected.toString(), name: installable.name, config: installable.config }], installs: [], errors: [],
+		});
+	});
+
+	test('agent-host policy rejection occurs before mutating the selected host configuration', async () => {
+		const fixture = setup(true);
+		fixture.instantiation.stub(IAllowedMcpServersService, { isAllowed: () => new MarkdownString('Blocked by policy') });
+		fixture.quickInput.selections.push('Command (stdio)', 'Agent Host');
+		fixture.quickInput.inputs.push('node server.js', installable.name);
+		await new AddConfigurationAction().run(fixture.instantiation, agentHostSession);
+		assert.deepStrictEqual({ adds: fixture.agentHostAdds, installs: fixture.installs, errors: fixture.errors.map(String) }, {
+			adds: [], installs: [], errors: ['Error: Blocked by policy'],
+		});
+	});
+
 	for (const { name, focused, open, expected } of [
 		{ name: 'focused agent-host session wins over other open sessions', focused: agentHostSession, open: [secondAgentHostSession, agentHostSession], expected: agentHostSession },
 		{ name: 'sole open agent-host session is offered when no chat widget remains focused', focused: undefined, open: [agentHostSession], expected: agentHostSession },
@@ -390,7 +441,7 @@ suite('MCP configuration entry points', () => {
 				lastFocusedWidget: focused ? chatWidget(focused) : undefined,
 				getAllWidgets: () => open.map(session => chatWidget(session)),
 			});
-			fixture.quickInput.selections.push('Command (stdio)', expected ? 'Add to Current Agent Session' : 'Global');
+			fixture.quickInput.selections.push('Command (stdio)', expected ? 'Agent Host' : 'Global');
 			fixture.quickInput.inputs.push('node server.js', installable.name);
 			await new AddConfigurationAction().run(fixture.instantiation);
 			assert.deepStrictEqual({
@@ -399,7 +450,7 @@ suite('MCP configuration entry points', () => {
 				installs: fixture.installs.map(install => install.options),
 				errors: fixture.errors,
 			}, {
-				targets: [...(expected ? ['Add to Current Agent Session'] : []), 'Global', 'Workspace'],
+				targets: [...(expected ? ['Agent Host'] : []), 'Global', 'Workspace'],
 				agentHostAdds: expected ? [{ session: expected, name: installable.name, config: installable.config }] : [],
 				installs: expected ? [] : [{ target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined }],
 				errors: [],
@@ -419,7 +470,7 @@ suite('MCP configuration entry points', () => {
 				installs: fixture.installs.map(install => install.options),
 				agentHostAdds: fixture.agentHostAdds,
 			}, {
-				targets: withAgentHostSession ? [['Add to Current Agent Session', 'Global']] : [],
+				targets: withAgentHostSession ? [['Agent Host', 'Global']] : [],
 				installs: [{ target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined }],
 				agentHostAdds: [],
 			});
@@ -467,7 +518,7 @@ suite('MCP configuration entry points', () => {
 					options: fixture.installs.map(install => install.options),
 					errors: fixture.errors,
 				}, {
-					targets: ['Add to Current Agent Session', 'Global', ...(enabled ? fixture.workspace.folders.map(folder => `Workspace (${folder.name})`) : [])],
+					targets: ['Agent Host', 'Global', ...(enabled ? fixture.workspace.folders.map(folder => `Workspace (${folder.name})`) : [])],
 					options: [{ target: selectFolder ? fixture.folder : ConfigurationTarget.USER_LOCAL, workspaceConfig: selectFolder ? WorkspaceMcpConfigKind.Root : undefined }],
 					errors: [],
 				});
@@ -485,7 +536,7 @@ suite('MCP configuration entry points', () => {
 			targets: fixture.quickInput.pickLabels[1],
 			installs: fixture.installs, agentHostAdds: fixture.agentHostAdds, opened: fixture.opened, started: fixture.started, errors: fixture.errors,
 		}, {
-			targets: ['Add to Current Agent Session', 'Global', `Workspace (${fixture.folder.name})`, `Workspace (${fixture.secondFolder.name})`],
+			targets: ['Agent Host', 'Global', `Workspace (${fixture.folder.name})`, `Workspace (${fixture.secondFolder.name})`],
 			installs: [], agentHostAdds: [], opened: [], started: [], errors: [],
 		});
 	});
@@ -990,7 +1041,7 @@ suite('MCP configuration entry points', () => {
 		test('current agent session rejects unresolved inputs rather than losing collected values', async () => {
 			const fixture = setup(true, [], false, true);
 			setupPackage(fixture, { type: 'mapped', name: 'test', server: { type: McpServerType.LOCAL, command: 'node', args: ['${input:token}'] } });
-			fixture.quickInput.selections.push('NPM Package', 'Add to Current Agent Session');
+			fixture.quickInput.selections.push('NPM Package', 'Agent Host');
 			fixture.quickInput.inputs.push('test-package', 'test');
 			await new AddConfigurationAction().run(fixture.instantiation);
 			assert.deepStrictEqual({ adds: fixture.agentHostAdds, installs: fixture.installs, errors: fixture.errors.map(String) },

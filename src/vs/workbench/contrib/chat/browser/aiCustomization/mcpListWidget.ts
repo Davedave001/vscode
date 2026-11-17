@@ -67,6 +67,7 @@ import { getMcpServerDisplayLabel, IAgentHostCustomizationService } from '../age
 import { CustomizationEnablementKind, CustomizationLoadStatus, CustomizationType, McpServerStatus } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { IOutputService } from '../../../../services/output/common/output.js';
 import { ChatConfiguration } from '../../common/constants.js';
+import { isAgentHostSessionResource } from '../../common/chatSessionsService.js';
 import { IMcpServerCustomizationMigrationCandidate } from '../../common/promptSyntax/service/customizationMigrationService.js';
 import { getAvailableCustomizationMarketplaceInstallTelemetryContext, runCustomizationMarketplaceInstallWithTelemetry } from '../../common/customizationMarketplaceInstallTelemetry.js';
 import { customizationSearchMatchesAny } from '../../common/aiCustomizationSearch.js';
@@ -3293,7 +3294,9 @@ export class McpListWidget extends Disposable {
 	}
 
 	addServer(workspaceFolder?: URI): Promise<void> {
-		return this.commandService.executeCommand(McpCommandIds.AddConfiguration, workspaceFolder);
+		const sessionResource = this.customizationHarnessService.activeSessionResource.get();
+		const target = workspaceFolder ?? (isAgentHostSessionResource(sessionResource) ? sessionResource : undefined);
+		return this.commandService.executeCommand(McpCommandIds.AddConfiguration, target);
 	}
 
 	private updateHeaderActions(): void {

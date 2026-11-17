@@ -22,6 +22,7 @@ import { IAgentConnection } from '../../../../../../platform/agentHost/common/ag
 import { type AgentProvider, type IAgentPluginInstallation } from '../../../../../../platform/agentHost/common/agent.js';
 import { readRuntimePluginEnablement, withRuntimePluginEnablement } from '../../../../../../platform/agentHost/common/meta/pluginEnablementMeta.js';
 import { IAgentHostMcpOAuthMetadataService } from '../../../../../../platform/agentHost/common/agentHostMcpOAuthMetadataService.js';
+import { McpServerType } from '../../../../../../platform/mcp/common/mcpPlatformTypes.js';
 import { withMcpServerConnectorNameMeta, withMcpServerControllingSettingMeta, withMcpServerDisplayNameMeta, withMcpServerSourceMeta, withMcpServerSourcePluginMeta } from '../../../../../../platform/agentHost/common/meta/mcpCustomizationMeta.js';
 import { IAgentSubscription } from '../../../../../../platform/agentHost/common/state/agentSubscription.js';
 import { ActionType, type ActionEnvelope } from '../../../../../../platform/agentHost/common/state/sessionActions.js';
@@ -716,6 +717,28 @@ suite('AbstractAgentHostCustomizationService', () => {
 			{ name: 'github-mcp-server', displayName: undefined, sourcePluginName: undefined, controllingSettingId: 'chat.agentHost.githubMcpServer.enabled' },
 			{ name: 'github-mcp-server', displayName: undefined, sourcePluginName: undefined, controllingSettingId: undefined },
 		]);
+	});
+
+	test('adds MCP configuration to the selected host, preserving other servers, and rejects an unavailable target', () => {
+		const sut = createSut();
+		const selected = URI.parse('other-agent:/opaque-selection');
+		const configuration = { type: McpServerType.REMOTE, url: 'https://tools.example/mcp' } as const;
+		assert.throws(() => sut.addMcpServer(selected, 'new-server', configuration), /no longer available/);
+		sut.setTarget(selected, new FakeTarget([]));
+		assert.throws(() => sut.addMcpServer(selected, 'new-server', configuration), /no longer available/);
+		const writes: unknown[][] = [];
+		const existing = { type: McpServerType.LOCAL, command: 'existing-mcp' };
+		const target = new class extends FakeTarget {
+			readonly rootConfig = {
+				schema: { type: 'object' as const, properties: {} },
+				values: { mcpServers: { existing } },
+			};
+			override setRootConfigValue(property?: string, value?: unknown): void { writes.push([property, value]); }
+		}([]);
+		sut.setTarget(selected, target);
+		sut.addMcpServer(selected, 'new-server', configuration);
+		assert.deepStrictEqual(writes, [['mcpServers', { existing, 'new-server': configuration }]]);
+		assert.deepStrictEqual(target.rootConfig.values.mcpServers, { existing });
 	});
 
 	test('exposes the agent host configuration only for top-level servers configured there', () => {

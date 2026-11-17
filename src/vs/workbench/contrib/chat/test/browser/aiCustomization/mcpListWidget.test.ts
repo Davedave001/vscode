@@ -276,6 +276,31 @@ function createMcpAccessTestWidget(access: McpAccessValue, policyAccess: McpAcce
 suite('mcpListWidget', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
+	test('Add Server captures the management target and preserves explicit workspace and local destinations', async () => {
+		const selected = URI.parse('agent-host-devin-subscription:/opaque-selection');
+		const remote = URI.parse('remote-example:/different-selection?revision=2');
+		const activeSessionResource = observableValue(disposables, selected);
+		const calls: unknown[][] = [];
+		const host = {
+			customizationHarnessService: { activeSessionResource },
+			commandService: { executeCommand: async (...args: unknown[]) => { calls.push(args); } },
+		};
+		const addServer = Reflect.get(McpListWidget.prototype, 'addServer') as (this: typeof host, workspaceFolder?: URI) => Promise<void>;
+		await addServer.call(host);
+		activeSessionResource.set(remote, undefined);
+		await addServer.call(host);
+		const folder = URI.file('/chosen-workspace');
+		await addServer.call(host, folder);
+		activeSessionResource.set(URI.parse('local:/chat'), undefined);
+		await addServer.call(host);
+		assert.deepStrictEqual(calls, [
+			[McpCommandIds.AddConfiguration, selected],
+			[McpCommandIds.AddConfiguration, remote],
+			[McpCommandIds.AddConfiguration, folder],
+			[McpCommandIds.AddConfiguration, undefined],
+		]);
+	});
+
 	test('shows MCP discovery failures separately from server rows and clears them after recovery', () => {
 		let customizations: readonly Customization[] = [{
 			type: CustomizationType.Directory, id: 'mcp-discovery', uri: 'agent-discovery://copilot/mcp', name: 'MCP servers',

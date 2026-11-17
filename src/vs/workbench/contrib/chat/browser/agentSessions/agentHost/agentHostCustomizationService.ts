@@ -538,7 +538,7 @@ export abstract class AbstractAgentHostCustomizationService extends Disposable i
 		const target = this._resolveTarget(sessionResource);
 		const existingServers = target?.rootConfig?.values?.[AgentHostMcpServersConfigKey];
 		if (!target || !target.rootConfig) {
-			return;
+			throw new Error(localize('agentHost.mcpConfiguration.unavailable', "The selected agent host is no longer available for MCP configuration. Reopen Customizations and try again."));
 		}
 		const servers: AgentHostMcpServers = existingServers && typeof existingServers === 'object' && !Array.isArray(existingServers)
 			? existingServers as AgentHostMcpServers
