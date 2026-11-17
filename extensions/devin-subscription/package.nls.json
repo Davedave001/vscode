@@ -1,0 +1,4 @@
+{
+	"displayName": "Devin Subscription Authentication",
+	"description": "Connect a Devin account through browser sign-in, with credentials stored in this editor's secret storage."
+}

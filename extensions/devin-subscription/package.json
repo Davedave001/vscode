@@ -1,0 +1,17 @@
+{
+	"name": "devin-subscription",
+	"displayName": "%displayName%",
+	"description": "%description%",
+	"version": "0.1.0",
+	"publisher": "agent-workspace",
+	"license": "MIT",
+	"engines": { "vscode": "^1.148.0" },
+	"categories": ["Other"],
+	"extensionKind": ["ui"],
+	"activationEvents": [],
+	"main": "./out/extension",
+	"capabilities": { "virtualWorkspaces": true, "untrustedWorkspaces": { "supported": true } },
+	"contributes": {
+		"authentication": [{ "id": "devin-subscription", "label": "Devin Subscription" }]
+	}
+}

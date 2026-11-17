@@ -22,10 +22,12 @@ import { IsSessionsWindowContext } from '../../../../workbench/common/contextkey
 import { resolveSessionCommandTarget } from '../../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
 import { ITerminalService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService, getCodexAccountPlanName } from '../../../../workbench/services/agentHost/browser/codexAccountService.js';
+import { IAuthenticationService } from '../../../../workbench/services/authentication/common/authentication.js';
 import { AgentsWindowMenus } from '../../../browser/agentsWindowMenus.js';
 
 export const CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING = 'agents.subscriptions.claudeExecutable';
 export const DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING = 'agents.subscriptions.devinExecutable';
+export const DEVIN_SUBSCRIPTION_AUTH_PROVIDER = 'devin-subscription';
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'agents.subscriptions',
@@ -71,7 +73,7 @@ export async function openSubscriptionClient(accessor: ServicesAccessor, provide
 	}
 	const setting = provider === 'claude' ? CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING : DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING;
 	const executable = accessor.get(IConfigurationService).getValue<string>(setting)?.trim() || provider;
-	const name = provider === 'claude' ? localize('subscriptions.claudeTerminal', "Claude Code · Subscription") : localize('subscriptions.devinTerminal', "Devin · Subscription");
+	const name = provider === 'claude' ? localize('subscriptions.claudeTerminal', "Claude Code · Subscription") : localize('subscriptions.devinTerminal', "Devin CLI");
 	const terminals = accessor.get(ITerminalService);
 	const terminal = await terminals.createTerminal({
 		config: {
@@ -105,19 +107,27 @@ export class AgentSubscriptionsAction extends Action2 {
 	override async run(accessor: ServicesAccessor): Promise<void> {
 		const quickInput = accessor.get(IQuickInputService);
 		const instantiation = accessor.get(IInstantiationService);
+		const authentication = accessor.get(IAuthenticationService);
+		const notifications = accessor.get(INotificationService);
 		const codex = accessor.get(ICodexAccountService).account;
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
 			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), description: localize('subscriptions.claudePlan', "Claude subscription"), detail: localize('subscriptions.claudeDetail', "Use the official Claude Code client with your Claude account.") },
-			{ id: 'devin' as const, label: localize('subscriptions.devin', "Devin"), description: localize('subscriptions.devinPlan', "Devin subscription"), detail: localize('subscriptions.devinDetail', "Use Devin CLI with your existing Devin account.") },
+			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: localize('subscriptions.devinBrowser', "Browser account sign-in"), detail: localize('subscriptions.devinSubscriptionDetail', "Connect a Devin account separately. Credentials are saved in this editor's secret storage; native chat integration is still in development.") },
+			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });
 		if (!provider) { return; }
+		if (provider.id === 'devin-subscription') {
+			await authentication.createSession(DEVIN_SUBSCRIPTION_AUTH_PROVIDER, []);
+			notifications.info(localize('subscriptions.devinConnected', "Devin account connected and saved in this editor. Native Devin chat integration is still in development. Devin CLI remains available separately."));
+			return;
+		}
 		if (provider.id === 'codex') {
 			await instantiation.invokeFunction(connectCodexSubscription);
 			return;
 		}
 		const action = await quickInput.pick([
-			{ id: 'open', label: localize('subscriptions.openClient', "Open {0}", provider.id === 'claude' ? 'Claude Code' : 'Devin'), detail: localize('subscriptions.openDetail', "Continue in the official client using its saved sign-in.") },
+			{ id: 'open', label: localize('subscriptions.openClient', "Open {0}", provider.id === 'claude' ? 'Claude Code' : 'Devin CLI'), detail: localize('subscriptions.openDetail', "Continue in the official client using its saved sign-in.") },
 			{ id: 'signIn', label: localize('subscriptions.signIn', "Sign in"), detail: localize('subscriptions.signInDetail', "Open the provider's own account sign-in flow.") },
 		], { title: provider.label });
 		if (action) { await instantiation.invokeFunction(openSubscriptionClient, provider.id, action.id === 'signIn'); }

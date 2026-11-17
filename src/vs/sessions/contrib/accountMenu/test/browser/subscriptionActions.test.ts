@@ -14,16 +14,39 @@ import { ConfigurationTarget, IConfigurationService } from '../../../../../platf
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { TerminalLocation } from '../../../../../platform/terminal/common/terminal.js';
 import { IWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { ITerminalInstance, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService } from '../../../../../workbench/services/agentHost/browser/codexAccountService.js';
+import { IAuthenticationService } from '../../../../../workbench/services/authentication/common/authentication.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { IChat, ISessionWorkspace } from '../../../../../workbench/services/sessions/common/session.js';
-import { CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, openSubscriptionClient } from '../../browser/subscriptionActions.js';
+import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
+import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, DEVIN_SUBSCRIPTION_AUTH_PROVIDER, openSubscriptionClient } from '../../browser/subscriptionActions.js';
 
 suite('Agent Subscriptions', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	for (const cancelled of [false, true]) {
+		test(cancelled ? 'cancels the provider picker without opening sign-in' : 'offers Devin Subscription separately from Devin CLI and starts browser authentication', async () => {
+			const instantiation = store.add(new TestInstantiationService());
+			const quickInput = new TestQuickInputService();
+			const picker = sinon.stub(quickInput, 'pick').resolves(cancelled ? undefined : { id: 'devin-subscription', label: 'Devin Subscription' });
+			const calls: unknown[] = [];
+			instantiation.stub(IQuickInputService, quickInput);
+			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+			instantiation.stub(IAuthenticationService, upcastPartial<IAuthenticationService>({ createSession: async (provider, scopes) => { calls.push([provider, scopes]); return { id: 'session', accessToken: 'test-token', account: { id: 'account', label: 'Devin account' }, scopes: [] }; } }));
+			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: () => { calls.push('connected'); } }));
+			try {
+				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+				const items = picker.firstCall.args[0];
+				assert.ok(Array.isArray(items));
+				assert.deepStrictEqual(items.map(item => item.label), ['Codex', 'Anthropic', 'Devin Subscription', 'Devin CLI']);
+				assert.deepStrictEqual(calls, cancelled ? [] : [[DEVIN_SUBSCRIPTION_AUTH_PROVIDER, []], 'connected']);
+			} finally { picker.restore(); }
+		});
+	}
 
 	for (const status of ['signedOut', 'signedIn'] as const) {
 		test(`enables Codex before ${status === 'signedOut' ? 'starting official sign-in' : 'reusing the signed-in account'}`, async () => {
@@ -75,7 +98,7 @@ suite('Agent Subscriptions', () => {
 				await instantiation.invokeFunction(openSubscriptionClient, provider, signIn);
 				assert.deepStrictEqual(calls, [{
 					config: {
-						name: provider === 'claude' ? 'Claude Code · Subscription' : 'Devin · Subscription', executable: provider === 'claude' ? '/clients/Claude Code/claude.exe' : 'devin', args: signIn ? ['auth', 'login'] : [], cwd,
+						name: provider === 'claude' ? 'Claude Code · Subscription' : 'Devin CLI', executable: provider === 'claude' ? '/clients/Claude Code/claude.exe' : 'devin', args: signIn ? ['auth', 'login'] : [], cwd,
 						env: provider === 'claude' ? { ANTHROPIC_API_KEY: null, ANTHROPIC_AUTH_TOKEN: null } : { WINDSURF_API_KEY: null }, waitOnExit: true,
 					},
 					location: TerminalLocation.Editor,
