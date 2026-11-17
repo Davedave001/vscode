@@ -7,6 +7,7 @@ import { coalesce, distinct } from '../../../../../../base/common/arrays.js';
 import { DeferredPromise, Delayer } from '../../../../../../base/common/async.js';
 import { CancellationToken } from '../../../../../../base/common/cancellation.js';
 import { onUnexpectedError } from '../../../../../../base/common/errors.js';
+import { isWeb } from '../../../../../../base/common/platform.js';
 import { Event } from '../../../../../../base/common/event.js';
 import { hash } from '../../../../../../base/common/hash.js';
 import { Disposable, IDisposable, IReference } from '../../../../../../base/common/lifecycle.js';
@@ -38,6 +39,7 @@ import { enumerateLocalCustomizationsForHarness, type ILocalCustomizationSyncOpt
 import { getAgentFileToolReferenceName, toolDataToDefinition } from './agentHostToolUtils.js';
 import { IAgentHostToolSetEnablementService, isCopilotCliSessionType, isToolEnabledInSet } from './agentHostToolSetEnablementService.js';
 import { AgentHostMcpServerSupportScope, IAgentHostMcpServerSupportScope } from './agentHostMcpServerSupportScope.js';
+import { usesAgentHostMcpGateway } from './agentHostMcpServerSupport.js';
 import { type ISyncedCustomizationOrigin, SyncedCustomizationBundler } from './syncedCustomizationBundler.js';
 import { Iterable } from '../../../../../../base/common/iterator.js';
 import { type IAgentHostResourceUriMapper } from '../../../../../../platform/agentHost/common/agentHostUri.js';
@@ -87,7 +89,7 @@ export interface IAgentHostActiveClientService {
 	 */
 	acquireScope(sessionType: string, roots: readonly URI[] | undefined): IAgentCustomizationScope;
 	/**
-	 * Acquires a shared MCP support scope for a Copilot CLI harness; `undefined` roots mean unknown applicability while an empty array means no workspace.
+	 * Acquires a shared MCP support scope for an assessed harness; `undefined` roots mean unknown applicability while an empty array means no workspace.
 	 * Returns `undefined` for harnesses whose MCP delivery is not assessed by the client.
 	 */
 	acquireMcpServerSupportScope(sessionType: string, roots: readonly URI[] | undefined): IAgentHostMcpServerSupportScope | undefined;
@@ -374,7 +376,7 @@ export class AgentHostActiveClientService extends Disposable implements IAgentHo
 	}
 
 	acquireMcpServerSupportScope(sessionType: string, roots: readonly URI[] | undefined): IAgentHostMcpServerSupportScope | undefined {
-		if (!isCopilotCliSessionType(sessionType)) {
+		if (!isCopilotCliSessionType(sessionType) && !(usesAgentHostMcpGateway(sessionType) && !this._environmentService.remoteAuthority && !isWeb)) {
 			return undefined;
 		}
 		const normalizedRoots = roots === undefined ? undefined : normalizeRoots(roots, this._uriIdentityService.extUri);

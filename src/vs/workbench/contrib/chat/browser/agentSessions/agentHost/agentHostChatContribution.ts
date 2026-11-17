@@ -407,7 +407,7 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 			syncProvider,
 			itemProvider,
 			hiddenMcpServerCollectionIds: agentHostProviderHasBuiltInGitHubMcpServer(agent.provider) ? [COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID] : undefined,
-			mcpServerCompatibilityProvider: agent.provider === 'copilotcli' ? {
+			mcpServerCompatibilityProvider: agent.provider === 'copilotcli' || this._isLocalAgentHost && !isWeb && usesAgentHostMcpGateway(sessionType) ? {
 				acquire: sessionResource => createCustomizationMcpServerCompatibilityScope(
 					this._agentHostCustomizationService.onDidChangeCustomizations,
 					() => this._agentHostCustomizationService.getClientWorkingDirectoryUris(sessionResource),

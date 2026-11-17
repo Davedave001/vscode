@@ -29,6 +29,8 @@ export const COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID = extensionPrefixedIdentifier
 
 export const enum AgentHostMcpServerDelivery {
 	ClientForwarded = 'clientForwarded',
+	/** Expected transport when enabled; this is not a runtime connection or readiness verdict. */
+	ClientGateway = 'clientGateway',
 	RuntimeDiscovered = 'runtimeDiscovered',
 	AgentPlugin = 'agentPlugin',
 	ProviderBuiltIn = 'providerBuiltIn',
@@ -81,6 +83,10 @@ export const enum AgentHostMcpSupportReason {
 	OAuthClientConfigurationIgnored = 'oauthClientConfigurationIgnored',
 	DefinitionNotLoaded = 'definitionNotLoaded',
 	SourceUnknown = 'sourceUnknown',
+	GatewaySourceNotSupported = 'gatewaySourceNotSupported',
+	GatewayDuplicateServerName = 'gatewayDuplicateServerName',
+	GatewayDefinitionNotLoaded = 'gatewayDefinitionNotLoaded',
+	GatewayAppsUnavailable = 'gatewayAppsUnavailable',
 }
 
 export type AgentHostMcpServerCompatibility =
@@ -174,11 +180,15 @@ export function usesAgentHostMcpGateway(sessionType: string): boolean {
 export function isAgentHostMcpGatewayServer(server: IMcpServer, collection: McpCollectionDefinition | undefined, workingDirectories: readonly URI[] | undefined): boolean {
 	if (!collection) { return false; }
 	const kind = getMcpServerSourceKind(server, collection);
-	return [AgentHostMcpServerSourceKind.UserProfile, AgentHostMcpServerSourceKind.RemoteUser, AgentHostMcpServerSourceKind.VscodeWorkspaceFolder, AgentHostMcpServerSourceKind.Extension].includes(kind)
+	return isGatewaySource(kind)
 		&& getMcpServerApplicability(collection, kind, workingDirectories) === AgentHostMcpServerApplicability.Applicable;
 }
 
-export async function assessMcpServersForCopilotAgentHost(
+function isGatewaySource(kind: AgentHostMcpServerSourceKind): boolean {
+	return [AgentHostMcpServerSourceKind.UserProfile, AgentHostMcpServerSourceKind.RemoteUser, AgentHostMcpServerSourceKind.VscodeWorkspaceFolder, AgentHostMcpServerSourceKind.Extension].includes(kind);
+}
+
+export async function assessMcpServersForAgentHost(
 	servers: readonly IMcpServer[],
 	configurationResolverService: IConfigurationResolverService,
 	sessionType: string,
@@ -186,7 +196,7 @@ export async function assessMcpServersForCopilotAgentHost(
 	lazyCollectionState: LazyCollectionState,
 	windowRemoteAuthority: string | null,
 ): Promise<IAgentHostMcpServerSupportAssessment | undefined> {
-	if (!isCopilotCliSessionType(sessionType)) {
+	if (!isCopilotCliSessionType(sessionType) && !(usesAgentHostMcpGateway(sessionType) && windowRemoteAuthority === null)) {
 		return undefined;
 	}
 
@@ -212,6 +222,7 @@ export async function mergeInstalledMcpServersIntoAgentHostSupportAssessment(
 	installedServers: readonly IAgentHostInstalledMcpServer[],
 	configurationResolverService: IConfigurationResolverService,
 	workingDirectories: readonly URI[] | undefined,
+	sessionType?: string,
 ): Promise<IAgentHostMcpServerSupportAssessment> {
 	const installedById = new Map(installedServers.map(server => [server.id, server]));
 	const servers = assessment.servers.map(server => {
@@ -229,7 +240,7 @@ export async function mergeInstalledMcpServersIntoAgentHostSupportAssessment(
 	const assessedIds = new Set(servers.map(server => server.id));
 	const missingDisabledServers = await Promise.all(installedServers
 		.filter(server => !assessedIds.has(server.id) && server.runtimeState !== McpServerEnablementState.Enabled)
-		.map(server => assessDisabledInstalledMcpServer(server, configurationResolverService, workingDirectories, getShadowingServerId(server, servers))));
+		.map(server => assessDisabledInstalledMcpServer(server, configurationResolverService, workingDirectories, getShadowingServerId(server, servers), sessionType !== undefined && usesAgentHostMcpGateway(sessionType))));
 	return {
 		...assessment,
 		servers: [...servers, ...missingDisabledServers],
@@ -244,7 +255,36 @@ export function resolveMcpServersForAgentHostDelivery(
 	workingDirectories: readonly URI[] | undefined,
 	windowRemoteAuthority: string | null,
 ): Promise<readonly IAgentHostMcpServerDeliveryResolution[]> {
+	if (usesAgentHostMcpGateway(sessionType) && windowRemoteAuthority === null) {
+		return Promise.resolve(resolveGatewayMcpServers(servers, workingDirectories));
+	}
 	return Promise.all(servers.map(server => resolveMcpServerForAgentHostDelivery(server, configurationResolverService, sessionType, workingDirectories, windowRemoteAuthority)));
+}
+
+/** Assess the same editor-owned definitions selected by the per-chat gateway without resolving or copying their launch settings. */
+function resolveGatewayMcpServers(servers: readonly IMcpServer[], workingDirectories: readonly URI[] | undefined): readonly IAgentHostMcpServerDeliveryResolution[] {
+	const selectedNames = new Map<string, number>();
+	for (const server of servers) {
+		if (isAgentHostMcpGatewayServer(server, server.readDefinitions().get().collection, workingDirectories) && getMcpServerEnablement(server).enabled) {
+			selectedNames.set(server.definition.label, (selectedNames.get(server.definition.label) ?? 0) + 1);
+		}
+	}
+	return servers.map(server => {
+		const { collection, server: definition } = server.readDefinitions().get();
+		const source = getMcpServerSource(server, collection, definition);
+		const applicability = getMcpServerApplicability(collection, source.kind, workingDirectories);
+		if (!collection || !definition) {
+			return createResolution(server, definition, source, applicability, AgentHostMcpServerDelivery.Unknown, unknown([AgentHostMcpSupportReason.GatewayDefinitionNotLoaded]));
+		}
+		if (!isGatewaySource(source.kind)) {
+			return createResolution(server, definition, source, applicability, AgentHostMcpServerDelivery.NotDelivered, unsupported([AgentHostMcpSupportReason.GatewaySourceNotSupported]));
+		}
+		if (applicability === AgentHostMcpServerApplicability.Applicable && getMcpServerEnablement(server).enabled && (selectedNames.get(server.definition.label) ?? 0) > 1) {
+			return createResolution(server, definition, source, applicability, AgentHostMcpServerDelivery.NotDelivered, unsupported([AgentHostMcpSupportReason.GatewayDuplicateServerName]));
+		}
+		const compatibility = getCompatibility([], server.tools.get().some(tool => tool.uiResourceUri) ? [AgentHostMcpSupportReason.GatewayAppsUnavailable] : [], []);
+		return createResolution(server, definition, source, applicability, isAgentHostMcpGatewayServer(server, collection, workingDirectories) ? AgentHostMcpServerDelivery.ClientGateway : deliveryForInapplicable(applicability), compatibility);
+	});
 }
 
 async function resolveMcpServerForAgentHostDelivery(
@@ -556,9 +596,12 @@ async function assessDisabledInstalledMcpServer(
 	configurationResolverService: IConfigurationResolverService,
 	workingDirectories: readonly URI[] | undefined,
 	shadowedBy: string | undefined,
+	usesGateway = false,
 ): Promise<IAgentHostMcpServerSupport> {
 	const sourceKind = getInstalledMcpServerSourceKind(server);
-	const { compatibility, projectedConfiguration } = await assessInstalledMcpServerConfiguration(server, sourceKind, configurationResolverService);
+	const { compatibility, projectedConfiguration } = usesGateway
+		? { compatibility: isGatewaySource(sourceKind) ? unknown([AgentHostMcpSupportReason.GatewayDefinitionNotLoaded]) : unsupported([AgentHostMcpSupportReason.GatewaySourceNotSupported]), projectedConfiguration: undefined }
+		: await assessInstalledMcpServerConfiguration(server, sourceKind, configurationResolverService);
 	const collectionId = server.configPath?.collectionId ?? (server.configPath
 		? `${MCP_CONFIGURATION_COLLECTION_ID_PREFIX}${server.configPath.id}`
 		: getCollectionIdFromInstalledServer(server));

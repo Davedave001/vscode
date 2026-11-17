@@ -15,6 +15,7 @@ import { Disposable, DisposableStore, IReference, toDisposable } from '../../../
 import { ResourceMap, ResourceSet } from '../../../../../../base/common/map.js';
 import { extUriBiasedIgnorePathCase } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
+import { isWeb } from '../../../../../../base/common/platform.js';
 import { hasKey } from '../../../../../../base/common/types.js';
 import { constObservable, observableValue, autorun, type IObservable } from '../../../../../../base/common/observable.js';
 import { mock } from '../../../../../../base/test/common/mock.js';
@@ -400,6 +401,15 @@ suite('AgentHostClientTools', () => {
 		const second = disposables.add(service.acquireSessionTools(session));
 
 		assert.notStrictEqual(second.object, firstObservable);
+	});
+
+	test('only acquires Devin MCP support scopes for a local desktop gateway', async () => {
+		for (const remoteAuthority of [undefined, 'ssh-remote+example']) {
+			const { service } = createActiveClientService(undefined, undefined, { remoteAuthority, servers: [] });
+			const scope = service.acquireMcpServerSupportScope('agent-host-devin-subscription', []);
+			assert.strictEqual(!!scope, !isWeb && remoteAuthority === undefined);
+			if (scope) { disposables.add(scope); await scope.whenResolved(); }
+		}
 	});
 
 	test('provides MCP support before a session and keeps unavailable roots distinct from no roots', async () => {

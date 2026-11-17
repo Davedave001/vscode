@@ -17,6 +17,7 @@ import { AgentPolicyError } from '../../../../../../platform/agentHost/common/ag
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { Disposable, DisposableStore, IDisposable, IReference, toDisposable } from '../../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../../base/common/network.js';
+import { isWeb } from '../../../../../../base/common/platform.js';
 import { equals } from '../../../../../../base/common/objects.js';
 import { extUriBiasedIgnorePathCase } from '../../../../../../base/common/resources.js';
 import { IUriIdentityService } from '../../../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -1677,6 +1678,26 @@ suite('AgentHostChatContribution', () => {
 	// ---- Registration ---------------------------------------------------
 
 	suite('registration', () => {
+
+		test('registers Devin MCP compatibility only for the local desktop gateway', () => {
+			const results = [];
+			for (const remoteAuthority of [undefined, 'ssh-remote+example']) {
+				const { instantiationService, agentHostService } = createTestServices(disposables);
+				instantiationService.stub(IWorkbenchEnvironmentService, { isSessionsWindow: true, remoteAuthority });
+				const harnesses: IHarnessDescriptor[] = [];
+				instantiationService.stub(ICustomizationHarnessService, {
+					activeSessionResource: constObservable(URI.parse('agent-host-devin-subscription:/chat')),
+					registerExternalHarness: (descriptor: IHarnessDescriptor) => { harnesses.push(descriptor); return toDisposable(() => { }); },
+				});
+				agentHostService.setRootState({ agents: ['copilotcli', 'devin-subscription', 'claude'].map(provider => ({ provider, displayName: provider, description: 'test', models: [] })), activeSessions: 0 });
+				disposables.add(instantiationService.createInstance(AgentHostContribution));
+				results.push(harnesses.map(harness => ({ id: harness.id, compatibility: !!harness.mcpServerCompatibilityProvider })));
+			}
+			assert.deepStrictEqual(results, [
+				[{ id: 'agent-host-copilotcli', compatibility: true }, { id: 'agent-host-devin-subscription', compatibility: !isWeb }, { id: 'agent-host-claude', compatibility: false }],
+				[{ id: 'agent-host-copilotcli', compatibility: true }, { id: 'agent-host-devin-subscription', compatibility: false }, { id: 'agent-host-claude', compatibility: false }],
+			]);
+		});
 
 		test('registers agent', () => {
 			const { chatAgentService } = createContribution(disposables);

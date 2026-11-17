@@ -31,7 +31,7 @@ import { IWorkspaceFolderData } from '../../../../../../platform/workspace/commo
 import { AbstractVariableResolverService } from '../../../../../services/configurationResolver/common/variableResolver.js';
 import { IMcpServer, LazyCollectionState, McpCollectionDefinition, McpCollectionProvenance, mcpOAuthClientSecretStorageKey, McpServerDefinition, McpServerTransportType, McpServerTrust } from '../../../../mcp/common/mcpTypes.js';
 import { McpServerCustomizationMigrator } from '../../../browser/aiCustomization/mcpServerCustomizationMigration.js';
-import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForCopilotAgentHost, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
+import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForAgentHost, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
 import { ContributionEnablementState } from '../../../common/enablement.js';
 import { CustomizationMigrationType, IMcpServerCustomizationMigrationCandidate, McpServerCustomizationMigrationFailureReason } from '../../../common/promptSyntax/service/customizationMigrationService.js';
 import { PromptsStorage } from '../../../common/promptSyntax/service/promptsService.js';
@@ -374,7 +374,7 @@ suite('McpServerCustomizationMigration', () => {
 				override dispose() { }
 			}()));
 			const configurationService = new TestConfigurationService({ 'mcp.port': 8080 });
-			const assessment = await assessMcpServersForCopilotAgentHost(
+			const assessment = await assessMcpServersForAgentHost(
 				mcpServers,
 				new TestConfigurationResolverService([], undefined, configurationService),
 				'agent-host-copilotcli',

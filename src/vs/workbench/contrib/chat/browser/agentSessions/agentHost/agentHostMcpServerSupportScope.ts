@@ -19,7 +19,7 @@ import { isStrictPluginOnlyCustomizationEnabled, StrictPluginOnlyCustomization }
 import { ICustomizationMcpServerCompatibility, ICustomizationMcpServerCompatibilityScope } from '../../../common/customizationHarnessService.js';
 import { IMcpService, IMcpWorkbenchService } from '../../../../mcp/common/mcpTypes.js';
 import { IConfigurationResolverService } from '../../../../../services/configurationResolver/common/configurationResolver.js';
-import { AgentHostMcpServerApplicability, AgentHostMcpSupportReason, assessMcpServersForCopilotAgentHost, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupportSnapshot, mergeInstalledMcpServersIntoAgentHostSupportAssessment } from './agentHostMcpServerSupport.js';
+import { AgentHostMcpServerApplicability, AgentHostMcpSupportReason, assessMcpServersForAgentHost, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupportSnapshot, mergeInstalledMcpServersIntoAgentHostSupportAssessment, usesAgentHostMcpGateway } from './agentHostMcpServerSupport.js';
 
 const MCP_SUPPORT_UPDATE_DEBOUNCE_DELAY = 50;
 
@@ -88,6 +88,14 @@ export function createCustomizationMcpServerCompatibilityScope(
 
 export function getMcpCompatibilityDetail(reason: AgentHostMcpSupportReason): string {
 	switch (reason) {
+		case AgentHostMcpSupportReason.GatewaySourceNotSupported:
+			return localize('mcpCompatibilityGatewaySourceNotSupported', "Devin's editor connection supports MCP servers configured in your profile, in this workspace's .vscode/mcp.json, or by an extension. Add this server to one of those locations to use it with Devin.");
+		case AgentHostMcpSupportReason.GatewayDuplicateServerName:
+			return localize('mcpCompatibilityGatewayDuplicateServerName', "Two enabled MCP servers in this chat have the same name. Rename one in its MCP configuration, or disable one, then retry the message.");
+		case AgentHostMcpSupportReason.GatewayDefinitionNotLoaded:
+			return localize('mcpCompatibilityGatewayDefinitionNotLoaded', "This server's editor definition is not available yet. Check its enablement and access settings, then wait for MCP discovery to finish.");
+		case AgentHostMcpSupportReason.GatewayAppsUnavailable:
+			return localize('mcpCompatibilityGatewayAppsUnavailable', "This server includes an interactive MCP App. Devin can call its tools, but this connection cannot display the App yet.");
 		case AgentHostMcpSupportReason.UnsupportedSourceLocation:
 			return localize('mcpCompatibilityUnsupportedSourceLocation', "The current configuration location for this server is not supported by the Copilot harness.\nTo migrate this server, move its configuration to the workspace root .mcp.json file.");
 		case AgentHostMcpSupportReason.CopilotHomeNotForwarded:
@@ -150,7 +158,7 @@ export class AgentHostMcpServerSupportScope extends Disposable {
 		const update = async (sequence: number) => {
 			try {
 				const lazyState = this._mcpService.lazyCollectionState.get();
-				const initialAssessment = await assessMcpServersForCopilotAgentHost(
+				const initialAssessment = await assessMcpServersForAgentHost(
 					this._mcpService.servers.get(),
 					this._configurationResolverService,
 					this._sessionType,
@@ -186,6 +194,7 @@ export class AgentHostMcpServerSupportScope extends Disposable {
 					installedServers,
 					this._configurationResolverService,
 					this._roots,
+					this._sessionType,
 				);
 				if (sequence !== this._updateSequence) {
 					return;
@@ -218,6 +227,7 @@ export class AgentHostMcpServerSupportScope extends Disposable {
 			for (const server of this._mcpService.servers.read(reader)) {
 				server.readDefinitions().read(reader);
 				server.enablement.read(reader);
+				if (usesAgentHostMcpGateway(this._sessionType) && this._windowRemoteAuthority === null) { server.tools.read(reader); }
 			}
 			this._mcpService.lazyCollectionState.read(reader);
 			scheduleUpdate();

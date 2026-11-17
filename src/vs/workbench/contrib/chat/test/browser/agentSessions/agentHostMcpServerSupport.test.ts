@@ -20,12 +20,12 @@ import { McpServerType } from '../../../../../../platform/mcp/common/mcpPlatform
 import { McpResourceFormat } from '../../../../../../platform/mcp/common/mcpWorkspaceConfiguration.js';
 import { COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_CONFIG } from '../../../../../../platform/policy/common/copilotManagedSettings.js';
 import { StorageScope } from '../../../../../../platform/storage/common/storage.js';
-import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForCopilotAgentHost, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot, isAgentHostMcpGatewayServer, mergeInstalledMcpServersIntoAgentHostSupportAssessment, resolveMcpServersForAgentHostDelivery, usesAgentHostMcpGateway } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
+import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForAgentHost, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot, isAgentHostMcpGatewayServer, mergeInstalledMcpServersIntoAgentHostSupportAssessment, resolveMcpServersForAgentHostDelivery, usesAgentHostMcpGateway } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
 import { AgentHostMcpServerSupportScope, createCustomizationMcpServerCompatibilityScope, getMcpCompatibilityDetail, IAgentHostMcpServerSupportScope } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupportScope.js';
 import { ContributionEnablementState } from '../../../common/enablement.js';
 import { AICustomizationSources } from '../../../common/aiCustomizationWorkspaceService.js';
 import { ExternalDiscoverySource } from '../../../../mcp/common/mcpConfiguration.js';
-import { IMcpConfigPath, IMcpServer, IMcpService, IMcpWorkbenchService, IWorkbenchMcpServer, LazyCollectionState, McpCollectionDefinition, McpCollectionProvenance, McpServerDefinition, McpServerEnablementState, McpServerLaunch, McpServerTransportStdio, McpServerTransportType, McpServerTrust } from '../../../../mcp/common/mcpTypes.js';
+import { IMcpConfigPath, IMcpServer, IMcpService, IMcpTool, IMcpWorkbenchService, IWorkbenchMcpServer, LazyCollectionState, McpCollectionDefinition, McpCollectionProvenance, McpServerDefinition, McpServerEnablementState, McpServerLaunch, McpServerTransportStdio, McpServerTransportType, McpServerTrust } from '../../../../mcp/common/mcpTypes.js';
 import { IConfigurationResolverService } from '../../../../../services/configurationResolver/common/configurationResolver.js';
 import { ConfigurationResolverExpression } from '../../../../../services/configurationResolver/common/configurationResolverExpression.js';
 import { collectNonPluginMcpServers } from '../../../browser/agentSessions/agentHost/agentHostLocalCustomizations.js';
@@ -50,6 +50,115 @@ class TestMcpSupportConfigurationService extends TestConfigurationService {
 
 suite('agentHostMcpServerSupport', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	const devinSessionType = 'agent-host-devin-subscription';
+
+	test('reports interactive App limitations from parsed editor tool metadata independently of ordinary tool support', async () => {
+		const tools = observableValue<readonly IMcpTool[]>('appTools', [upcastPartial<IMcpTool>({ uiResourceUri: 'ui://test-server/card' })]);
+		const servers = [
+			makeMcpServer({ id: 'app', collectionId: 'profile', provenance: McpCollectionProvenance.UserProfile, toolsObservable: tools }),
+			makeMcpServer({ id: 'ordinary', collectionId: 'profile', provenance: McpCollectionProvenance.UserProfile }),
+		];
+		const result = await assessMcpServersForAgentHost(servers, makeConfigurationResolverService(), devinSessionType, [], LazyCollectionState.AllKnown, null);
+		assert.deepStrictEqual(result?.servers.map(server => ({ delivery: server.delivery, compatibility: server.compatibility })), [
+			{ delivery: AgentHostMcpServerDelivery.ClientGateway, compatibility: { kind: 'partiallySupported', reasons: [AgentHostMcpSupportReason.GatewayAppsUnavailable] } },
+			{ delivery: AgentHostMcpServerDelivery.ClientGateway, compatibility: { kind: 'supported' } },
+		]);
+	});
+
+	test('assesses Devin gateway delivery without resolving or copying editor-owned launch settings', async () => {
+		const launch = { ...stdioLaunch('${input:token}'), envFile: '/private-env-file', cwd: URI.file('/server-working-directory').fsPath };
+		const servers = [makeMcpServer({ id: 'tools', collectionId: 'profile', provenance: McpCollectionProvenance.UserProfile, launch, sandboxEnabled: true, devMode: { watch: '*.ts' } })];
+		const resolver = upcastPartial<IConfigurationResolverService>({ resolveAsync: async () => { throw new Error('Must not resolve gateway configuration'); } });
+		const result = await assessMcpServersForAgentHost(servers, resolver, devinSessionType, [], LazyCollectionState.AllKnown, null);
+		assert.deepStrictEqual(result?.servers.map(server => ({ delivery: server.delivery, compatibility: server.compatibility, configuration: server.projectedConfiguration })), [{ delivery: AgentHostMcpServerDelivery.ClientGateway, compatibility: { kind: 'supported' }, configuration: undefined }]);
+		assert.strictEqual(await assessMcpServersForAgentHost(servers, resolver, devinSessionType, [], LazyCollectionState.AllKnown, 'ssh-remote+example'), undefined);
+	});
+
+	test('Devin compatibility agrees with gateway source and workspace selection', async () => {
+		const root = URI.file('/workspace-a');
+		const servers = [
+			makeMcpServer({ id: 'profile', collectionId: 'profile', provenance: McpCollectionProvenance.UserProfile }),
+			makeMcpServer({ id: 'local', collectionId: 'folder-a', provenance: McpCollectionProvenance.WorkspaceFolderConfiguration, configTarget: ConfigurationTarget.WORKSPACE_FOLDER, collectionOrigin: URI.joinPath(root, '.vscode/mcp.json') }),
+			makeMcpServer({ id: 'other', collectionId: 'folder-b', provenance: McpCollectionProvenance.WorkspaceFolderConfiguration, configTarget: ConfigurationTarget.WORKSPACE_FOLDER, collectionOrigin: URI.file('/workspace-b/.vscode/mcp.json') }),
+			makeMcpServer({ id: 'external', collectionId: 'external', provenance: McpCollectionProvenance.ExternalConfiguration, discoverySource: ExternalDiscoverySource.Copilot }),
+			makeMcpServer({ id: 'plugin', collectionId: 'plugin', provenance: McpCollectionProvenance.Plugin }),
+		];
+		const result = await assessMcpServersForAgentHost(servers, makeConfigurationResolverService(), devinSessionType, [root], LazyCollectionState.HasUnknown, null);
+		assert.deepStrictEqual(result?.servers.map(server => ({ name: server.name, delivery: server.delivery, compatibility: server.compatibility })), [
+			{ name: 'profile', delivery: AgentHostMcpServerDelivery.ClientGateway, compatibility: { kind: 'supported' } },
+			{ name: 'local', delivery: AgentHostMcpServerDelivery.ClientGateway, compatibility: { kind: 'supported' } },
+			{ name: 'other', delivery: AgentHostMcpServerDelivery.NotDelivered, compatibility: { kind: 'supported' } },
+			{ name: 'external', delivery: AgentHostMcpServerDelivery.NotDelivered, compatibility: { kind: 'unsupported', reasons: [AgentHostMcpSupportReason.GatewaySourceNotSupported] } },
+			{ name: 'plugin', delivery: AgentHostMcpServerDelivery.NotDelivered, compatibility: { kind: 'unsupported', reasons: [AgentHostMcpSupportReason.GatewaySourceNotSupported] } },
+		]);
+		assert.strictEqual(result?.discoveryComplete, false);
+		const unknownRoots = await assessMcpServersForAgentHost([servers[1]], makeConfigurationResolverService(), devinSessionType, undefined, LazyCollectionState.AllKnown, null);
+		assert.strictEqual(unknownRoots?.servers[0].delivery, AgentHostMcpServerDelivery.Unknown);
+	});
+
+	test('Devin reports duplicate enabled gateway names and recomputes after one server is disabled', async () => {
+		const enabled = observableValue('secondEnabled', ContributionEnablementState.EnabledProfile);
+		const servers = [
+			makeMcpServer({ id: 'first', label: 'Same Name', collectionId: 'first', provenance: McpCollectionProvenance.UserProfile }),
+			makeMcpServer({ id: 'second', label: 'Same Name', collectionId: 'second', provenance: McpCollectionProvenance.UserProfile, enablementObservable: enabled }),
+		];
+		const assess = () => assessMcpServersForAgentHost(servers, makeConfigurationResolverService(), devinSessionType, [], LazyCollectionState.AllKnown, null);
+		const before = await assess();
+		enabled.set(ContributionEnablementState.DisabledWorkspace, undefined);
+		const after = await assess();
+		assert.deepStrictEqual(before?.servers.map(server => server.compatibility), servers.map(() => ({ kind: 'unsupported', reasons: [AgentHostMcpSupportReason.GatewayDuplicateServerName] })));
+		assert.deepStrictEqual(after?.servers.map(server => ({ compatibility: server.compatibility, enabled: server.enablement.enabled })), [{ compatibility: { kind: 'supported' }, enabled: true }, { compatibility: { kind: 'supported' }, enabled: false }]);
+	});
+
+	test('Devin leaves missing editor definitions unknown and keeps access-disabled entries visible without launch projection', async () => {
+		const root = URI.file('/workspace');
+		const server = makeMcpServer({ id: 'missing', collectionId: 'profile', provenance: McpCollectionProvenance.UserProfile });
+		const missing = upcastPartial<IMcpServer>({ ...server, readDefinitions: () => observableValue('missingDefinition', { collection: server.readDefinitions().get().collection, server: undefined }) });
+		const initial = await assessMcpServersForAgentHost([missing], makeConfigurationResolverService(), devinSessionType, [root], LazyCollectionState.AllKnown, null);
+		assert.ok(initial);
+		const result = await mergeInstalledMcpServersIntoAgentHostSupportAssessment(initial, [{
+			id: 'disabled', name: 'disabled', label: 'Disabled', configuration: { type: McpServerType.LOCAL, command: '${input:private}' },
+			configPath: { id: 'ws0', key: 'workspaceFolderValue', label: 'Workspace Folder', scope: StorageScope.WORKSPACE, target: ConfigurationTarget.WORKSPACE_FOLDER, order: 0, uri: URI.joinPath(root, '.vscode/mcp.json') },
+			sandbox: undefined, runtimeState: McpServerEnablementState.DisabledByAccess,
+		}], upcastPartial<IConfigurationResolverService>({ resolveAsync: async () => { throw new Error('Must not resolve disabled configuration'); } }), [root], devinSessionType);
+		assert.deepStrictEqual(result.servers.map(server => ({ name: server.name, kind: server.compatibility.kind, configuration: server.projectedConfiguration })), [{ name: 'missing', kind: 'unknown', configuration: undefined }, { name: 'disabled', kind: 'unknown', configuration: undefined }]);
+		assert.strictEqual(result.servers[1].enablement.state, AgentHostMcpServerEnablementState.DisabledByAccess);
+		assert.ok(getMcpCompatibilityDetail(AgentHostMcpSupportReason.GatewaySourceNotSupported).includes('Devin'));
+		assert.ok(!getMcpCompatibilityDetail(AgentHostMcpSupportReason.GatewayDefinitionNotLoaded).includes('Copilot'));
+	});
+
+	test('refreshes Devin compatibility after scoped enablement changes without changing server runtime state', async () => {
+		const enabled = observableValue('secondEnabled', ContributionEnablementState.EnabledProfile);
+		const tools = observableValue<readonly IMcpTool[]>('firstTools', []);
+		const second = makeMcpServer({ id: 'second', label: 'Shared', collectionId: 'second', provenance: McpCollectionProvenance.UserProfile, enablementObservable: enabled });
+		const definitions = observableValue<{ collection: McpCollectionDefinition | undefined; server: McpServerDefinition | undefined }>('secondDefinitions', { collection: undefined, server: undefined });
+		const mcpService = new class extends mock<IMcpService>() {
+			override readonly servers = observableValue<readonly IMcpServer[]>('mcpServers', [
+				makeMcpServer({ id: 'first', label: 'Shared', collectionId: 'first', provenance: McpCollectionProvenance.UserProfile, toolsObservable: tools }),
+				upcastPartial<IMcpServer>({ ...second, readDefinitions: () => definitions }),
+			]);
+			override readonly lazyCollectionState = observableValue('lazyState', { state: LazyCollectionState.AllKnown, collections: [] });
+		}();
+		const workbench = new class extends mock<IMcpWorkbenchService>() {
+			override readonly local: IWorkbenchMcpServer[] = [];
+			override readonly onChange = Event.None;
+			override readonly whenInitialLocalMcpServersLoaded = Promise.resolve();
+		}();
+		const configuration = store.add(new TestMcpSupportConfigurationService());
+		const scope = store.add(new AgentHostMcpServerSupportScope(devinSessionType, [], null, () => { }, mcpService, workbench, makeConfigurationResolverService(), configuration));
+		const ref = store.add(scope.acquire());
+		await ref.whenResolved();
+		const unloaded = ref.support.get().servers.map(server => server.compatibility.kind);
+		definitions.set(second.readDefinitions().get(), undefined);
+		await ref.whenResolved();
+		const before = ref.support.get().servers.map(server => server.compatibility.kind);
+		enabled.set(ContributionEnablementState.DisabledProfile, undefined);
+		await ref.whenResolved();
+		const after = ref.support.get().servers.map(server => server.compatibility.kind);
+		tools.set([upcastPartial<IMcpTool>({ uiResourceUri: 'ui://test-server/card' })], undefined);
+		await ref.whenResolved();
+		assert.deepStrictEqual({ unloaded, before, after, withApp: ref.support.get().servers.map(server => server.compatibility.kind), resolved: ref.isResolved.get() }, { unloaded: ['supported', 'unknown'], before: ['unsupported', 'unsupported'], after: ['supported', 'supported'], withApp: ['partiallySupported', 'supported'], resolved: true });
+	});
 
 	test('local Devin leaves raw MCP launch configurations to the per-chat gateway', async () => {
 		const server = makeMcpServer({ id: 'tools', collectionId: 'test', provenance: McpCollectionProvenance.UserProfile });
@@ -1219,7 +1328,7 @@ suite('agentHostMcpServerSupport', () => {
 	}));
 
 	test('reports incomplete discovery without fabricating unknown servers', async () => {
-		const result = await assessMcpServersForCopilotAgentHost(
+		const result = await assessMcpServersForAgentHost(
 			[],
 			makeConfigurationResolverService(),
 			'agent-host-copilotcli',
@@ -1232,7 +1341,7 @@ suite('agentHostMcpServerSupport', () => {
 	});
 
 	test('does not expose the Copilot support assessment for another harness', async () => {
-		const result = await assessMcpServersForCopilotAgentHost(
+		const result = await assessMcpServersForAgentHost(
 			[],
 			makeConfigurationResolverService(),
 			'agent-host-claude',
@@ -1247,6 +1356,7 @@ suite('agentHostMcpServerSupport', () => {
 
 function makeMcpServer(options: {
 	readonly id: string;
+	readonly label?: string;
 	readonly collectionId: string;
 	readonly provenance?: McpCollectionProvenance;
 	readonly discoverySource?: ExternalDiscoverySource;
@@ -1261,9 +1371,11 @@ function makeMcpServer(options: {
 	readonly version?: string;
 	readonly enablement?: ContributionEnablementState;
 	readonly enablementObservable?: ISettableObservable<ContributionEnablementState>;
+	readonly toolsObservable?: ISettableObservable<readonly IMcpTool[]>;
 }): IMcpServer {
 	const {
 		id,
+		label = id,
 		collectionId,
 		provenance,
 		discoverySource,
@@ -1278,6 +1390,7 @@ function makeMcpServer(options: {
 		version,
 		enablement = ContributionEnablementState.EnabledProfile,
 		enablementObservable,
+		toolsObservable,
 	} = options;
 	const collection: McpCollectionDefinition = {
 		id: collectionId,
@@ -1295,7 +1408,7 @@ function makeMcpServer(options: {
 	};
 	const definition: McpServerDefinition = {
 		id,
-		label: id,
+		label,
 		launch,
 		cacheNonce: id,
 		sandboxEnabled,
@@ -1306,8 +1419,9 @@ function makeMcpServer(options: {
 	const definitions = observableValue('definitions', { server: definition, collection });
 	return {
 		collection: { id: collectionId, label: collectionId, order: 0 },
-		definition: { id, label: id },
+		definition: { id, label },
 		enablement: enablementObservable ?? observableValue('enablement', enablement),
+		tools: toolsObservable ?? observableValue('tools', []),
 		readDefinitions: () => definitions,
 	} as unknown as IMcpServer;
 }
@@ -1347,7 +1461,7 @@ function getUndefinedMcpConfigPath(arg: IWorkbenchLocalMcpServer | URI): IMcpCon
 }
 
 async function assess(servers: readonly IMcpServer[], roots: readonly URI[] | undefined) {
-	const result = await assessMcpServersForCopilotAgentHost(
+	const result = await assessMcpServersForAgentHost(
 		servers,
 		makeConfigurationResolverService(),
 		'agent-host-copilotcli',
