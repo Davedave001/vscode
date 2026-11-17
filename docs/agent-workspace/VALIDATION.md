@@ -2,6 +2,12 @@
 
 Base: upstream `598b0f1b4e1`. Development branch: `feat/agent-workspace`.
 
+## Chat-specific attention queue update
+
+The queue now reads each session's chat membership and chat statuses, so blocked or failed child chats remain visible even when their parent is completed. It opens the selected chat with its own workspace context, retains session-level alerts when chat metadata has not arrived, and counts working sessions once. Accept-time checks use current resource identities and membership, including providers that replace chat objects or reuse the session URI for a legacy main chat. Showing or cancelling the picker does not clear read state or notify the draft composer of navigation.
+
+Ninety focused browser tests passed for `sessionAttentionQueue`, `sessionWorkspaceActions`, `sessionsPicker`, and `sessionsChatAccessibilityHelp`. The checks cover per-chat reactivity and ordering, archive/draft exclusion, aggregate fallback, live title/workspace changes, exact chat navigation, replacement objects, stale selections, legacy identity collisions, and cancellation. Source type checking, targeted lint, and incremental client compilation passed. These tests use controlled provider and navigation services. The updated queue has not been inspected in the native window because desktop automation remains stopped. The sections below preserve the first increment's historical build evidence; current native-build and layer-check status is also documented in `NATIVE_BUILD.md` and `MODE_SWITCH.md`.
+
 ## Checks run
 
 | Check | Result |

@@ -21,8 +21,7 @@ import { INewSessionComposerService } from '../../../../workbench/contrib/sessio
 import { SessionsCategories } from '../../../../workbench/contrib/sessions/common/categories.js';
 import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
 import { ISessionsManagementService } from '../../../../workbench/contrib/sessions/common/sessionsManagement.js';
-import { ISession, SessionStatus } from '../../../../workbench/services/sessions/common/session.js';
-import { getSessionAttentionQueue } from './sessionAttentionQueue.js';
+import { getSessionAttentionQueue, ISessionAttentionItem } from './sessionAttentionQueue.js';
 
 const mainAgentsWindow = ContextKeyExpr.and(IsSessionsWindowContext, IsAuxiliaryWindowContext.toNegated(), ChatContextKeys.enabled);
 
@@ -100,29 +99,35 @@ registerAction2(class SessionAttentionQueueAction extends Action2 {
 		const management = accessor.get(ISessionsManagementService);
 		const sessionsService = accessor.get(ISessionsService);
 		const composer = accessor.get(INewSessionComposerService);
-		interface ISessionQueueItem extends IQuickPickItem { readonly session: ISession }
+		interface ISessionQueueItem extends IQuickPickItem, ISessionAttentionItem { }
+		const itemId = (item: ISessionAttentionItem) => JSON.stringify([item.session.resource.toString(), item.chat?.resource.toString() ?? null]);
 		const store = new DisposableStore();
 		const picker = store.add(accessor.get(IQuickInputService).createQuickPick<ISessionQueueItem>({ useSeparators: true }));
-		picker.placeholder = localize('attentionQueue.search', "Search sessions waiting for you by name or workspace");
+		picker.placeholder = localize('attentionQueue.search', "Search chats waiting for you by name, session, or workspace");
 		picker.matchOnDescription = true;
+		picker.matchOnDetail = true;
 		picker.sortByLabel = false;
 		const changed = observableSignalFromEvent('attentionQueue.sessionsChanged', management.onDidChangeSessions);
 		store.add(autorun(reader => {
 			changed.read(reader);
 			const queue = getSessionAttentionQueue(management.getSessions(), reader);
-			picker.title = localize('attentionQueue.summary', "{0} Waiting for Input · {1} Failed · {2} Working", queue.needsInput.length, queue.errors.length, queue.working);
+			picker.title = localize('attentionQueue.summary', "{0} Waiting for Input · {1} Failed · {2} Working Sessions", queue.needsInput.length, queue.errors.length, queue.working);
 			const items: (ISessionQueueItem | IQuickPickSeparator)[] = [];
-			for (const [label, sessions] of [
+			for (const [label, entries] of [
 				[localize('attentionQueue.waiting', "Waiting for Your Input"), queue.needsInput],
 				[localize('attentionQueue.failed', "Failed — Review Required"), queue.errors],
 			] as const) {
-				if (sessions.length) {
+				if (entries.length) {
 					items.push({ type: 'separator', label });
-					items.push(...sessions.map(session => ({
-						id: session.resource.toString(), session,
-						label: session.title.read(reader) || localize('attentionQueue.untitled', "Untitled Session"),
-						description: session.workspace.read(reader)?.label,
-					})));
+					items.push(...entries.map(item => {
+						const sessionTitle = item.session.title.read(reader) || localize('attentionQueue.untitled', "Untitled Session");
+						const label = item.chat?.title.read(reader) || sessionTitle;
+						return {
+							...item, id: itemId(item), label,
+							description: item.chat && label !== sessionTitle ? sessionTitle : undefined,
+							detail: (item.chat ? item.chat.workspace.read(reader) : item.session.workspace.read(reader))?.label,
+						};
+					}));
 				}
 			}
 			const activeId = picker.activeItems[0]?.id;
@@ -138,14 +143,16 @@ registerAction2(class SessionAttentionQueueAction extends Action2 {
 			if (!selected) {
 				return;
 			}
-			// Resolve again: a provider can remove, archive, or finish the session during selection.
+			// Resolve identities again: providers can replace chat objects or membership during selection.
 			const current = management.getSession(selected.session.resource);
-			if (!current || current.isArchived.get() || ![SessionStatus.NeedsInput, SessionStatus.Error].includes(current.status.get())) {
-				return;
-			}
+			if (!current) { return; }
+			const queue = getSessionAttentionQueue([current]);
+			const item = [...queue.needsInput, ...queue.errors].find(item => itemId(item) === selected.id);
+			if (!item) { return; }
 			composer.notifyUserNavigation();
 			picker.hide();
-			sessionsService.openSession(current.resource, { source: 'sessionsList' }).catch(onUnexpectedError);
+			const opening = item.chat ? sessionsService.openChat(current, item.chat.resource, { source: 'sessionsList' }) : sessionsService.openSession(current.resource, { source: 'sessionsList' });
+			opening.catch(onUnexpectedError);
 		}));
 		store.add(picker.onDidHide(() => store.dispose()));
 		picker.show();

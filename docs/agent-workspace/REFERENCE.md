@@ -15,7 +15,7 @@ The reference has a persistent session sidebar, a central conversation and compo
 
 ## First implementation
 
-- `Sessions: Attention Queue` is available from the Command Palette and the sessions sidebar toolbar. It groups live waiting and failed sessions, searches titles and workspace labels, and shows a running count. Archived sessions and drafts are excluded. State is resolved again before navigation.
+- `Sessions: Attention Queue` is available from the Command Palette and the sessions sidebar toolbar. It groups live waiting and failed chats, including actionable child chats when their parent has completed. Rows show the chat's title and workspace with parent-session context, and search includes all three. The working count counts each session once, even when it also has a chat waiting for input. Archived sessions and unsent session/chat drafts are excluded. Aggregate alerts without matching chat metadata keep a session-level row. Selection resolves current session membership and chat identity again before opening that exact chat through native navigation; stale completed, removed, or archived selections do nothing. Showing or cancelling the queue does not mark sessions read or change composer navigation.
 - `Sessions: Session Tools` is available from the Command Palette and the session toolbar. It searches enabled actions from the native Session Activity Bar, including nested canvas actions. Availability is checked again before execution.
 - Both actions reuse the native Quick Input control for keyboard navigation and screen-reader support. The Agents Window accessibility help describes them.
 
