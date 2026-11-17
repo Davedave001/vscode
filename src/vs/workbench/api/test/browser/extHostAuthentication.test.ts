@@ -68,6 +68,10 @@ suite('DynamicAuthProvider', () => {
 	class TestDynamicAuthProvider extends DynamicAuthProvider {
 		generateNewClientIdCalls = 0;
 
+		exchangeTestCode(code: string, verifier: string, redirectUri: string): ReturnType<DynamicAuthProvider['exchangeCodeForToken']> {
+			return this.exchangeCodeForToken(code, verifier, redirectUri);
+		}
+
 		protected override async _generateNewClientId(): Promise<void> {
 			this.generateNewClientIdCalls++;
 		}
@@ -118,12 +122,17 @@ suite('DynamicAuthProvider', () => {
 		readonly resource: string;
 		readonly initialTokens?: IAuthorizationToken[];
 		readonly providerId?: string;
+		readonly clientId?: string;
+		readonly clientSecret?: string;
 		readonly fetcher?: typeof fetch;
+		readonly trace?: string[];
 		readonly onDidOpenUri?: (uri: string) => void;
 	}): TestDynamicAuthProvider {
 		const loggerService = new class extends mock<ILoggerService>() {
 			override createLogger(): ILogger {
-				return new NullLogger();
+				return new class extends NullLogger {
+					override trace(message: string): void { options.trace?.push(message); }
+				}();
 			}
 		}();
 		const proxy = new class extends mock<Proxied<MainThreadAuthenticationShape>>() {
@@ -160,8 +169,8 @@ suite('DynamicAuthProvider', () => {
 			URI.parse(options.authorizationServer),
 			options.serverMetadata,
 			{ resource: options.resource },
-			'client-id',
-			undefined,
+			options.clientId ?? 'client-id',
+			options.clientSecret,
 			disposables.add(new Emitter()),
 			options.initialTokens ?? [],
 			options.providerId,
@@ -269,6 +278,60 @@ suite('DynamicAuthProvider', () => {
 				scopes: [['api://res/Read']],
 			},
 		});
+	});
+
+	for (const { name, methods, clientSecret, useBasic } of [
+		{ name: 'HTTP Basic', methods: ['client_secret_basic'], clientSecret: 'secret+%:雪', useBasic: true },
+		{ name: 'form credentials', methods: ['client_secret_basic', 'client_secret_post'], clientSecret: 'legacy-secret', useBasic: false },
+		{ name: 'legacy discovery', methods: undefined, clientSecret: 'legacy-secret', useBasic: false },
+		{ name: 'public client', methods: ['client_secret_basic', 'none'], clientSecret: undefined, useBasic: false },
+	]) {
+		test(`uses ${name} for both code exchange and refresh without tracing credentials`, async () => {
+			const clientId = 'example:id +';
+			const trace: string[] = [];
+			const requests: { url: string; method: string | undefined; authorization: string | null; body: Record<string, string>; redirect: RequestRedirect | undefined }[] = [];
+			const tokenEndpoint = 'https://auth.example.com/token';
+			const accessToken = jwt({ sub: 'account' });
+			const provider = createProvider({
+				...servers.nonMicrosoft,
+				serverMetadata: { ...servers.nonMicrosoft.serverMetadata, token_endpoint_auth_methods_supported: methods },
+				resource,
+				clientId,
+				clientSecret,
+				trace,
+				initialTokens: [{ access_token: jwt({ sub: 'account', jti: 'expired' }), token_type: 'Bearer', scope: 'read', expires_in: 1, refresh_token: 'test-refresh-token', created_at: 0 }],
+				fetcher: async (url, init) => {
+					requests.push({ url: String(url), method: init?.method, authorization: new Headers(init?.headers).get('Authorization'), body: Object.fromEntries(new URLSearchParams(String(init?.body))), redirect: init?.redirect });
+					return Response.json({ access_token: accessToken, token_type: 'Bearer', scope: 'read', expires_in: 3600 });
+				},
+			});
+
+			const token = await provider.exchangeTestCode('test-code', 'test-verifier', 'http://127.0.0.1:40000/callback');
+			const refreshed = await provider.getSessions(['read'], { silent: true });
+			assert.strictEqual(token.access_token, accessToken);
+			assert.deepStrictEqual(refreshed.map(session => session.accessToken), [accessToken]);
+
+			const authorization = useBasic ? `Basic ${encodeBase64(VSBuffer.fromString('example%3Aid+%2B:secret%2B%25%3A%E9%9B%AA'))}` : null;
+			const credentials = useBasic ? {} : { client_id: clientId, ...(clientSecret ? { client_secret: clientSecret } : {}) };
+			const request = { url: tokenEndpoint, method: 'POST', authorization, redirect: useBasic ? 'error' : undefined };
+			assert.deepStrictEqual(requests, [
+				{ ...request, body: { ...credentials, grant_type: 'authorization_code', code: 'test-code', code_verifier: 'test-verifier', redirect_uri: 'http://127.0.0.1:40000/callback', resource } },
+				{ ...request, body: { ...credentials, grant_type: 'refresh_token', refresh_token: 'test-refresh-token', resource } },
+			]);
+			assert.ok(!trace.some(message => /test-code|test-verifier|test-refresh-token|client_secret|Basic /.test(message)));
+		});
+	}
+
+	test('refuses to send Basic credentials to a plaintext token endpoint', async () => {
+		const provider = createProvider({
+			...servers.nonMicrosoft,
+			serverMetadata: { ...servers.nonMicrosoft.serverMetadata, token_endpoint: 'http://auth.example.com/token', token_endpoint_auth_methods_supported: ['client_secret_basic'] },
+			resource,
+			clientSecret: 'test-secret',
+			fetcher: async () => assert.fail('No token request should be sent'),
+		});
+
+		await assert.rejects(provider.exchangeTestCode('test-code', 'test-verifier', 'http://127.0.0.1/callback'), /requires an HTTPS token endpoint/);
 	});
 
 	test('authorization URL requests offline_access when advertised and omits resource for Microsoft auth', async () => {

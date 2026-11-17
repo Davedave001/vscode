@@ -819,13 +819,35 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		return { code: codeMatch[1] };
 	}
 
+	private _tokenRequestInit(tokenEndpoint: string, body: URLSearchParams): RequestInit {
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/x-www-form-urlencoded',
+			'Accept': 'application/json',
+		};
+		const methods = this._serverMetadata.token_endpoint_auth_methods_supported;
+		// Keep the existing form authentication when the server supports it or omits this metadata.
+		if (this._clientSecret && Array.isArray(methods) && methods.includes('client_secret_basic') && !methods.includes('client_secret_post')) {
+			if (new URL(tokenEndpoint).protocol !== 'https:') {
+				throw new Error('OAuth client secret authentication requires an HTTPS token endpoint');
+			}
+			// OAuth form-encodes each credential before joining them for HTTP Basic (RFC 6749 §2.3.1).
+			const formEncode = (value: string) => new URLSearchParams([['', value]]).toString().slice(1);
+			headers.Authorization = `Basic ${encodeBase64(VSBuffer.fromString(`${formEncode(this._clientId)}:${formEncode(this._clientSecret)}`))}`;
+			return { method: 'POST', headers, body: body.toString(), redirect: 'error' };
+		}
+		body.append('client_id', this._clientId);
+		if (this._clientSecret) {
+			body.append('client_secret', this._clientSecret);
+		}
+		return { method: 'POST', headers, body: body.toString() };
+	}
+
 	protected async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string): Promise<IAuthorizationTokenResponse> {
 		if (!this._serverMetadata.token_endpoint) {
 			throw new Error('Token endpoint not available in server metadata');
 		}
 
 		const tokenRequest = new URLSearchParams();
-		tokenRequest.append('client_id', this._clientId);
 		tokenRequest.append('grant_type', 'authorization_code');
 		tokenRequest.append('code', code);
 		tokenRequest.append('redirect_uri', redirectUri);
@@ -837,24 +859,12 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 			tokenRequest.append('resource', resource);
 		}
 
-		// Add client secret if available
-		if (this._clientSecret) {
-			tokenRequest.append('client_secret', this._clientSecret);
-		}
-
 		this._logger.info('Exchanging authorization code for token...');
 		this._logger.trace(`Url: ${this._serverMetadata.token_endpoint}`);
-		this._logger.trace(`Token request body: ${tokenRequest.toString()}`);
+		const request = this._tokenRequestInit(this._serverMetadata.token_endpoint, tokenRequest);
 		let response: Response;
 		try {
-			response = await this._fetch(this._serverMetadata.token_endpoint, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/x-www-form-urlencoded',
-					'Accept': 'application/json'
-				},
-				body: tokenRequest.toString()
-			});
+			response = await this._fetch(this._serverMetadata.token_endpoint, request);
 		} catch (err) {
 			this._logger.error(`Failed to exchange authorization code for token: ${err}`);
 			throw new Error(`Failed to exchange authorization code for token: ${err}`);
@@ -883,7 +893,6 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		}
 
 		const tokenRequest = new URLSearchParams();
-		tokenRequest.append('client_id', this._clientId);
 		tokenRequest.append('grant_type', 'refresh_token');
 		tokenRequest.append('refresh_token', refreshToken);
 
@@ -900,19 +909,7 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 			tokenRequest.append('resource', resource);
 		}
 
-		// Add client secret if available
-		if (this._clientSecret) {
-			tokenRequest.append('client_secret', this._clientSecret);
-		}
-
-		const response = await this._fetch(this._serverMetadata.token_endpoint, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded',
-				'Accept': 'application/json'
-			},
-			body: tokenRequest.toString()
-		});
+		const response = await this._fetch(this._serverMetadata.token_endpoint, this._tokenRequestInit(this._serverMetadata.token_endpoint, tokenRequest));
 
 		const result = await response.json();
 		if (isAuthorizationTokenResponse(result)) {
