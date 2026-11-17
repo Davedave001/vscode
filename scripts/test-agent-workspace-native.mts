@@ -126,6 +126,7 @@ try {
 	const executable = createLaunchOptions(root, workspace, true, {}).executable;
 	const commonArgs = ['--hidden-window', '--extensionTestsPath', runner, '--enable-smoke-test-driver',
 		'--user-data-dir', profile, '--shared-data-dir', join(run, 'shared'), '--extensions-dir', join(run, 'extensions'),
+		'--agent-codex-home', join(run, 'codex'), '--agent-claude-config-dir', join(run, 'claude'),
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
 		...(protocol ? ['--log', 'trace'] : [])];
@@ -295,9 +296,12 @@ try {
 			stage = 'cold editor protocol';
 			assert.ok(protocolUri);
 			await launched.close();
-			app = await _electron.launch({ executablePath: executable, args: [root, '--open-url', ...commonArgs, ...await allocateInspectorArgs(), '--', protocolUri], env, timeout: 60000 });
+			const coldEnv = { ...env };
+			delete coldEnv.CODEX_HOME; delete coldEnv.CLAUDE_CONFIG_DIR;
+			app = await _electron.launch({ executablePath: executable, args: [root, '--open-url', ...commonArgs, ...await allocateInspectorArgs(), '--', protocolUri], env: coldEnv, timeout: 60000 });
 			const coldApp = app;
 			await coldApp.firstWindow({ timeout: 45000 });
+			assert.deepEqual(await coldApp.evaluate(() => ({ codex: process.env.CODEX_HOME, claude: process.env.CLAUDE_CONFIG_DIR })), { codex: join(run, 'codex'), claude: join(run, 'claude') }, 'Cold URL startup must restore explicit agent homes without launcher environment variables');
 			let coldIDE: Page | undefined;
 			const restored = Date.now() + 60000;
 			while (!coldIDE && Date.now() < restored) {

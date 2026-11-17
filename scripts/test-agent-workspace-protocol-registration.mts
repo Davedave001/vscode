@@ -23,6 +23,8 @@ const probeDirectory = join(run, 'arguments with spaces & # 100%');
 const profile = join(probeDirectory, 'profile') + '\\';
 const extensions = join(probeDirectory, 'extensions');
 const shared = join(probeDirectory, 'shared') + '\\';
+const codexHome = join(probeDirectory, 'codex home');
+const claudeHome = join(probeDirectory, 'claude home');
 const controlProfile = join(run, 'control-profile');
 for (const folder of [home, probeDirectory, profile, extensions, shared, controlProfile]) { await mkdir(folder, { recursive: true }); }
 const controlMain = join(run, 'control.cjs');
@@ -53,11 +55,13 @@ async function registryEntry(protocol: string, commandOnly = true): Promise<stri
 		throw error;
 	}
 }
-type ProtocolEnvironment = { isBuilt: boolean; appRoot: string; userDataPath: string; extensionsPath: string; appSharedDataHome: { fsPath: string }; args: { _: string[]; 'user-data-dir': string; 'extensions-dir': string; 'shared-data-dir': string } };
+type ProtocolEnvironment = { isBuilt: boolean; appRoot: string; userDataPath: string; extensionsPath: string; appSharedDataHome: { fsPath: string }; args: { _: string[]; 'user-data-dir': string; 'extensions-dir': string; 'shared-data-dir': string; 'agent-codex-home': string; 'agent-claude-config-dir': string } };
 // Load compiled code without importing the workbench's ambient type environment into this standalone script.
 const { getWindowsProtocolHandlerArguments } = await import(pathToFileURL(join(root, 'out/vs/platform/url/node/protocolHandlerArguments.js')).href) as { getWindowsProtocolHandlerArguments(environment: ProtocolEnvironment): string[] };
 const { URI } = await import(pathToFileURL(join(root, 'out/vs/base/common/uri.js')).href) as { URI: { file(path: string): { fsPath: string } } };
-const args = getWindowsProtocolHandlerArguments({ isBuilt: false, appRoot: probeMain, userDataPath: profile, extensionsPath: extensions, appSharedDataHome: URI.file(shared), args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared' } });
+const args = getWindowsProtocolHandlerArguments({ isBuilt: false, appRoot: probeMain, userDataPath: profile, extensionsPath: extensions, appSharedDataHome: URI.file(shared), args: { _: [], 'user-data-dir': 'relative-profile', 'extensions-dir': 'relative-extensions', 'shared-data-dir': 'relative-shared', 'agent-codex-home': codexHome, 'agent-claude-config-dir': claudeHome } });
+assert.equal(args[args.indexOf('--agent-codex-home') + 1], codexHome);
+assert.equal(args[args.indexOf('--agent-claude-config-dir') + 1], claudeHome);
 const protocol = `signal-c-argument-check-${process.pid}-${randomUUID()}`;
 assert.equal(await registryEntry(protocol, false), undefined, 'The test protocol must not already exist');
 const originalSignalCCommand = await registryEntry('signal-c');

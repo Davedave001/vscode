@@ -77,6 +77,8 @@ export interface NativeParsedArgs {
 	'extensions-download-dir'?: string;
 	'builtin-extensions-dir'?: string;
 	'shared-data-dir'?: string;
+	'agent-codex-home'?: string;
+	'agent-claude-config-dir'?: string;
 	'agent-plugins-dir'?: string;
 	'agents-user-data-dir'?: string;
 	'agents-extensions-dir'?: string;

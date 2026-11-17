@@ -12,6 +12,10 @@ export function getWindowsProtocolHandlerArguments(environment: Pick<INativeEnvi
 	if (environment.args['user-data-dir']) { args.push('--user-data-dir', environment.userDataPath); }
 	if (environment.args['extensions-dir']) { args.push('--extensions-dir', environment.extensionsPath); }
 	if (environment.args['shared-data-dir']) { args.push('--shared-data-dir', environment.appSharedDataHome.fsPath); }
+	for (const argument of ['agent-codex-home', 'agent-claude-config-dir'] as const) {
+		const value = environment.args[argument];
+		if (value) { args.push(`--${argument}`, value); }
+	}
 	args.push('--open-url', '--');
 	return args;
 }

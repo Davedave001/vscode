@@ -121,6 +121,8 @@ export const OPTIONS: OptionDescriptions<Required<NativeParsedArgs>> = {
 	'extensions-download-dir': { type: 'string' },
 	'builtin-extensions-dir': { type: 'string' },
 	'shared-data-dir': { type: 'string' },
+	'agent-codex-home': { type: 'string' },
+	'agent-claude-config-dir': { type: 'string' },
 	'list-extensions': { type: 'boolean', cat: 'e', description: localize('listExtensions', "List the installed extensions.") },
 	'agent-plugins-dir': { type: 'string' },
 	'agents-user-data-dir': { type: 'string' },

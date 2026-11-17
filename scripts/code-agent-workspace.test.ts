@@ -21,6 +21,8 @@ test('isolates editor IPC and agent homes without mutating the launching environ
 	assert.strictEqual(launch.environment.SystemRoot, inherited.SystemRoot);
 	assert.strictEqual(launch.environment.CODEX_HOME, path.join(root, '.build', 'agent-workspace-codex'));
 	assert.strictEqual(launch.environment.CLAUDE_CONFIG_DIR, path.join(root, '.build', 'agent-workspace-claude'));
+	assert.strictEqual(launch.args[launch.args.indexOf('--agent-codex-home') + 1], launch.environment.CODEX_HOME);
+	assert.strictEqual(launch.args[launch.args.indexOf('--agent-claude-config-dir') + 1], launch.environment.CLAUDE_CONFIG_DIR);
 	assert.strictEqual(launch.environment.VSCODE_IPC_HOOK_CLI, undefined);
 	assert.strictEqual(launch.environment.vscode_portable, undefined);
 	assert.strictEqual(launch.environment.ELECTRON_RUN_AS_NODE, undefined);
