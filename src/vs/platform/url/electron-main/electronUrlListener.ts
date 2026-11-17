@@ -13,6 +13,7 @@ import { IEnvironmentMainService } from '../../environment/electron-main/environ
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
 import { IURLService } from '../common/url.js';
+import { getWindowsProtocolHandlerArguments } from '../node/protocolHandlerArguments.js';
 import { IProtocolUrl } from './url.js';
 import { IWindowsMainService } from '../../windows/electron-main/windows.js';
 
@@ -52,8 +53,7 @@ export class ElectronURLListener extends Disposable {
 		// Skip in portable mode: the registered command wouldn't preserve
 		// portable mode settings, causing issues with OAuth flows.
 		if (isWindows && !environmentMainService.isPortable) {
-			const windowsParameters = environmentMainService.isBuilt ? [] : [`"${environmentMainService.appRoot}"`];
-			windowsParameters.push('--open-url', '--');
+			const windowsParameters = getWindowsProtocolHandlerArguments(environmentMainService);
 			app.setAsDefaultProtocolClient(productService.urlProtocol, process.execPath, windowsParameters);
 		}
 
