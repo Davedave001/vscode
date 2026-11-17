@@ -7,7 +7,7 @@ import './media/workspaceModeSwitch.css';
 import { $, append, EventHelper, EventLike } from '../../../../base/browser/dom.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
-import { IAction } from '../../../../base/common/actions.js';
+import { IAction, toAction } from '../../../../base/common/actions.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { localize } from '../../../../nls.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
@@ -30,6 +30,8 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 
 /** A persistent, labelled switch between agent orchestration and the code editor. */
 export class WorkspaceModeSwitch extends BaseActionViewItem {
+	private running = false;
+
 	constructor(
 		action: IAction,
 		options: IBaseActionViewItemOptions | undefined,
@@ -66,12 +68,33 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 	}
 
 	protected override updateEnabled(): void {
-		this.element?.setAttribute('aria-disabled', String(!this.action.enabled));
-		this.element?.classList.toggle('disabled', !this.action.enabled);
+		const disabled = !this.action.enabled || this.running;
+		this.element?.setAttribute('aria-disabled', String(disabled));
+		this.element?.setAttribute('aria-busy', String(this.running));
+		this.element?.classList.toggle('disabled', disabled);
+	}
+
+	override getActionToRun(event: EventLike): IAction {
+		const action = super.getActionToRun(event);
+		return toAction({
+			id: action.id,
+			label: action.label,
+			enabled: action.enabled && !this.running,
+			run: async (context?: unknown) => {
+				if (!action.enabled || this.running || this._store.isDisposed) { return; }
+				this.running = true;
+				this.updateEnabled();
+				try { await action.run(context); }
+				finally {
+					this.running = false;
+					if (!this._store.isDisposed) { this.updateEnabled(); }
+				}
+			},
+		});
 	}
 
 	override onClick(event: EventLike): void {
 		EventHelper.stop(event, true);
-		void this.actionRunner.run(this.action, this._context);
+		void this.actionRunner.run(this.getActionToRun(event), this._context);
 	}
 }
