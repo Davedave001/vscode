@@ -15,22 +15,29 @@ import { localize } from '../../../../nls.js';
 import { DevinSubscriptionProviderId, DevinSubscriptionResource } from '../../common/devinAgentConfiguration.js';
 import { type IAgent, type IAgentChats, type AgentSignal, type IAgentChatMetadata, type IAgentMaterializeChatEvent, type IActiveClient, type IAgentModelInfo, resolveAgentChatContext } from '../../common/agent.js';
 import { ActionType, type ChatAction } from '../../common/state/sessionActions.js';
-import { type ModelSelection, type Turn, type MarkdownResponsePart, type ToolCallResponsePart, type ToolCallPendingConfirmationState, TurnState, MessageKind, ResponsePartKind, ToolCallStatus, ToolCallConfirmationReason, ToolResultContentType } from '../../common/state/sessionState.js';
+import { type ModelSelection, type Turn, type MarkdownResponsePart, type ToolCallResponsePart, type ToolCallPendingConfirmationState, type ToolResultContent, TurnState, MessageKind, ResponsePartKind, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType } from '../../common/state/sessionState.js';
 import { AcpClient, initializeAcp, isAcpRecord as isObject } from './acpClient.js';
 import { AcpStdioTransport } from './acpStdioTransport.js';
 import { resolveAcpPrompt, type IAcpPromptCapabilities } from './acpPromptResolver.js';
 import { applyDevinModelConfiguration, DevinModelConfigurationError, readDevinConfigOptions, type IDevinSelectConfig } from './devinModelConfiguration.js';
+import { acpToolContent, acpToolValue } from './acpToolContent.js';
 
 export const DEVIN_SUBSCRIPTION_PROVIDER = DevinSubscriptionProviderId;
 export const DEVIN_SUBSCRIPTION_RESOURCE = DevinSubscriptionResource;
 
 interface ITool {
 	readonly id: string;
-	readonly name: string;
+	name: string;
 	title: string;
 	ready: boolean;
 	complete: boolean;
 	readonly part: ToolCallResponsePart;
+	input?: string;
+	rawInput?: unknown;
+	content: ToolResultContent[];
+	rawOutput?: string;
+	contentIsRaw?: boolean;
+	confirmed: ToolCallConfirmationReason;
 }
 
 interface IChat {
@@ -44,6 +51,7 @@ interface IChat {
 	readonly history: Turn[];
 	readonly tools: Map<string, ITool>;
 	activeTurn?: Turn;
+	aborting?: boolean;
 	textPart?: MarkdownResponsePart;
 	replaying: boolean;
 	lastReplayUserId?: string;
@@ -126,7 +134,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	readonly onDidSpawnChat = Event.None;
 	readonly onDidDiscoverChats = Event.None;
 	private readonly records = new Map<string, IChat>();
-	private readonly permissions = new Map<string, { chat: IChat; resolve: (value: unknown) => void; allow?: string; deny?: string }>();
+	private readonly permissions = new Map<string, { chat: IChat; tool: ITool; resolve: (value: unknown) => void; allow?: string; deny?: string }>();
 	private token: string | undefined;
 	private authRevision = 0;
 	private catalogIds: ReadonlySet<string> = new Set();
@@ -192,6 +200,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
 			const turn: Turn = { id: turnId, startedAt: new Date().toISOString(), message: { text: prompt, attachments: attachments ? [...attachments] : undefined, origin: { kind: MessageKind.User } }, responseParts: [], usage: undefined, state: TurnState.Complete };
 			record.activeTurn = turn;
+			record.aborting = false;
 			record.history.push(turn);
 			record.tools.clear();
 			record.textPart = undefined;
@@ -200,25 +209,26 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 				const result = await record.client!.request('session/prompt', { sessionId: record.nativeId, prompt: content }, { timeoutMs: 0 });
 				const cancelled = isObject(result) && result.stopReason === 'cancelled';
 				turn.state = cancelled ? TurnState.Cancelled : TurnState.Complete;
-				for (const tool of record.tools.values()) {
-					if (!tool.complete) { this.completeTool(record, turn, tool, false, []); }
-				}
+				this.cancelPermissions(record);
+				for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
 				record.modifiedAt = Date.now();
 				this.dataChanged.fire({ chat, providerData: this.providerData(record) });
 				this.fire(record, { type: ActionType.ChatTurnComplete, turnId, duration: Date.now() - started });
 			} catch (error) {
-				turn.state = TurnState.Error;
+				turn.state = record.aborting ? TurnState.Cancelled : TurnState.Error;
 				throw error;
 			} finally {
 				clearTimeout(record.forceStop);
 				record.forceStop = undefined;
 				this.cancelPermissions(record);
+				for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
 				record.activeTurn = undefined;
 				record.textPart = undefined;
 			}
 		},
 		abort: async chat => {
 			const record = this.record(chat);
+			record.aborting = true;
 			this.cancelPermissions(record);
 			if (record.client && record.nativeId && record.activeTurn) {
 				record.client.notify('session/cancel', { sessionId: record.nativeId });
@@ -369,26 +379,48 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			record.textPart.content += update.content.text;
 			if (!record.replaying) { this.fire(record, { type: ActionType.ChatDelta, turnId: turn.id, partId: record.textPart.id, content: update.content.text }); }
 		} else if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') && typeof update.toolCallId === 'string') {
+			const previous = record.tools.get(update.toolCallId);
+			const previousInput = previous?.input;
+			const previousRawInput = previous?.rawInput;
+			const previousTitle = previous?.title;
 			const tool = this.tool(record, update, turn);
+			if (tool.complete) { return; }
+			if (this.permissions.has(tool.id) && !equals(previousRawInput, tool.rawInput)) {
+				this.cancelPermission(tool.id, localize('devin.toolInputChanged', "The tool input changed while waiting for approval. Devin must request permission again."));
+				return;
+			}
 			record.textPart = undefined;
-			if (update.status === 'in_progress' && !tool.ready) {
-				tool.ready = true;
-				tool.part.toolCall = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, invocationMessage: tool.title, status: ToolCallStatus.Running, confirmed: ToolCallConfirmationReason.NotNeeded };
-				if (!record.replaying) { this.fire(record, { type: ActionType.ChatToolCallReady, turnId: turn.id, toolCallId: tool.id, invocationMessage: tool.title, confirmed: ToolCallConfirmationReason.NotNeeded }); }
+			if ((update.status === 'in_progress' && !this.permissions.has(tool.id)) || (tool.ready && tool.part.toolCall.status === ToolCallStatus.Running)) {
+				const readyChanged = !tool.ready || tool.input !== previousInput || tool.title !== previousTitle;
+				if (readyChanged) { this.readyTool(record, turn, tool); }
+				if (tool.part.toolCall.status === ToolCallStatus.Running) {
+					tool.part.toolCall = { ...tool.part.toolCall, content: tool.content };
+					if (!record.replaying && (readyChanged || Array.isArray(update.content) || acpToolValue(update.rawOutput) !== undefined)) {
+						this.fire(record, { type: ActionType.ChatToolCallContentChanged, turnId: turn.id, toolCallId: tool.id, content: tool.content });
+					}
+				}
 			}
 			if ((update.status === 'completed' || update.status === 'failed') && !tool.complete) {
-				const content = Array.isArray(update.content) ? update.content.flatMap(item => isObject(item) && isObject(item.content) && typeof item.content.text === 'string' ? [{ type: ToolResultContentType.Text as const, text: item.content.text }] : []) : [];
-				this.completeTool(record, turn, tool, update.status === 'completed', content);
+				this.completeTool(record, turn, tool, update.status === 'completed');
 			}
 		}
 	}
 
-	private completeTool(record: IChat, turn: Turn, tool: ITool, success: boolean, content: { type: ToolResultContentType.Text; text: string }[]): void {
-		if (!tool.ready && !record.replaying) { this.fire(record, { type: ActionType.ChatToolCallReady, turnId: turn.id, toolCallId: tool.id, invocationMessage: tool.title, confirmed: ToolCallConfirmationReason.NotNeeded }); }
+	private readyTool(record: IChat, turn: Turn, tool: ITool): void {
 		tool.ready = true;
+		tool.part.toolCall = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, invocationMessage: tool.title, toolInput: tool.input, status: ToolCallStatus.Running, confirmed: tool.confirmed, content: tool.content };
+		if (!record.replaying) {
+			this.fire(record, { type: ActionType.ChatToolCallReady, turnId: turn.id, toolCallId: tool.id, invocationMessage: tool.title, toolInput: tool.input, confirmed: tool.confirmed });
+		}
+	}
+
+	private completeTool(record: IChat, turn: Turn, tool: ITool, success: boolean): void {
+		if (tool.complete) { return; }
+		if (this.permissions.has(tool.id)) { this.cancelPermission(tool.id); return; }
+		if (!tool.ready) { this.readyTool(record, turn, tool); }
 		tool.complete = true;
-		const result = { success, pastTenseMessage: tool.title, content };
-		tool.part.toolCall = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, invocationMessage: tool.title, status: ToolCallStatus.Completed, confirmed: ToolCallConfirmationReason.NotNeeded, ...result };
+		const result = { success, pastTenseMessage: tool.title, content: tool.content };
+		tool.part.toolCall = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, invocationMessage: tool.title, toolInput: tool.input, status: ToolCallStatus.Completed, confirmed: tool.confirmed, ...result };
 		if (!record.replaying) { this.fire(record, { type: ActionType.ChatToolCallComplete, turnId: turn.id, toolCallId: tool.id, result }); }
 	}
 
@@ -400,12 +432,20 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const name = typeof update.name === 'string' ? update.name : 'devin-tool';
 			const title = typeof update.title === 'string' ? update.title : 'Devin tool';
 			const part: ToolCallResponsePart = { kind: ResponsePartKind.ToolCall, toolCall: { toolCallId: id, toolName: name, displayName: title, status: ToolCallStatus.Streaming } };
-			tool = { id, name, title, ready: false, complete: false, part };
+			tool = { id, name, title, ready: false, complete: false, part, content: [], confirmed: ToolCallConfirmationReason.NotNeeded };
 			record.tools.set(nativeId, tool);
 			turn.responseParts.push(part);
 			if (!record.replaying) { this.fire(record, { type: ActionType.ChatToolCallStart, turnId: turn.id, toolCallId: tool.id, toolName: tool.name, displayName: tool.title }); }
 		}
+		if (tool.complete) { return tool; }
 		if (typeof update.title === 'string') { tool.title = update.title; }
+		if (typeof update.name === 'string') { tool.name = update.name; }
+		const input = acpToolValue(update.rawInput);
+		if (input !== undefined) { tool.input = input; tool.rawInput = update.rawInput; }
+		const rawOutput = acpToolValue(update.rawOutput);
+		if (rawOutput !== undefined) { tool.rawOutput = rawOutput; }
+		if (Array.isArray(update.content)) { tool.content = acpToolContent(update.content); tool.contentIsRaw = false; }
+		if ((!tool.content.length || tool.contentIsRaw) && tool.rawOutput !== undefined) { tool.content = [{ type: ToolResultContentType.Text, text: tool.rawOutput }]; tool.contentIsRaw = true; }
 		return tool;
 	}
 
@@ -415,10 +455,14 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const tool = this.tool(record, params.toolCall);
 		const allow = params.options.find(option => isObject(option) && option.kind === 'allow_once' && typeof option.optionId === 'string');
 		const deny = params.options.find(option => isObject(option) && option.kind === 'reject_once' && typeof option.optionId === 'string');
-		const state: ToolCallPendingConfirmationState = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, status: ToolCallStatus.PendingConfirmation, invocationMessage: tool.title, toolInput: JSON.stringify(params.toolCall.rawInput ?? {}) };
+		if (tool.complete) { return cancelled; }
+		// A repeated request must not leave the earlier RPC waiting forever.
+		const previous = this.permissions.get(tool.id);
+		previous?.resolve(cancelled);
+		const state: ToolCallPendingConfirmationState = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, status: ToolCallStatus.PendingConfirmation, invocationMessage: tool.title, toolInput: tool.input };
 		tool.part.toolCall = state;
 		return new Promise(resolve => {
-			this.permissions.set(tool.id, { chat: record, resolve, allow: isObject(allow) ? allow.optionId as string : undefined, deny: isObject(deny) ? deny.optionId as string : undefined });
+			this.permissions.set(tool.id, { chat: record, tool, resolve, allow: isObject(allow) ? allow.optionId as string : undefined, deny: isObject(deny) ? deny.optionId as string : undefined });
 			tool.ready = true;
 			this.fire(record, { type: ActionType.ChatToolCallReady, turnId: record.activeTurn!.id, toolCallId: tool.id, invocationMessage: state.invocationMessage, toolInput: state.toolInput });
 			this.progress.fire({ kind: 'pending_confirmation', chat: record.chat, state });
@@ -430,13 +474,38 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (!pending) { return; }
 		this.permissions.delete(id);
 		const optionId = approved ? pending.allow : pending.deny;
+		if (approved && optionId) {
+			pending.tool.confirmed = ToolCallConfirmationReason.UserAction;
+			pending.tool.part.toolCall = { toolCallId: pending.tool.id, toolName: pending.tool.name, displayName: pending.tool.title, invocationMessage: pending.tool.title, toolInput: pending.tool.input, status: ToolCallStatus.Running, confirmed: pending.tool.confirmed, content: pending.tool.content };
+		} else {
+			this.cancelTool(pending.tool, approved ? ToolCallCancellationReason.Skipped : ToolCallCancellationReason.Denied);
+			if (approved && pending.chat.activeTurn) {
+				this.fire(pending.chat, { type: ActionType.ChatToolCallComplete, turnId: pending.chat.activeTurn.id, toolCallId: pending.tool.id, result: { success: false, pastTenseMessage: localize('devin.noOneTimeApproval', "Devin did not offer a one-time approval option.") } });
+			}
+		}
 		pending.resolve({ outcome: optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' } });
+	}
+
+	private cancelTool(tool: ITool, reason: ToolCallCancellationReason.Denied | ToolCallCancellationReason.Skipped): void {
+		tool.complete = true;
+		tool.part.toolCall = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, invocationMessage: tool.title, toolInput: tool.input, status: ToolCallStatus.Cancelled, reason };
 	}
 
 	private cancelPermissions(record: IChat): void {
 		for (const [id, pending] of this.permissions) {
-			if (pending.chat === record) { this.permissions.delete(id); pending.resolve({ outcome: { outcome: 'cancelled' } }); }
+			if (pending.chat === record) { this.cancelPermission(id); }
 		}
+	}
+
+	private cancelPermission(id: string, reasonMessage?: string): void {
+		const pending = this.permissions.get(id);
+		if (!pending) { return; }
+		this.permissions.delete(id);
+		this.cancelTool(pending.tool, ToolCallCancellationReason.Skipped);
+		if (pending.chat.activeTurn && !pending.chat.replaying) {
+			this.fire(pending.chat, { type: ActionType.ChatToolCallConfirmed, turnId: pending.chat.activeTurn.id, toolCallId: pending.tool.id, approved: false, reason: ToolCallCancellationReason.Skipped, ...(reasonMessage ? { reasonMessage } : {}) });
+		}
+		pending.resolve({ outcome: { outcome: 'cancelled' } });
 	}
 	private fire(record: IChat, action: ChatAction): void { this.progress.fire({ kind: 'action', resource: record.chat, action }); }
 	private release(record: IChat): void { this.cancelPermissions(record); clearTimeout(record.forceStop); record.forceStop = undefined; record.store.clear(); record.client = undefined; record.replaying = false; }
