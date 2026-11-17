@@ -3,45 +3,68 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-const assert = require('node:assert/strict');
-const Module = require('node:module');
-const { test } = require('node:test');
+import type { AuthenticationSession, Disposable } from 'vscode';
+import type { SignInOptions } from '../src/auth.ts';
 
-function activateProvider(signIn, storageHooks = {}) {
+const assert: typeof import('node:assert/strict') = require('node:assert/strict');
+const Module: { _load(this: unknown, name: string, parent?: NodeModule, isMain?: boolean): unknown } = require('node:module');
+const { test }: typeof import('node:test') = require('node:test');
+const { signInToDevin }: typeof import('../src/auth.ts') = require('../out/auth.js');
+
+interface TestProvider extends Disposable {
+	getSessions(scopes?: readonly string[]): Promise<AuthenticationSession[]>;
+	createSession(scopes: readonly string[]): Promise<AuthenticationSession>;
+	removeSession(id: string): Promise<void>;
+}
+
+interface StorageHooks {
+	beforeGet?: () => Promise<void>;
+	afterStore?: (value: string) => Promise<void>;
+}
+
+interface SessionChanges {
+	added: readonly AuthenticationSession[];
+	changed: readonly AuthenticationSession[];
+	removed: readonly AuthenticationSession[];
+}
+
+function activateProvider(signIn: (options: SignInOptions) => Promise<string>, storageHooks: StorageHooks = {}) {
 	const originalLoad = Module._load;
-	const secrets = new Map();
-	const events = [];
-	const progressMessages = [];
-	let provider;
-	let cancellation;
+	const secrets = new Map<string, string>();
+	const events: SessionChanges[] = [];
+	const progressMessages: string[] = [];
+	let provider: TestProvider | undefined;
+	let cancellation: () => void = () => assert.fail('No progress cancellation was registered');
 	const context = {
-		subscriptions: [],
+		subscriptions: [] as Disposable[],
 		secrets: {
-			get: async key => { await storageHooks.beforeGet?.(); return secrets.get(key); },
-			store: async (key, value) => { secrets.set(key, value); await storageHooks.afterStore?.(value); },
-			delete: async key => { secrets.delete(key); },
+			get: async (key: string) => { await storageHooks.beforeGet?.(); return secrets.get(key); },
+			store: async (key: string, value: string) => { secrets.set(key, value); await storageHooks.afterStore?.(value); },
+			delete: async (key: string) => { secrets.delete(key); },
 		},
 	};
 	const vscode = {
-		EventEmitter: class { event() { } fire(event) { events.push(event); } dispose() { } },
+		EventEmitter: class { event() { } fire(event: SessionChanges) { events.push(event); } dispose() { } },
 		CancellationError: class extends Error { constructor() { super('Cancelled'); this.name = 'Canceled'; } },
-		l10n: { t: value => value }, ProgressLocation: { Notification: 15 },
-		window: { withProgress: async (_options, callback) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
-		env: { openExternal: async () => true }, Uri: { parse: value => value },
-		authentication: { registerAuthenticationProvider: (id, label, instance) => { assert.strictEqual(id, 'devin-subscription'); assert.strictEqual(label, 'Devin Subscription'); provider = instance; return { dispose() { } }; } },
+		l10n: { t: (value: string) => value }, ProgressLocation: { Notification: 15 },
+		window: { withProgress: async (_options: object, callback: (progress: { report(value: { message: string }): void }, cancellation: { onCancellationRequested(listener: () => void): Disposable }) => Promise<AuthenticationSession>) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
+		env: { openExternal: async () => true }, Uri: { parse: (value: string) => value },
+		authentication: { registerAuthenticationProvider: (id: string, label: string, instance: TestProvider) => { assert.strictEqual(id, 'devin-subscription'); assert.strictEqual(label, 'Devin Subscription'); provider = instance; return { dispose() { } }; } },
 	};
-	Module._load = function (name, ...args) {
+	Module._load = function (this: unknown, name: string, ...args: [NodeModule?, boolean?]) {
 		if (name === 'vscode') { return vscode; }
 		if (name === './auth' && args[0]?.filename === require.resolve('../out/extension.js')) { return { signInToDevin: signIn }; }
 		return originalLoad.call(this, name, ...args);
 	};
 	delete require.cache[require.resolve('../out/extension.js')];
 	try { require('../out/extension.js').activate(context); } finally { Module._load = originalLoad; }
+	assert.ok(provider);
 	return { provider, secrets, events, progressMessages, cancel: () => cancellation(), dispose: () => { for (const item of context.subscriptions) { item.dispose(); } } };
 }
 
 test('reports browser approval and secure storage phases without displaying credentials', async () => {
 	const setup = activateProvider(async options => {
+		assert.ok(options.onProgress);
 		options.onProgress('waitingForBrowser');
 		options.onProgress('exchangingCode');
 		return 'test-private-token';
@@ -75,8 +98,8 @@ test('stores a browser session in SecretStorage and removes only the requested a
 
 test('coalesces concurrent sign-in requests and assigns a new account id on reauthentication', async () => {
 	let calls = 0;
-	let release;
-	const setup = activateProvider(async () => { calls++; return new Promise(resolve => { release = resolve; }); });
+	let release!: (token: string) => void;
+	const setup = activateProvider(async () => { calls++; return new Promise<string>(resolve => { release = resolve; }); });
 	try {
 		const first = setup.provider.createSession([]);
 		const second = setup.provider.createSession([]);
@@ -95,11 +118,48 @@ test('coalesces concurrent sign-in requests and assigns a new account id on reau
 	} finally { setup.dispose(); }
 });
 
-function deferred() {
-	let resolve;
-	const promise = new Promise(complete => { resolve = complete; });
-	return { promise, resolve };
+function deferred<T = void>() {
+	return Promise.withResolvers<T>();
 }
+
+test('a cancelled pending browser launch releases the provider for a fresh sign-in', async () => {
+	const started = deferred();
+	const firstBrowser = deferred<boolean>();
+	let opens = 0;
+	let first: Promise<AuthenticationSession> | undefined;
+	const setup = activateProvider(options => signInToDevin({
+		...options,
+		openExternal: async value => {
+			if (++opens === 1) { started.resolve(); return firstBrowser.promise; }
+			const authorize = new URL(value);
+			const redirectUri = authorize.searchParams.get('redirect_uri');
+			const state = authorize.searchParams.get('state');
+			assert.ok(redirectUri && state);
+			const callback = new URL(redirectUri);
+			callback.searchParams.set('state', state);
+			callback.searchParams.set('code', 'test-retry-code');
+			assert.strictEqual((await fetch(callback)).status, 200);
+			return true;
+		},
+		request: async () => Response.json({ session_token: 'test-retry-session-token' }),
+	}));
+	try {
+		first = setup.provider.createSession([]);
+		const cancelled = first.then(() => 'unexpected success', error => error.name);
+		await started.promise;
+		setup.cancel();
+		assert.strictEqual(await Promise.race([cancelled, new Promise(resolve => setTimeout(() => resolve('still pending'), 200))]), 'Canceled');
+		assert.deepStrictEqual({ secrets: setup.secrets.size, events: setup.events.length }, { secrets: 0, events: 0 });
+		const session = await setup.provider.createSession([]);
+		firstBrowser.resolve(true);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual({ opens, sessions: await setup.provider.getSessions(), token: session.accessToken, events: setup.events.length }, { opens: 2, sessions: [session], token: 'test-retry-session-token', events: 1 });
+	} finally {
+		firstBrowser.resolve(true);
+		setup.dispose();
+		await first?.catch(() => {});
+	}
+});
 
 test('cancellation while reading the previous session preserves the original account', { timeout: 2000 }, async () => {
 	const reading = deferred();
@@ -146,8 +206,8 @@ test('sign-out wins against an in-progress credential write without resurrecting
 });
 
 test('does not persist a session when cancellation wins the token-return race', async () => {
-	let release;
-	const setup = activateProvider(async () => new Promise(resolve => { release = resolve; }));
+	let release!: (token: string) => void;
+	const setup = activateProvider(async () => new Promise<string>(resolve => { release = resolve; }));
 	try {
 		const result = setup.provider.createSession([]);
 		setup.cancel();

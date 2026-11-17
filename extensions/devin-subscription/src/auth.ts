@@ -29,7 +29,12 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 	const timer = setTimeout(() => controller.abort(new Error('Devin sign-in timed out.')), options.timeoutMs ?? 600_000);
 	const server = createServer();
 	let rejectCallback: ((reason: unknown) => void) | undefined;
-	const onAbort = () => rejectCallback?.(signal.reason ?? new Error('Devin sign-in cancelled.'));
+	let rejectBrowserLaunch: ((reason: unknown) => void) | undefined;
+	const onAbort = () => {
+		const reason = signal.reason ?? new Error('Devin sign-in cancelled.');
+		rejectCallback?.(reason);
+		rejectBrowserLaunch?.(reason);
+	};
 	signal.addEventListener('abort', onAbort, { once: true });
 	try {
 		signal.throwIfAborted();
@@ -81,7 +86,13 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 		for (const [key, value] of Object.entries({ response_type: 'code', redirect_uri: redirectUri, state, prompt: 'select_account', code_challenge: challenge, code_challenge_method: 'S256', cli_pkce_marker: '1' })) {
 			authorize.searchParams.set(key, value);
 		}
-		if (!await options.openExternal(authorize.toString())) {
+		// A stalled opener must not hold the listener or block a fresh sign-in after cancellation.
+		const browserOpened = await new Promise<boolean>((resolve, reject) => {
+			rejectBrowserLaunch = reject;
+			options.openExternal(authorize.toString()).then(resolve, reject);
+		});
+		rejectBrowserLaunch = undefined;
+		if (!browserOpened) {
 			throw new Error('The Devin sign-in page could not be opened.');
 		}
 		options.onProgress?.('waitingForBrowser');
@@ -106,6 +117,7 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 		}
 		return token;
 	} finally {
+		rejectBrowserLaunch = undefined;
 		clearTimeout(timer);
 		signal.removeEventListener('abort', onAbort);
 		rejectCallback?.(new Error('Devin sign-in ended.'));

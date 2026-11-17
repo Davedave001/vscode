@@ -3,14 +3,17 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
-const { test } = require('node:test');
-const { signInToDevin, DEVIN_AUTHORIZE_URL, DEVIN_TOKEN_URL } = require('../out/auth.js');
+const assert: typeof import('node:assert/strict') = require('node:assert/strict');
+const { createHash }: typeof import('node:crypto') = require('node:crypto');
+const { test }: typeof import('node:test') = require('node:test');
+const { signInToDevin, DEVIN_AUTHORIZE_URL, DEVIN_TOKEN_URL }: typeof import('../src/auth.ts') = require('../out/auth.js');
 
-function callbackUrl(authorize, changes = {}) {
-	const url = new URL(authorize.searchParams.get('redirect_uri'));
-	url.searchParams.set('state', authorize.searchParams.get('state'));
+function callbackUrl(authorize: URL, changes: Record<string, string | null> = {}) {
+	const redirectUri = authorize.searchParams.get('redirect_uri');
+	const state = authorize.searchParams.get('state');
+	assert.ok(redirectUri && state);
+	const url = new URL(redirectUri);
+	url.searchParams.set('state', state);
 	url.searchParams.set('code', 'test-authorization-code');
 	for (const [key, value] of Object.entries(changes)) {
 		if (value === null) { url.searchParams.delete(key); } else { url.searchParams.set(key, value); }
@@ -19,9 +22,9 @@ function callbackUrl(authorize, changes = {}) {
 }
 
 test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting a CLI', async () => {
-	let authorize;
-	let redirect;
-	const stages = [];
+	let authorize: URL;
+	let redirect: URL | undefined;
+	const stages: string[] = [];
 	const token = await signInToDevin({
 		signal: new AbortController().signal,
 		onProgress: stage => stages.push(stage),
@@ -38,6 +41,7 @@ test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting
 			return true;
 		},
 		request: async (url, options) => {
+			assert.ok(options && typeof options.body === 'string');
 			assert.deepStrictEqual(stages, ['waitingForBrowser', 'exchangingCode']);
 			assert.strictEqual(url, DEVIN_TOKEN_URL);
 			assert.strictEqual(options.method, 'POST');
@@ -51,6 +55,7 @@ test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting
 	});
 	assert.strictEqual(token, 'test-session-token');
 	assert.deepStrictEqual(stages, ['waitingForBrowser', 'exchangingCode']);
+	assert.ok(redirect);
 	await assert.rejects(fetch(redirect), /fetch failed/);
 });
 
@@ -67,7 +72,9 @@ test('ignores missing or wrong state and unrelated paths until the valid callbac
 			unrelated.pathname = '/favicon.ico';
 			assert.strictEqual((await fetch(unrelated)).status, 404);
 			const duplicate = callbackUrl(authorize);
-			duplicate.searchParams.append('state', authorize.searchParams.get('state'));
+			const state = authorize.searchParams.get('state');
+			assert.ok(state);
+			duplicate.searchParams.append('state', state);
 			assert.strictEqual((await fetch(duplicate)).status, 400);
 			assert.strictEqual(exchanges, 0);
 			assert.strictEqual((await fetch(callbackUrl(authorize))).status, 200);
@@ -80,31 +87,66 @@ test('ignores missing or wrong state and unrelated paths until the valid callbac
 
 test('cancellation closes the loopback listener without exchanging credentials', async () => {
 	const controller = new AbortController();
-	let redirect;
+	let redirect: URL | undefined;
 	const result = signInToDevin({
 		signal: controller.signal,
 		openExternal: async value => { redirect = callbackUrl(new URL(value)); queueMicrotask(() => controller.abort(new Error('user cancelled'))); return true; },
 		request: async () => { assert.fail('must not exchange after cancellation'); },
 	});
 	await assert.rejects(result, /user cancelled/);
+	assert.ok(redirect);
 	await assert.rejects(fetch(redirect), /fetch failed/);
 });
 
 test('timeout closes the listener and does not report successful sign-in', async () => {
-	let redirect;
+	let redirect: URL | undefined;
 	await assert.rejects(signInToDevin({
 		signal: new AbortController().signal, timeoutMs: 50,
 		openExternal: async value => { redirect = callbackUrl(new URL(value)); return true; },
 	}), /timed out/);
+	assert.ok(redirect);
 	await assert.rejects(fetch(redirect), /fetch failed/);
 });
 
+for (const mode of ['cancel', 'timeout']) {
+	for (const lateFailure of [false, true]) {
+		test(`${mode} releases a pending browser launch and handles late ${lateFailure ? 'failure' : 'success'}`, async () => {
+			const controller = new AbortController();
+			let redirect: URL | undefined;
+			let exchanges = 0;
+			const started = Promise.withResolvers<void>();
+			const browser = Promise.withResolvers<boolean>();
+			const result = signInToDevin({
+				signal: controller.signal, timeoutMs: mode === 'timeout' ? 25 : 5000,
+				openExternal: value => { redirect = callbackUrl(new URL(value)); started.resolve(); return browser.promise; },
+				request: async () => { exchanges++; assert.fail('must not exchange a cancelled browser launch'); },
+			});
+			const outcome = result.then(() => ({ kind: 'success' }), error => ({ kind: 'error', message: error.message }));
+			try {
+				await started.promise;
+				if (mode === 'cancel') { controller.abort(new Error('user cancelled')); }
+				assert.deepStrictEqual(await Promise.race([outcome, new Promise(resolve => setTimeout(() => resolve({ kind: 'pending' }), 200))]), { kind: 'error', message: mode === 'cancel' ? 'user cancelled' : 'Devin sign-in timed out.' });
+				assert.ok(redirect);
+				await assert.rejects(fetch(redirect), /fetch failed/);
+				if (lateFailure) { browser.reject(new Error('late browser failure')); } else { browser.resolve(true); }
+				await new Promise(resolve => setImmediate(resolve));
+				assert.strictEqual(exchanges, 0);
+			} finally {
+				browser.resolve(true);
+				controller.abort();
+				await outcome;
+			}
+		});
+	}
+}
+
 test('a browser launch failure releases the listener', async () => {
-	let redirect;
+	let redirect: URL | undefined;
 	await assert.rejects(signInToDevin({
 		signal: new AbortController().signal,
 		openExternal: async value => { redirect = callbackUrl(new URL(value)); return false; },
 	}), /could not be opened/);
+	assert.ok(redirect);
 	await assert.rejects(fetch(redirect), /fetch failed/);
 });
 
@@ -113,7 +155,7 @@ test('provider denial does not expose its description or exchange a code', async
 		signal: new AbortController().signal,
 		openExternal: async value => { await fetch(callbackUrl(new URL(value), { error: 'access_denied', error_description: 'private provider details' })); return true; },
 		request: async () => { assert.fail('must not exchange a denied callback'); },
-	}), error => error.message === 'Devin sign-in was declined.');
+	}), error => error instanceof Error && error.message === 'Devin sign-in was declined.');
 });
 
 for (const [name, response, expected] of [
@@ -121,7 +163,7 @@ for (const [name, response, expected] of [
 	['error response', Response.json({ error: 'private error details' }), /valid sign-in response/],
 	['missing token', Response.json({ nested: { arbitrary_session: 'must-not-be-used' } }), /session token/],
 	['unrelated token field', Response.json({ access_token: 'must-not-be-used' }), /session token/],
-]) {
+] as const) {
 	test(`rejects ${name} without treating it as a connected account`, async () => {
 		await assert.rejects(signInToDevin({
 			signal: new AbortController().signal,
