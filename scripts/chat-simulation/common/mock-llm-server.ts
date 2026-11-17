@@ -734,7 +734,8 @@ function handleRequest(req: import('http').IncomingMessage, res: import('http').
 
 	// -- Models (DomainService.capiModelsURL = /models) --------------
 	if (path === '/models' && req.method === 'GET') {
-		json(200, { data: ALL_MODELS });
+		// Chat clients read data; the editor proxy also reads its separate non-chat catalog.
+		json(200, { data: ALL_MODELS, models: [] });
 		return;
 	}
 

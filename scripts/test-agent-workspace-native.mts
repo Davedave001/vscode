@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -14,12 +14,14 @@ import { _electron, type ElectronApplication, type Page } from 'playwright';
 
 assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Windows development runtime');
 const require = createRequire(import.meta.url);
-const { startServer } = require('./chat-simulation/common/mock-llm-server.ts') as typeof import('./chat-simulation/common/mock-llm-server.ts');
+const { startServer, registerScenario } = require('./chat-simulation/common/mock-llm-server.ts') as typeof import('./chat-simulation/common/mock-llm-server.ts');
 const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(server: { url: string }): Record<string, string> };
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-const emptyWorkspace = process.argv.includes('--empty-workspace');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation'].includes(arg)), 'Use --empty-workspace or --conversation');
+const conversation = process.argv.includes('--conversation');
+const emptyWorkspace = conversation || process.argv.includes('--empty-workspace');
 const profile = join(run, 'profile');
 const folders = [join(run, 'one'), join(run, 'two')];
 const agentHomes = ['codex', 'claude', 'copilot', 'state'];
@@ -37,13 +39,16 @@ const runner = join(run, 'unused-extension-test-runner.cjs');
 // Hidden-window mode requires a test location. No extension-development path is supplied, so no runner executes.
 await writeFile(runner, 'exports.run = async () => { throw new Error("Unexpected extension-development test execution"); };\n');
 
+const responseText = 'Signal-C native conversation retained.';
+if (conversation) { registerScenario('text-only', [{ content: responseText, delayMs: 0 }]); }
 const mock = await startServer(0, { logger: () => {}, captureRequests: true });
 let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
-	scenario: emptyWorkspace ? 'empty-workspace' : 'multi-root',
+	scenario: conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
+	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
@@ -69,6 +74,12 @@ try {
 	await mkdir(join(profile, 'User', 'globalStorage'), { recursive: true });
 	await writeFile(join(profile, 'User', 'globalStorage', 'agent-host-config.json'), JSON.stringify({ githubMcpServerEnabled: false }));
 	const env = buildEnv(mock);
+	if (conversation) {
+		// Only the synthetic token supplied by buildEnv is used; no account profile is copied.
+		const token = JSON.parse(Buffer.from(env.VSCODE_COPILOT_CHAT_TOKEN, 'base64').toString()) as Record<string, unknown>;
+		Object.assign(token, { copilot_plan: 'individual', sku: 'copilot_individual', isNoAuthUser: false });
+		env.VSCODE_COPILOT_CHAT_TOKEN = Buffer.from(JSON.stringify(token)).toString('base64');
+	}
 	const fakeKeys = new Set(['VSCODE_DEV', 'VSCODE_CLI', 'GITHUB_PAT', 'VSCODE_COPILOT_CHAT_TOKEN']);
 	for (const key of Object.keys(env)) {
 		if (/^(?:VSCODE_|OPENAI|ANTHROPIC|CLAUDE|CODEX|COPILOT|GITHUB|GH_|WINDSURF|DEVIN|ELECTRON_RUN_AS_NODE$|NODE_OPTIONS$|HTTPS?_PROXY$|ALL_PROXY$)/i.test(key) && !fakeKeys.has(key)) {
@@ -126,9 +137,40 @@ try {
 		const agents = await launched.firstWindow({ timeout: 30000 });
 		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
 		await agents.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor();
-		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
+		let input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
 		const draft = 'Signal-C folderless draft preserved across mode switches';
 		await input.click(); await agents.keyboard.type(draft);
+		if (conversation) {
+			stage = 'completing the native mock conversation';
+			const modelButton = agents.locator('.new-chat-widget-container').getByText('Auto', { exact: true });
+			await modelButton.waitFor({ timeout: 60000 });
+			const catalogDeadline = Date.now() + 60000;
+			let catalogReady = false;
+			while (!catalogReady && Date.now() < catalogDeadline) {
+				// Read only this fixture's logs; the SDK publishes its catalog asynchronously.
+				const dirs = await readdir(join(profile, 'logs'), { withFileTypes: true });
+				for (const dir of dirs.filter(entry => entry.isDirectory())) {
+					const log = await readFile(join(profile, 'logs', dir.name, 'agenthost.log'), 'utf8').catch(() => '');
+					catalogReady ||= /Found \d+ models:.*GPT-5\.3-Codex \(Mock\)/.test(log);
+				}
+				if (!catalogReady) { await new Promise(resolve => setTimeout(resolve, 250)); }
+			}
+			assert.ok(catalogReady, 'The native host must discover the mock model catalog');
+			await modelButton.click();
+			const model = agents.locator('.chat-model-picker-widget').getByText('GPT-5.3-Codex (Mock)', { exact: true });
+			await model.waitFor({ timeout: 30000 });
+			assert.equal(await model.evaluate(element => !!element.closest('[aria-disabled="true"], [disabled], .disabled')), false);
+			await model.click();
+			await input.click(); await agents.keyboard.press('Enter');
+			await agents.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 45000 });
+			report.conversationCompleted = true;
+			report.modelRequestCountBeforeHandoff = mock.getRequests().length;
+			assert.ok(report.modelRequestCountBeforeHandoff > 0, 'The native conversation must reach the local model endpoint');
+			input = agents.locator('.interactive-input-part .monaco-editor').last();
+			await input.click(); await agents.keyboard.type(draft);
+			await capture(agents, 'native-conversation-completed.png');
+			console.log('Completed the native conversation through the local mock endpoint');
+		}
 		assert.equal((await checkWindows(stage)).length, 1);
 		stage = 'first empty IDE';
 		const [ide] = await Promise.all([
@@ -136,6 +178,11 @@ try {
 			agents.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
 		]);
 		await ide.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 60000 });
+		if (conversation) {
+			await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 45000 });
+			report.conversationRestoredInIDE = true;
+			console.log('Restored the native conversation in the folderless IDE');
+		}
 		const expectedIds = await checkWindows(stage);
 		assert.equal(expectedIds.length, 2);
 		const marker = '// Signal-C empty editor unsaved buffer';
@@ -149,18 +196,21 @@ try {
 			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
 			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds);
+			if (conversation) { await agents.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor(); }
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
 			report.agentsDraftRetained = true;
 			stage = `empty return to IDE ${roundTrip}`;
 			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'A folderless handoff must reuse the existing editor');
+			if (conversation) { await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor(); }
 			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
 			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
 			report.windowReuseVerified = true; report.dirtyBufferRetained = true;
 		}
 		await capture(ide, 'empty-ide-returned.png');
 		await capture(agents, 'empty-agents-retained.png');
+		if (conversation) { assert.equal(mock.getRequests().length, report.modelRequestCountBeforeHandoff, 'Restoring the conversation must not send another model request'); }
 		console.log('Two folderless round trips retained the editor window, dirty buffer, and Agents draft');
 	} else {
 		const ide = await launched.firstWindow({ timeout: 30000 });
