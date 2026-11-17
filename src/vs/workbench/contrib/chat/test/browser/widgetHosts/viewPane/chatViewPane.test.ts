@@ -212,6 +212,7 @@ suite('ChatViewPane session transitions', () => {
 			lockToCodingAgent: (_name: string, _displayName: string, sessionType: string) => { locks.push(sessionType); },
 			unlockFromCodingAgent: () => { locks.push('local'); },
 			visible: true,
+			setVisible: (visible: boolean) => { widget.visible = visible; },
 		};
 		modelRef.value = createReference(previousModel);
 		const nextRef = createReference(nextModel);
@@ -219,6 +220,7 @@ suite('ChatViewPane session transitions', () => {
 			showModel(token: CancellationToken, ref: IChatModelReference): Promise<IChatModel | undefined>;
 			loadSession(resource: URI, sessionTypeSelectionReason?: undefined, showReason?: 'open' | 'restore'): Promise<IChatModel | undefined>;
 			applyModel(): void;
+			onDidChangeAgents(): void;
 			restoringSession: Promise<void> | undefined;
 			readonly shownSession: IObservable<IChatViewHostShownSession | undefined>;
 			reportOpened(sessionResource: URI): void;
@@ -236,6 +238,7 @@ suite('ChatViewPane session transitions', () => {
 			_openDiagnostics: store.add(new MutableDisposable()),
 			loadSessionCts: store.add(new MutableDisposable()),
 			_applyModelCts: store.add(new MutableDisposable()),
+			_loadingSessionCount: 0,
 			logService: new NullLogService(),
 			layoutService: { isRestored: () => false },
 			notificationService: { error: () => { } },
@@ -252,6 +255,43 @@ suite('ChatViewPane session transitions', () => {
 		didChangeViewModel = committed => (Reflect.get(pane, 'onDidChangeShownModel') as (e: IChatWidgetViewModelChangeEvent) => void).call(pane, { previousSessionResource: undefined, currentSessionResource: shown?.sessionResource, committed });
 		return { pane, paneStore, widget, modelRef, nextModel, nextRef, bindings, disposed, locks };
 	}
+
+	test('agent activation does not replace an explicit chat that is still loading', async () => {
+		const rig = createPane();
+		store.add(rig.nextRef); // The guarded default restoration never takes ownership of this reference.
+		rig.widget.setModel(undefined);
+		const opening = new DeferredPromise<IChatModelReference>();
+		const defaultSession = new DeferredPromise<{ modelRef: IChatModelReference }>();
+		let restores = 0;
+		Object.assign(rig.pane, {
+			chatAgentService: { getDefaultAgent: () => ({}) },
+			_onDidChangeViewWelcomeState: { fire: () => { } },
+			chatService: { acquireOrLoadSession: () => opening.p },
+			acquireTransferredOrPersistedSession: () => { restores++; return defaultSession.p; },
+		});
+		const savedResource = nextResource.with({ path: '/explicit' });
+		const savedReference = Object.assign(toDisposable(() => { }), { object: upcastPartial<IChatModel>({ sessionResource: savedResource }) });
+		const loading = rig.pane.loadSession(savedResource);
+		rig.pane.onDidChangeAgents();
+		await opening.complete(savedReference);
+		await loading;
+		await defaultSession.complete({ modelRef: rig.nextRef });
+		await rig.pane.restoringSession;
+		assert.deepStrictEqual({ restores, shown: rig.widget.viewModel?.sessionResource }, { restores: 0, shown: savedResource });
+	});
+
+	test('agent activation still restores an idle view with no explicit navigation', async () => {
+		const rig = createPane();
+		rig.widget.setModel(undefined);
+		Object.assign(rig.pane, {
+			chatAgentService: { getDefaultAgent: () => ({}) },
+			_onDidChangeViewWelcomeState: { fire: () => { } },
+			acquireTransferredOrPersistedSession: async () => ({ modelRef: rig.nextRef }),
+		});
+		rig.pane.onDidChangeAgents();
+		await rig.pane.restoringSession;
+		assert.strictEqual(rig.widget.viewModel?.sessionResource, nextResource);
+	});
 
 	test('keeps the previous session bound until its replacement is ready', async () => {
 		const resolving = new DeferredPromise<void>();

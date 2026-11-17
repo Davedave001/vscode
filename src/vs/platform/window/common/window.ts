@@ -5,9 +5,10 @@
 
 import { VSBuffer } from '../../../base/common/buffer.js';
 import { IStringDictionary } from '../../../base/common/collections.js';
-import { AGENTS_AUTHORITY } from '../../../base/common/network.js';
+import { AGENTS_AUTHORITY, Schemas } from '../../../base/common/network.js';
 import { PerformanceMark } from '../../../base/common/performance.js';
 import { isMacintosh, isNative, isTahoeOrNewer, isWeb } from '../../../base/common/platform.js';
+import { isEqualAuthority } from '../../../base/common/resources.js';
 import { URI, UriComponents, UriDto } from '../../../base/common/uri.js';
 import { ISandboxConfiguration } from '../../../base/parts/sandbox/common/sandboxTypes.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
@@ -209,16 +210,18 @@ export function extractChatSessionToOpen(uri: URI): { readonly uri: URI; readonl
 
 export const EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY = 'editor-window';
 
-/** A folderless editor handoff; an absent chat identity only focuses or opens the editor. */
+/** An editor handoff with optional workspace roots and a sent conversation. */
 export interface IEditorWindowLink {
 	readonly remoteAuthority?: string;
 	readonly chatSessionToOpen?: URI;
+	readonly folders?: readonly URI[];
 }
 
 export function createExternalEditorWindowLinkUri(productUrlProtocol: string, options: IEditorWindowLink = {}): URI {
 	const params = new URLSearchParams();
 	if (options.remoteAuthority) { params.set('remoteAuthority', options.remoteAuthority); }
 	if (options.chatSessionToOpen) { params.set(CHAT_SESSION_LINK_QUERY_PARAM, options.chatSessionToOpen.toString()); }
+	if (options.folders) { params.set('folders', JSON.stringify(options.folders.map(folder => folder.toString()))); }
 	return URI.from({ scheme: productUrlProtocol, authority: EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY, path: '/open', query: params.toString() });
 }
 
@@ -229,7 +232,7 @@ export function parseExternalEditorWindowLinkUri(uri: URI | string, productUrlPr
 		if (parsed.scheme !== productUrlProtocol || parsed.authority !== EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY || parsed.path !== '/open' || parsed.fragment) { return undefined; }
 		const params = new URLSearchParams(parsed.query);
 		for (const key of params.keys()) {
-			if ((key !== CHAT_SESSION_LINK_QUERY_PARAM && key !== 'remoteAuthority') || params.getAll(key).length !== 1) { return undefined; }
+			if ((key !== CHAT_SESSION_LINK_QUERY_PARAM && key !== 'remoteAuthority' && key !== 'folders') || params.getAll(key).length !== 1) { return undefined; }
 		}
 		const remoteAuthority = params.get('remoteAuthority');
 		if (remoteAuthority !== null && (remoteAuthority.length > 4096 || remoteAuthority !== remoteAuthority.trim() || !/^[a-z][a-z0-9-]*\+.+$/i.test(remoteAuthority) || /[/\\\x00-\x1f\x7f]/.test(remoteAuthority))) { return undefined; }
@@ -237,7 +240,23 @@ export function parseExternalEditorWindowLinkUri(uri: URI | string, productUrlPr
 		if (resource !== null && (!resource || resource.length > 8192)) { return undefined; }
 		const chatSessionToOpen = resource === null ? undefined : URI.parse(resource, true);
 		if (chatSessionToOpen && !chatSessionToOpen.path && !chatSessionToOpen.authority) { return undefined; }
-		return { remoteAuthority: remoteAuthority ?? undefined, chatSessionToOpen };
+		let folders: URI[] | undefined;
+		const roots = params.get('folders');
+		if (roots !== null) {
+			if (roots.length > 65536) { return undefined; }
+			const values: unknown = JSON.parse(roots);
+			if (!Array.isArray(values) || !values.length || values.length > 100) { return undefined; }
+			folders = [];
+			for (const value of values) {
+				if (typeof value !== 'string' || value.length > 8192 || !/^[a-z][a-z0-9+.-]*:\//i.test(value) || /[\x00-\x1f\x7f]/.test(value)) { return undefined; }
+				const folder = URI.parse(value, true);
+				if (!folder.path.startsWith('/') || folder.query || folder.fragment || /[\x00-\x1f\x7f]/.test(folder.path + folder.authority)) { return undefined; }
+				if (remoteAuthority ? folder.scheme !== Schemas.vscodeRemote || !isEqualAuthority(folder.authority, remoteAuthority) : folder.scheme !== Schemas.file) { return undefined; }
+				// URI serialization lowercases authorities; retain the requested resolver name (for example WSL's distro casing).
+				folders.push(remoteAuthority ? folder.with({ authority: remoteAuthority }) : folder);
+			}
+		}
+		return { remoteAuthority: remoteAuthority ?? undefined, chatSessionToOpen, ...(folders ? { folders } : {}) };
 	} catch {
 		return undefined;
 	}

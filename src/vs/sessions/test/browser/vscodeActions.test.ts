@@ -46,18 +46,22 @@ suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
 	for (const [status, parentStatus] of [[SessionStatus.Completed, SessionStatus.Completed], [SessionStatus.Untitled, SessionStatus.Untitled], [SessionStatus.Untitled, SessionStatus.Completed]]) {
-		for (const { explicit, network, folderless } of [{ explicit: false, network: false, folderless: false }, { explicit: true, network: false, folderless: false }, { explicit: false, network: true, folderless: false }, { explicit: true, network: true, folderless: false }, { explicit: false, network: false, folderless: true }, { explicit: true, network: false, folderless: true }]) {
-			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${folderless ? 'folderless' : network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
+		for (const { explicit, network, folderless, multiRoot } of [
+			...[{ explicit: false, network: false, folderless: false }, { explicit: true, network: false, folderless: false }, { explicit: false, network: true, folderless: false }, { explicit: true, network: true, folderless: false }, { explicit: false, network: false, folderless: true }, { explicit: true, network: false, folderless: true }].map(options => ({ ...options, multiRoot: false })),
+			{ explicit: false, network: false, folderless: false, multiRoot: true }, { explicit: true, network: true, folderless: false, multiRoot: true },
+		]) {
+			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${multiRoot ? 'multi-root' : folderless ? 'folderless' : network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
 				const instantiation = store.add(new TestInstantiationService());
 				const mainFolder = URI.file('/main project');
 				const folder = network
 					? URI.from({ scheme: 'file', authority: 'fileserver', path: explicit ? '/shared projects/clicked # & 100%/项目' : '/shared projects/nested # & 100%/项目' })
 					: URI.file(explicit ? '/clicked project' : '/nested project');
 				const mainChat = upcastPartial<IChat>({ resource: URI.parse('test:/main-chat'), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: mainFolder, workingDirectory: mainFolder, name: 'main', description: undefined }] })) });
-				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), status: constObservable(status), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folderless ? [] : [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
+				const folders = folderless ? [] : [folder, ...(multiRoot ? [URI.file('/second project # 100%/项目')] : [])];
+				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), status: constObservable(status), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folders.map(root => ({ root, workingDirectory: root, name: 'nested', description: undefined })) })) });
 				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(parentStatus), mainChat: constObservable(mainChat) });
 				const focused = upcastPartial<ISessionHost>({ session: constObservable(session), chat: constObservable(explicit ? mainChat : chat) });
-				const opened: { scheme: string; authority: string; path: string; folder: string | undefined; session: string | null }[] = [];
+				const opened: { scheme: string; authority: string; path: string; folder: string | undefined; folders: string[] | undefined; session: string | null }[] = [];
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
 				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => focused }));
 				instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
@@ -70,14 +74,23 @@ suite('Web Open in Editor', () => {
 				instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async resource => {
 					const uri = URI.parse(resource.toString());
 					// The native protocol handler reconstructs the file URI from the link's fsPath.
-					opened.push({ scheme: uri.scheme, authority: uri.authority, path: uri.path, folder: uri.authority === 'file' ? URI.file(uri.fsPath).toString() : undefined, session: new URLSearchParams(uri.query).get('session') });
+					opened.push({ scheme: uri.scheme, authority: uri.authority, path: uri.path, folder: uri.authority === 'file' ? URI.file(uri.fsPath).toString() : undefined, folders: parseExternalEditorWindowLinkUri(uri.toString(), 'signal-c')?.folders?.map(folder => folder.toString()), session: new URLSearchParams(uri.query).get('session') });
 					return true;
 				} }));
 				for (const quality of [undefined, 'stable', 'insider', 'exploration'] as const) {
 					instantiation.stub(IProductService, upcastPartial<IProductService>({ quality, urlProtocol: 'signal-c' }));
 					await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, explicit ? { session, chat } : undefined));
 				}
-				assert.deepStrictEqual(opened, Array.from({ length: 4 }, () => ({ scheme: 'signal-c', authority: folderless ? 'editor-window' : 'file', path: folderless ? '/open' : network ? `//fileserver${folder.path}` : folder.path, folder: folderless ? undefined : folder.toString(), session: status === SessionStatus.Untitled ? null : chat.resource.toString() })));
+				assert.deepStrictEqual(opened, Array.from({ length: 4 }, () => ({ scheme: 'signal-c', authority: folderless || multiRoot ? 'editor-window' : 'file', path: folderless || multiRoot ? '/open' : network ? `//fileserver${folder.path}` : folder.path, folder: folderless || multiRoot ? undefined : folder.toString(), folders: multiRoot ? folders.map(folder => folder.toString()) : undefined, session: status === SessionStatus.Untitled ? null : chat.resource.toString() })));
+				if (multiRoot) {
+					opened.length = 0;
+					const notifications: string[] = [];
+					instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notifications.push(String(message)); } }));
+					const unsupported = URI.parse('unsupported-root:/second');
+					const unsupportedChat = { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [folder, unsupported].map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) };
+					await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: unsupportedChat }));
+					assert.deepStrictEqual({ opened, notifications }, { opened: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
+				}
 			});
 		}
 	}
@@ -209,6 +222,16 @@ suite('Web Open in Editor', () => {
 				sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null],
 				notifications: sharesAgentHost ? [] : ['This chat can\'t be opened in the editor because it uses a different agent host on the remote machine.'],
 			});
+			sessions.length = 0; notifications.length = 0; links.length = 0;
+			const roots = [folder, toAgentHostUri(URI.file('/second project # 100%/项目'), authority)];
+			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: roots.map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) } }));
+			const multiRoot = parseExternalEditorWindowLinkUri(links[0], 'vscode-test');
+			assert.deepStrictEqual({ host: multiRoot?.remoteAuthority, roots: multiRoot?.folders?.map(folder => folder.toString()), sessions }, { host: parsed.remoteAuthority, roots: ['/project', '/second project # 100%/项目'].map(path => URI.from({ scheme: 'vscode-remote', authority: parsed.remoteAuthority, path }).toString()), sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null] });
+			for (const otherHostRoot of [URI.parse('vscode-remote://ssh-remote+other/second'), toAgentHostUri(URI.file('/second'), agentHostAuthority('ssh:other'))]) {
+				sessions.length = 0; notifications.length = 0; links.length = 0;
+				await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [folder, otherHostRoot].map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) } }));
+				assert.deepStrictEqual({ links, notifications }, { links: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
+			}
 		});
 	}
 });

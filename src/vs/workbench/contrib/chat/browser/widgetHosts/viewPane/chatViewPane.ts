@@ -370,7 +370,9 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 
 	private onDidChangeAgents(): void {
 		if (this.chatAgentService.getDefaultAgent(ChatAgentLocation.Chat)) {
-			if (!this._widget?.viewModel && !this.restoringSession) {
+			// A pending explicit open may temporarily clear the widget; late agent
+			// discovery must not start an empty restore that replaces that request.
+			if (!this._widget?.viewModel && !this.restoringSession && this._loadingSessionCount === 0) {
 				this._applyModelCts.value?.cancel();
 				const cts = this._applyModelCts.value = new CancellationTokenSource();
 				this.restoringSession =

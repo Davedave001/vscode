@@ -10,7 +10,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 
 assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Windows development runtime');
@@ -20,12 +20,15 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol'].includes(arg)), 'Use --empty-workspace, --conversation, or --protocol');
-const protocol = process.argv.includes('--protocol');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, or --workspace-protocol');
+const workspaceProtocol = process.argv.includes('--workspace-protocol');
+const protocol = workspaceProtocol || process.argv.includes('--protocol');
 const conversation = protocol || process.argv.includes('--conversation');
 const emptyWorkspace = conversation || process.argv.includes('--empty-workspace');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
+const fixtureHome = join(run, 'home');
+await mkdir(fixtureHome, { recursive: true });
 const folders = [join(run, 'one'), join(run, 'two')];
 const agentHomes = ['codex', 'claude', 'copilot', 'state'];
 for (const directory of [...folders, join(run, 'extensions'), ...agentHomes.map(name => join(run, name))]) {
@@ -49,7 +52,7 @@ let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
-	scenario: protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
+	scenario: workspaceProtocol ? 'workspace-protocol-conversation' : protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
 	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
@@ -111,10 +114,13 @@ try {
 	Object.assign(env, {
 		// Portable mode also confines argv.json and disables OS protocol registration.
 		VSCODE_PORTABLE: portable,
+		// Workspace-less chat scratch directories use os.homedir(), independently of SDK storage.
+		USERPROFILE: fixtureHome, HOME: fixtureHome, APPDATA: join(fixtureHome, 'AppData', 'Roaming'), LOCALAPPDATA: join(fixtureHome, 'AppData', 'Local'),
 		CODEX_HOME: join(run, 'codex'), CLAUDE_CONFIG_DIR: join(run, 'claude'), COPILOT_HOME: join(run, 'copilot'), XDG_STATE_HOME: join(run, 'state'),
 		COPILOT_API_URL: mock.url, COPILOT_DEBUG_GITHUB_API_URL: mock.url,
 		GITHUB_COPILOT_API_TOKEN: 'smoketest-fake-agent-host-token', VSCODE_AGENT_HOST_CAPI_URL_OVERRIDE: mock.url,
 	});
+	assert.equal(execFileSync(process.execPath, ['-p', 'require("node:os").homedir()'], { env, windowsHide: true, encoding: 'utf8' }).trim(), fixtureHome);
 	const inspectArgs = await allocateInspectorArgs();
 	stage = 'launching';
 	const executable = createLaunchOptions(root, workspace, true, {}).executable;
@@ -201,6 +207,7 @@ try {
 			console.log('Restored the native conversation in the folderless IDE');
 		}
 		let protocolUri: string | undefined;
+		let deliverProtocol: ((uri: string) => Promise<void>) | undefined;
 		if (protocol) {
 			stage = 'warm editor protocol';
 			let chatResource: string | undefined;
@@ -216,6 +223,7 @@ try {
 			const product = JSON.parse(await readFile(join(root, 'product.json'), 'utf8')) as { urlProtocol: string };
 			const link = new URL(`${product.urlProtocol}://editor-window/open`);
 			link.searchParams.set('session', chatResource);
+			if (workspaceProtocol) { link.searchParams.set('folders', JSON.stringify(folders.map(folder => pathToFileURL(folder).toString()))); }
 			protocolUri = link.toString();
 			const closed = ide.waitForEvent('close', { timeout: 30000 });
 			const window = await launched.browserWindow(ide);
@@ -224,15 +232,22 @@ try {
 			// Direct CLI delivery exercises this fixture's URL receiver without OS protocol registration.
 			// A second instance must not carry extensionTestsPath: the launcher rejects test-instance forwarding.
 			const forwardingArgs = commonArgs.filter(arg => arg !== '--extensionTestsPath' && arg !== runner);
-			[ide] = await Promise.all([
-				launched.waitForEvent('window', { timeout: 45000 }),
-				promisify(execFile)(executable, [root, '--open-url', ...forwardingArgs, '--', protocolUri], { env, windowsHide: true, timeout: 45000 }).catch(async (error: NodeJS.ErrnoException & { signal?: string; stdout?: string; stderr?: string }) => {
+			deliverProtocol = async uri => {
+				await promisify(execFile)(executable, [root, '--open-url', ...forwardingArgs, '--', uri], { env, windowsHide: true, timeout: 45000 }).catch(async (error: NodeJS.ErrnoException & { signal?: string; stdout?: string; stderr?: string }) => {
 					await writeFile(join(run, 'protocol-helper-error.json'), JSON.stringify({ code: error.code, signal: error.signal, stdout: error.stdout?.replace(/https?:\/\/\S+/g, '[URL]'), stderr: error.stderr?.replace(/https?:\/\/\S+/g, '[URL]') }, null, 2));
 					throw new Error('The isolated protocol helper did not exit successfully');
-				}),
+				});
+			};
+			[ide] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				deliverProtocol(protocolUri),
 			]);
 			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 60000 });
 			await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 60000 });
+			if (workspaceProtocol) {
+				await ide.getByRole('tree').getByText('one', { exact: true }).waitFor();
+				await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			}
 			report.warmProtocolConversationRestored = true;
 			await capture(ide, 'protocol-warm-editor.png');
 			console.log('Restored the conversation through the running editor protocol receiver');
@@ -245,6 +260,16 @@ try {
 		await ide.locator('.monaco-editor').first().waitFor({ state: 'visible' });
 		await ide.keyboard.type(marker);
 		await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+		if (workspaceProtocol) {
+			assert.ok(protocolUri && deliverProtocol);
+			const reordered = new URL(protocolUri);
+			reordered.searchParams.set('folders', JSON.stringify([...folders].reverse().map(folder => pathToFileURL(folder).toString())));
+			await deliverProtocol(reordered.toString());
+			await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor();
+			assert.deepEqual(await checkWindows('reordered workspace protocol'), expectedIds, 'Reordered roots must reuse the same workspace editor');
+			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
+			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+		}
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `empty return to Agents ${roundTrip}`;
 			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
@@ -287,8 +312,12 @@ try {
 			await coldIDE.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 60000 });
 			const windows = await coldApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(window => ({ id: window.id, hidden: !window.isVisible(), title: window.getTitle() })));
 			report.windowChecks.push({ stage, windows });
-			assert.equal(windows.length, 2, 'Cold startup must preserve the dirty backup alongside its requested editor');
+			assert.equal(windows.length, workspaceProtocol ? 1 : 2, 'Cold startup must recover its dirty editor and reuse a matching workspace');
 			assert.ok(windows.every(window => window.hidden));
+			if (workspaceProtocol) {
+				await coldIDE.getByRole('tree').getByText('one', { exact: true }).waitFor();
+				await coldIDE.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			}
 			let conversationWindows = 0;
 			let recoveredBuffer = false;
 			for (const page of coldApp.windows()) {
@@ -354,7 +383,17 @@ try {
 		await capture(agents, 'agents-returned.png');
 	}
 } catch (error) {
-	await Promise.all((app?.windows() ?? []).map((page, i) => page.screenshot({ path: join(run, `failure-${i}.png`), timeout: 5000 }).catch(() => {})));
+	const failedApp = app;
+	await Promise.all((failedApp?.windows() ?? []).map(async (page, i) => {
+		try {
+			const window = await failedApp!.browserWindow(page);
+			try {
+				const png = await window.evaluate(async nativeWindow => (await nativeWindow.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString('base64'));
+				await writeFile(join(run, `failure-${i}.png`), Buffer.from(png, 'base64'));
+			} finally { await window.dispose(); }
+			await writeFile(join(run, `failure-${i}.json`), JSON.stringify(await page.evaluate(() => ({ title: document.title, text: document.body.innerText.slice(0, 12000) })), null, 2));
+		} catch { /* Retain other diagnostics if a failed window already closed. */ }
+	}));
 	await writeFile(join(run, 'failure.json'), JSON.stringify({ stage, message: error instanceof Error ? error.message : String(error) }, null, 2));
 	throw error;
 } finally {

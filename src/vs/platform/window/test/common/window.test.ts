@@ -53,6 +53,39 @@ suite('window', () => {
 		}
 	});
 
+	test('preserves every local, network, or remote workspace root and the conversation', () => {
+		for (const remoteAuthority of [undefined, 'ssh-remote+host', 'wsl+Ubuntu', 'dev-container+abcdef']) {
+			const folders = remoteAuthority
+				? ['/project # 100%/项目', '/second project'].map(path => URI.from({ scheme: 'vscode-remote', authority: remoteAuthority, path }))
+				: [URI.file('/project # 100%/项目'), URI.from({ scheme: 'file', authority: 'server', path: '/shared projects' })];
+			const chatSessionToOpen = URI.parse('agent-host-copilotcli:/created#nested');
+			const link = createExternalEditorWindowLinkUri('signal-c', { remoteAuthority, folders, chatSessionToOpen });
+			const parsed = parseExternalEditorWindowLinkUri(link.toString(), 'signal-c');
+			assert.deepStrictEqual({ remoteAuthority: parsed?.remoteAuthority, folders: parsed?.folders?.map(folder => folder.toString()), chat: parsed?.chatSessionToOpen?.toString() }, { remoteAuthority, folders: folders.map(folder => folder.toString()), chat: chatSessionToOpen.toString() });
+		}
+	});
+
+	test('rejects malformed, mixed-host, non-folder, or oversized workspace root lists', () => {
+		for (const [folders, remoteAuthority] of [
+			[null], [42], ['file:///project'], [[]], [[42]], [['not-a-uri']], [['command:/execute']], [['file:relative']],
+			[['file:///project?query']], [['file:///project#fragment']], [['file:///project\n']],
+			[['vscode-remote://ssh-remote+host/project']],
+			[['file:///project'], 'ssh-remote+host'],
+			[['vscode-remote://ssh-remote+other/project'], 'ssh-remote+host'],
+			[['vscode-remote://ssh-remote+host/project', 'file:///other'], 'ssh-remote+host'],
+			[Array.from({ length: 101 }, (_, index) => `file:///project${index}`)],
+			[[`file:///${'x'.repeat(8193)}`]],
+		] as const) {
+			const params = new URLSearchParams({ folders: JSON.stringify(folders) });
+			if (remoteAuthority) { params.set('remoteAuthority', remoteAuthority); }
+			const link = URI.from({ scheme: 'signal-c', authority: 'editor-window', path: '/open', query: params.toString() });
+			assert.strictEqual(parseExternalEditorWindowLinkUri(link, 'signal-c'), undefined);
+		}
+		for (const query of ['folders=not-json', 'folders=%5B%22file%3A%2F%2F%2Fproject%22%5D&folders=%5B%5D', `folders=${'x'.repeat(65537)}`]) {
+			assert.strictEqual(parseExternalEditorWindowLinkUri(`signal-c://editor-window/open?${query}`, 'signal-c'), undefined);
+		}
+	});
+
 	test('preserves legacy macOS traffic-light positioning without a fixed inset', () => {
 		assert.deepStrictEqual({
 			beforeTahoe: [35, 44, 16].map(height => getMacOSWindowControlsPosition(height, '24.0.0')),

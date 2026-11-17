@@ -10,11 +10,26 @@ import { URI } from '../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { ICodeWindow } from '../../../window/electron-main/window.js';
-import { openEmptyWindowWithChat, sendChatSessionToWindow } from '../../electron-main/windowChatSession.js';
-import { IWindowsMainService, OpenContext } from '../../../windows/electron-main/windows.js';
+import { openEditorWindowLink, openEmptyWindowWithChat, sendChatSessionToWindow } from '../../electron-main/windowChatSession.js';
+import { IOpenConfiguration, IWindowsMainService, OpenContext } from '../../../windows/electron-main/windows.js';
 
 suite('Native window chat handoff', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	for (const initialStartup of [false, true]) {
+		for (const remoteAuthority of [undefined, 'ssh-remote+host']) {
+			test(`delegates the complete ${remoteAuthority ? 'remote' : 'local'} workspace and chat to native matching (${initialStartup ? 'startup' : 'running'})`, async () => {
+				const cli = { _: [] };
+				const folders = ['/one', '/two'].map(path => URI.from({ scheme: remoteAuthority ? 'vscode-remote' : 'file', authority: remoteAuthority, path }));
+				const chatSessionToOpen = URI.parse('agent-host-copilotcli:/created#nested');
+				const calls: IOpenConfiguration[] = [];
+				const windows = [upcastPartial<ICodeWindow>({ sendWhenReady: () => assert.fail('Native workspace opening owns chat dispatch') })];
+				const service = upcastPartial<IWindowsMainService>({ open: async configuration => { calls.push(configuration); return windows; }, openEmptyWindow: () => assert.fail('Workspace roots must not be dropped') });
+				assert.strictEqual(await openEditorWindowLink(service, cli, { folders, remoteAuthority, chatSessionToOpen }, initialStartup), windows);
+				assert.deepStrictEqual(calls, [{ context: OpenContext.LINK, cli, initialStartup, urisToOpen: folders.map(folderUri => ({ folderUri })), forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: { kind: 'resource', resource: chatSessionToOpen.toString() } }]);
+			});
+		}
+	}
 	test('awaits the selected editor and passes its host and reuse options without alteration', async () => {
 		const opening = new DeferredPromise<ICodeWindow[]>();
 		const configuration = { context: OpenContext.LINK, initialStartup: true };

@@ -9,7 +9,7 @@ import { KeybindingWeight } from '../../../platform/keybinding/common/keybinding
 import { Schemas } from '../../../base/common/network.js';
 import { URI } from '../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../editor/browser/editorExtensions.js';
-import { localize2 } from '../../../nls.js';
+import { localize, localize2 } from '../../../nls.js';
 import { Action2 } from '../../../platform/actions/common/actions.js';
 import { AGENT_HOST_SCHEME, fromAgentHostUri } from '../../../platform/agentHost/common/agentHostUri.js';
 import { IRemoteAgentHostService } from '../../../platform/agentHost/common/remoteAgentHostService.js';
@@ -36,7 +36,7 @@ import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWIT
 import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
-import { createExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
+import { createExternalEditorWindowLinkUri, parseExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
 
 export class OpenInVSCodeAction extends Action2 {
 	static readonly ID = 'sessions.openInVSCode';
@@ -81,10 +81,13 @@ export class OpenInVSCodeAction extends Action2 {
 
 		const chat = target?.chat ?? activeSession.mainChat.get();
 		const workspace = chat?.workspace.get();
-		const folder = workspace?.folders[0];
-		const rawFolderUri = workspace?.isVirtualWorkspace ? undefined : folder?.workingDirectory;
+		const rawFolderUris = workspace?.isVirtualWorkspace ? [] : workspace?.folders.map(folder => folder.workingDirectory) ?? [];
+		const rawFolderUri = rawFolderUris[0];
+		const notifyUnsupportedWorkspace = () => accessor.get(INotificationService).info(localize('openInEditor.unsupportedWorkspaceRoots', "This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large."));
 
-		if (rawFolderUri && !resolveRemoteFolderUri(rawFolderUri, activeSession.providerId, sessionsProvidersService, remoteAgentHostService)) {
+		const resolvedFolderUris = rawFolderUris.map(folder => resolveRemoteFolderUri(folder, activeSession.providerId, sessionsProvidersService, remoteAgentHostService));
+		if (!resolvedFolderUris.every((folder): folder is URI => !!folder)) {
+			if (rawFolderUris.length > 1) { notifyUnsupportedWorkspace(); return; }
 			await openerService.open(URI.from({ scheme, query: params.toString() }), { openExternal: true });
 			return;
 		}
@@ -96,16 +99,35 @@ export class OpenInVSCodeAction extends Action2 {
 		const chatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, activeSession.providerId, sessionsProvidersService, remoteAgentHostService, accessor.get(IAgentHostConnectionsService), accessor.get(ITunnelAgentHostService), accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService));
 		if (URI.isUri(chatSession)) {
 			params.set('session', chatSession.toString());
-		} else if (chatSession) {
-			notifyEditorWindowSessionUnsupported(accessor.get(INotificationService), chatSession, !!rawFolderUri);
 		}
+		const notifyUnsupportedChat = () => {
+			if (chatSession && !URI.isUri(chatSession)) { notifyEditorWindowSessionUnsupported(accessor.get(INotificationService), chatSession, !!rawFolderUri); }
+		};
 
 		if (!rawFolderUri) {
+			notifyUnsupportedChat();
 			await openerService.open(createExternalEditorWindowLinkUri(scheme, { remoteAuthority, chatSessionToOpen: URI.isUri(chatSession) ? chatSession : undefined }), { openExternal: true });
+			return;
+		}
+		if (rawFolderUris.length > 1) {
+			if (new Set(rawFolderUris.filter(folder => folder.scheme === AGENT_HOST_SCHEME).map(folder => folder.authority)).size > 1) { notifyUnsupportedWorkspace(); return; }
+			const folders = resolvedFolderUris.map(resolved => {
+				// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens every wrapped root through the target editor's remote authority
+				const folder = resolved.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(resolved) : resolved;
+				return remoteAuthority && folder.scheme === Schemas.file ? folder.with({ scheme: Schemas.vscodeRemote, authority: remoteAuthority }) : folder;
+			});
+			const link = createExternalEditorWindowLinkUri(scheme, { remoteAuthority, folders, chatSessionToOpen: URI.isUri(chatSession) ? chatSession : undefined });
+			if (!parseExternalEditorWindowLinkUri(link, scheme)) {
+				notifyUnsupportedWorkspace();
+				return;
+			}
+			notifyUnsupportedChat();
+			await openerService.open(link, { openExternal: true });
 			return;
 		}
 		// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens the remote folder in a new window from its wrapped host URI
 		const folderUri = rawFolderUri.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(rawFolderUri) : rawFolderUri;
+		notifyUnsupportedChat();
 
 		if (remoteAuthority) {
 			await openerService.open(URI.from({

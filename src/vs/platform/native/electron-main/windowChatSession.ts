@@ -6,9 +6,22 @@
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
 import { ICodeWindow } from '../../window/electron-main/window.js';
-import { IOpenEmptyWindowOptions } from '../../window/common/window.js';
-import { IOpenEmptyConfiguration, IWindowsMainService } from '../../windows/electron-main/windows.js';
+import { IEditorWindowLink, IOpenEmptyWindowOptions } from '../../window/common/window.js';
+import { IOpenConfiguration, IOpenEmptyConfiguration, IWindowsMainService, OpenContext } from '../../windows/electron-main/windows.js';
 import { findWindowForEmptyHandoff } from '../../windows/electron-main/windowsFinder.js';
+
+/** Restore every requested workspace root through the normal workspace matching and chat-target selection. */
+export function openEditorWindowLink(windowsService: IWindowsMainService, cli: IOpenConfiguration['cli'], link: IEditorWindowLink, initialStartup = false): Promise<ICodeWindow[]> {
+	if (link.folders?.length) {
+		return windowsService.open({
+			context: OpenContext.LINK, cli, initialStartup,
+			urisToOpen: link.folders.map(folderUri => ({ folderUri })),
+			forceNewWindow: true, reuseWorkspaceContainingFolder: true,
+			chatSessionToOpen: link.chatSessionToOpen ? { kind: 'resource', resource: link.chatSessionToOpen.toString() } : undefined,
+		});
+	}
+	return openEmptyWindowWithChat(windowsService, { context: OpenContext.LINK, initialStartup }, { remoteAuthority: link.remoteAuthority ?? null, reuseExistingWindow: true, chatSessionToOpen: link.chatSessionToOpen });
+}
 
 /** Open or reuse a folderless editor, then hand the conversation to its single selected window. */
 export async function openEmptyWindowWithChat(windowsService: IWindowsMainService, configuration: IOpenEmptyConfiguration, options?: IOpenEmptyWindowOptions): Promise<ICodeWindow[]> {

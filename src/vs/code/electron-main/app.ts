@@ -103,7 +103,7 @@ import { ElectronURLListener } from '../../platform/url/electron-main/electronUr
 import { IWebviewManagerService } from '../../platform/webview/common/webviewManagerService.js';
 import { WebviewMainService } from '../../platform/webview/electron-main/webviewMainService.js';
 import { AgentsWindowOpenSource, ChatSessionToOpen, EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY, extractChatSessionToOpen, IEditorWindowLink, isFolderToOpen, isWorkspaceToOpen, IWindowOpenable, parseExternalAgentsWindowNewSessionLinkUri, parseExternalEditorWindowLinkUri } from '../../platform/window/common/window.js';
-import { openEmptyWindowWithChat } from '../../platform/native/electron-main/windowChatSession.js';
+import { openEditorWindowLink } from '../../platform/native/electron-main/windowChatSession.js';
 import { shouldBlockProtocolRequest } from '../../platform/url/electron-main/protocolConfirmation.js';
 import { FolderLocationsMainService, IFolderLocationsMainService } from '../../platform/windows/electron-main/folderLocationsMainService.js';
 import { getAllWindowsExcludingOffscreen, isHiddenWindowMode, IWindowsMainService, OpenContext } from '../../platform/windows/electron-main/windows.js';
@@ -982,14 +982,18 @@ export class CodeApplication extends Disposable {
 	}
 
 	private shouldBlockEditorWindowLink(link: IEditorWindowLink, windowsMainService: IWindowsMainService, dialogMainService: IDialogMainService): Promise<boolean> {
-		const message = link.remoteAuthority
+		const message = link.folders?.length
+			? link.remoteAuthority
+				? localize('confirmOpenRemoteEditorWorkspace', "An external application wants to open a workspace with {0} folders on '{1}' in {2}. Do you want to continue?", link.folders.length, link.remoteAuthority, this.productService.nameShort)
+				: localize('confirmOpenEditorWorkspace', "An external application wants to open a workspace with {0} folders in {1}. Do you want to continue?", link.folders.length, this.productService.nameShort)
+			: link.remoteAuthority
 			? localize('confirmOpenRemoteEditor', "An external application wants to open an editor on '{0}' in {1}. Do you want to continue?", link.remoteAuthority, this.productService.nameShort)
 			: localize('confirmOpenLocalEditor', "An external application wants to open an editor in {0}. Do you want to continue?", this.productService.nameShort);
 		return shouldBlockProtocolRequest(link.remoteAuthority ? Schemas.vscodeRemote : Schemas.file, message, this.configurationService, windowsMainService, dialogMainService, true);
 	}
 
 	private openEditorWindowLink(link: IEditorWindowLink, windowsMainService: IWindowsMainService, initialStartup = false): Promise<ICodeWindow[]> {
-		return openEmptyWindowWithChat(windowsMainService, { context: OpenContext.LINK, initialStartup }, { remoteAuthority: link.remoteAuthority ?? null, reuseExistingWindow: true, chatSessionToOpen: link.chatSessionToOpen });
+		return openEditorWindowLink(windowsMainService, this.environmentMainService.args, link, initialStartup);
 	}
 
 	private getWindowOpenableFromProtocolUrl(uri: URI): IWindowOpenable | undefined {
