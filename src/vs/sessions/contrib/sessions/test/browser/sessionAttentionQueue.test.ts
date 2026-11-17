@@ -8,7 +8,7 @@ import { autorun, constObservable, observableValue } from '../../../../../base/c
 import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IChat, ISession, SessionStatus } from '../../../../../workbench/services/sessions/common/session.js';
+import { ChatInteractivity, IChat, ISession, SessionStatus } from '../../../../../workbench/services/sessions/common/session.js';
 import { getSessionAttentionQueue } from '../../browser/sessionAttentionQueue.js';
 
 function session(sessionId: string, status: SessionStatus, archived = false, chats: readonly IChat[] = []): ISession {
@@ -89,5 +89,12 @@ suite('Session Attention Queue', () => {
 		state.set(SessionStatus.InProgress, undefined);
 		chats.set([], undefined);
 		assert.deepStrictEqual(snapshots, [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]);
+	});
+
+	test('keeps archived chats and hidden internal workers out of attention rows', () => {
+		const archived = upcastPartial<IChat>({ ...chat('archived', SessionStatus.NeedsInput), isArchived: constObservable(true) });
+		const hidden = upcastPartial<IChat>({ ...chat('hidden', SessionStatus.Error), interactivity: constObservable(ChatInteractivity.Hidden) });
+		assert.deepStrictEqual(getSessionAttentionQueue([session('parent', SessionStatus.Completed, false, [archived, hidden])]), { needsInput: [], errors: [], working: 0 });
+		assert.deepStrictEqual(getSessionAttentionQueue([session('archived-alert', SessionStatus.NeedsInput, false, [archived]), session('hidden-alert', SessionStatus.Error, false, [hidden])]), { needsInput: [], errors: [], working: 0 });
 	});
 });

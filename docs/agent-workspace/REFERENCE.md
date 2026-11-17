@@ -21,9 +21,13 @@ The reference has a persistent session sidebar, a central conversation and compo
 
 This increment adds navigation and discoverability. It does not introduce an agent backend or connect to Devin's hosted service. Existing provider integration remains upstream functionality; no paid provider calls are needed to inspect the new commands.
 
-## Next visual increment
+## Session Overview
 
-Build a compact, session-scoped overview in the tools area: current task and last verified result, pending decisions, changed files, and tool shortcuts. Use one quiet surface with explicit status text and progressive disclosure. Keep conversation width adjustable and collapse tools on narrow windows. Reuse provider-reported state; never manufacture progress, verification results, costs, or elapsed time.
+`Sessions: Session Overview` opens a compact auxiliary panel from the sessions toolbar or Command Palette in the main Agents window on desktop layouts. It follows that window's selected chat and shows its title, parent session, reported status and activity, workspace, known changed-file count, and session attention counts. Native buttons open the chat, the host-bound Session Tools picker, and the Attention Queue. The panel uses the existing resizable side-panel layout and scrolls when its content exceeds the available height.
+
+The overview reads provider observables without opening an agent runtime, fetching changes, or changing read state. A file count of zero appears only after an enabled default changeset has a usable file list; its label states the count's scope. Unknown counts are omitted. Completed remains a chat status and is not a verification claim. Hidden internal chats do not appear, and attention rows exclude archived and hidden chats without reintroducing those known alerts as aggregate fallback rows. Aggregate alerts whose matching metadata has not arrived retain a session-level row.
+
+The panel has keyboard navigation, an accessibility help dialog, a plain-text accessible view, and `accessibility.verbosity.sessionOverview`. Accessibility commands obtain content from the visible view rather than requesting a chat host from root services. Focus state stays scoped to the view, and closing accessible content restores the original control or the open overview if that control has disappeared. Stable DOM controls retain keyboard focus while provider data updates.
 
 ## Verification
 

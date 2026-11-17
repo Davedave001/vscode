@@ -1,0 +1,46 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench .session-overview {
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size120);
+	padding: var(--vscode-spacing-size160);
+	min-width: 0;
+	overflow: auto;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .session-overview p,
+.monaco-workbench .session-overview h2 {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+.monaco-workbench .session-overview-title {
+	font-size: var(--vscode-fontSize-heading3);
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.monaco-workbench .session-overview-context {
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .session-overview-status {
+	font-weight: var(--vscode-fontWeight-semiBold);
+}
+
+.monaco-workbench .session-overview-facts,
+.monaco-workbench .session-overview-actions {
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size80);
+}
+
+.monaco-workbench .session-overview:focus-visible {
+	outline: var(--vscode-strokeThickness) solid var(--vscode-focusBorder);
+	outline-offset: calc(-1 * var(--vscode-strokeThickness));
+}

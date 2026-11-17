@@ -1,6 +1,16 @@
-# First agent workspace increment: validation
+# Agent workspace validation
 
 Base: upstream `598b0f1b4e1`. Development branch: `feat/agent-workspace`.
+
+## Session Overview
+
+`Sessions: Session Overview` opens a native auxiliary view for the main Agents window on desktop layouts. It reads that window's injected session host and uses view-scoped context keys. The overview reports the selected chat's provider state and exposes native chat navigation, Session Tools, and Attention Queue shortcuts. Opening it does not start a runtime or update chat read state. The attention classifier now excludes known archived/internal chat alerts without recreating them as aggregate fallback rows.
+
+The 115 focused browser tests passed for `sessionOverview`, `sessionAttentionQueue`, `sessionWorkspaceActions`, `sessionsPicker`, and `sessionsChatAccessibilityHelp`. The new overview checks cover loading and unknown file lists, zero and singular file counts, blank changeset labels, provider updates with focused controls, plain-text markup handling, absent chat workspace, hidden chats, draft navigation, native command arguments, accessibility content, exact focus restoration and fallback, root-scope accessibility access, verbosity, view registration, and desktop/auxiliary/phone visibility. The tests use controlled models and navigation services, so they do not prove a hosted provider run.
+
+Twelve component fixtures rendered the actual `SessionOverviewView` and `ViewPane` in light, dark, both high-contrast themes, working/completed states, an empty host, and a narrow panel. The screenshot manifest reported twelve fixtures and zero rendering errors. Each fixture focuses the real panel and verifies that its focus context is available in the view scope without leaking to root services. The waiting, narrow, empty, and high-contrast captures were visually inspected. The verified captures are preserved at `.build/session-overview-render/sessions/sessionOverview/sessionOverview/`, with `.build/session-overview-render/manifest.json` as the render manifest. These are headless component renders, not screenshots of the running native editor. The renderer uses a repository-local Playwright browser under `.build/component-browsers`.
+
+The client compilation, source type check, targeted lint, CSS lint, and both module-layer checks passed. SWE-2 reviewed the supplied source through the official Devin CLI; its file-count and label findings were fixed and tested. The Signal-C development window was not restarted, and no installed editor profile was changed. To try the current source in that isolated window, reload it and run **Sessions: Session Overview** from the Command Palette, then use Tab and Shift+Tab through its controls and open Accessibility Help or Open Accessible View.
 
 ## Session Tools origin-context update
 
