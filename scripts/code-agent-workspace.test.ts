@@ -28,6 +28,36 @@ test('isolates editor IPC and agent homes without mutating the launching environ
 	assert.strictEqual(launch.environment.claude_config_dir, undefined);
 });
 
+test('makes the installed official Claude CLI a fallback without replacing PATH or copying credentials', { skip: process.platform !== 'win32' }, () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'signal-c-claude-cli-'));
+	const sdk = path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+	const nativeName = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`;
+	const native = path.join(root, 'node_modules', ...nativeName.split('/'));
+	assert.strictEqual(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+	try {
+		fs.mkdirSync(sdk, { recursive: true });
+		fs.mkdirSync(native, { recursive: true });
+		fs.writeFileSync(path.join(root, 'package.json'), '{}');
+		fs.writeFileSync(path.join(sdk, 'package.json'), JSON.stringify({ name: '@anthropic-ai/claude-agent-sdk', main: 'sdk.mjs', optionalDependencies: { [nativeName]: 'test' } }));
+		fs.writeFileSync(path.join(sdk, 'sdk.mjs'), '');
+		fs.writeFileSync(path.join(native, 'package.json'), JSON.stringify({ name: nativeName }));
+		fs.writeFileSync(path.join(native, 'claude.exe'), '');
+		const inherited = { Path: 'existing-client-directory', CLAUDE_CONFIG_DIR: 'another-client-home' };
+		const launch = createLaunchOptions(root, root, false, inherited);
+		assert.strictEqual(launch.environment.Path, `existing-client-directory${path.delimiter}${native}`);
+		assert.strictEqual(launch.environment.PATH, undefined);
+		assert.strictEqual(launch.environment.CLAUDE_CONFIG_DIR, path.join(root, '.build', 'agent-workspace-claude'));
+		assert.deepStrictEqual(inherited, { Path: 'existing-client-directory', CLAUDE_CONFIG_DIR: 'another-client-home' });
+		const alreadyAvailable = createLaunchOptions(root, root, false, { Path: native });
+		assert.strictEqual(alreadyAvailable.environment.Path, native);
+		fs.unlinkSync(path.join(native, 'claude.exe'));
+		assert.strictEqual(createLaunchOptions(root, root, false, inherited).environment.Path, inherited.Path);
+	} finally {
+		assert.strictEqual(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test('keeps workspace arguments separate from the three isolated editor storage paths in both modes', () => {
 	const root = path.resolve('fork with spaces');
 	const workspace = path.resolve('project with spaces');

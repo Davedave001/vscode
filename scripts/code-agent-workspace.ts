@@ -6,8 +6,24 @@
 const fs = require('fs') as typeof import('fs');
 const path = require('path') as typeof import('path');
 const { spawn } = require('child_process') as typeof import('child_process');
+const { createRequire } = require('node:module') as typeof import('node:module');
 const minimist = require('minimist') as typeof import('minimist');
 const product = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'product.json'), 'utf8')) as { nameShort: string };
+
+/** Use the installed, unmodified official CLI as a development fallback without installing or copying it. */
+function bundledClaudeDirectory(repoRoot: string): string | undefined {
+	if (process.platform !== 'win32' || !fs.existsSync(path.join(repoRoot, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'))) { return undefined; }
+	try {
+		const fromRepo = createRequire(path.join(repoRoot, 'package.json'));
+		const sdkEntry = fromRepo.resolve('@anthropic-ai/claude-agent-sdk');
+		const nativePackage = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`;
+		const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(sdkEntry), 'package.json'), 'utf8')) as { optionalDependencies?: Record<string, string> };
+		if (!manifest.optionalDependencies?.[nativePackage]) { return undefined; }
+		const nativeManifest = createRequire(sdkEntry).resolve(`${nativePackage}/package.json`);
+		const directory = path.dirname(nativeManifest);
+		return fs.existsSync(path.join(directory, 'claude.exe')) ? directory : undefined;
+	} catch { return undefined; }
+}
 
 function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv) {
 	const buildRoot = path.join(repoRoot, '.build');
@@ -29,6 +45,15 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 		CODEX_HOME: codexHome,
 		CLAUDE_CONFIG_DIR: claudeHome,
 	});
+	const claudeDirectory = bundledClaudeDirectory(repoRoot);
+	if (claudeDirectory) {
+		const pathKey = Object.keys(environment).find(key => key.toLowerCase() === 'path') ?? 'PATH';
+		const currentPath = environment[pathKey] ?? '';
+		if (!currentPath.split(path.delimiter).some(entry => entry.toLowerCase() === claudeDirectory.toLowerCase())) {
+			// Append so a separately installed CLI and explicit executable settings keep precedence.
+			environment[pathKey] = currentPath ? `${currentPath}${path.delimiter}${claudeDirectory}` : claudeDirectory;
+		}
+	}
 	return {
 		// Existing development runtimes remain usable until native assets are rebuilt.
 		executable: fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,

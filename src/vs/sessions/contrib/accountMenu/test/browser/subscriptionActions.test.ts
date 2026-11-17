@@ -5,28 +5,166 @@
 
 import assert from 'assert';
 import sinon from 'sinon';
+import { Emitter, Event } from '../../../../../base/common/event.js';
 import { constObservable } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { AgentHostCodexAgentEnabledSettingId } from '../../../../../platform/agentHost/common/agentService.js';
+import { AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
+import { RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
-import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { INotificationHandle, INotificationService, IPromptChoice } from '../../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
-import { TerminalLocation } from '../../../../../platform/terminal/common/terminal.js';
+import { ITerminalLaunchError, TerminalLocation } from '../../../../../platform/terminal/common/terminal.js';
 import { IWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { ITerminalInstance, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService } from '../../../../../workbench/services/agentHost/browser/codexAccountService.js';
+import { IAgentSdkSetupService } from '../../../../../workbench/services/agentHost/browser/agentSdkSetupService.js';
+import { IWorkbenchEnvironmentService } from '../../../../../workbench/services/environment/common/environmentService.js';
 import { DevinSubscriptionStatus, IDevinSubscriptionConnection } from '../../browser/devinSubscriptionConnection.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { IChat, ISessionWorkspace } from '../../../../../workbench/services/sessions/common/session.js';
 import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
-import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, openSubscriptionClient } from '../../browser/subscriptionActions.js';
+import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, enableClaudeAgent, openSubscriptionClient } from '../../browser/subscriptionActions.js';
 
 suite('Agent Subscriptions', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	function nativeClaudeFixture(state: 'registered' | 'missing' | 'failed' = 'registered', remoteAuthority?: string) {
+		const instantiation = store.add(new TestInstantiationService());
+		const values = new TestConfigurationService({ [AgentHostClaudeAgentEnabledSettingId]: false });
+		const configuration: IConfigurationService = values;
+		const updates = sinon.stub(configuration, 'updateValue').callsFake(async (key, value) => { await values.setUserConfiguration(key, value); });
+		const reloads: string[] = [];
+		const notices: string[] = [];
+		let restartChoice: IPromptChoice | undefined;
+		let restarts = 0;
+		instantiation.stub(IConfigurationService, configuration);
+		instantiation.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority }));
+		instantiation.stub(IAgentSdkSetupService, upcastPartial<IAgentSdkSetupService>({ setups: state === 'registered' ? [{ agent: 'claude', download: 'ready' }] : [], requestReload: agent => { reloads.push(agent); } }));
+		instantiation.stub(IAgentHostService, upcastPartial<IAgentHostService>({
+			rootState: upcastPartial<IAgentHostService['rootState']>({ value: state === 'failed' ? new Error('Unavailable') : upcastPartial<RootState>({ agents: state === 'registered' ? [{ provider: 'claude', displayName: 'Claude', description: 'Test', models: [] }] : [] }) }),
+			restartAgentHost: async () => { restarts++; },
+		}));
+		instantiation.stub(INotificationService, upcastPartial<INotificationService>({
+			info: message => { notices.push(String(message)); },
+			prompt: (_severity, message, choices) => { notices.push(String(message)); restartChoice = choices[0]; return upcastPartial<INotificationHandle>({}); },
+		}));
+		return { instantiation, configuration, values, updates, reloads, notices, get restarts() { return restarts; }, get restartChoice() { return restartChoice; } };
+	}
+
+	test('enables an already registered native Claude provider and requests account/model refresh without restarting', async () => {
+		const f = nativeClaudeFixture();
+		await f.instantiation.invokeFunction(enableClaudeAgent);
+		assert.deepStrictEqual(f.updates.firstCall.args, [AgentHostClaudeAgentEnabledSettingId, true, ConfigurationTarget.USER]);
+		assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts, restartOffered: !!f.restartChoice }, { reloads: ['claude'], restarts: 0, restartOffered: false });
+		assert.match(f.notices[0], /being checked/);
+		assert.ok(!f.notices[0].includes('models ready'));
+	});
+
+	for (const state of ['missing', 'failed'] as const) {
+		test(`offers an explicit restart for a ${state} native Claude provider without interrupting running turns automatically`, async () => {
+			const f = nativeClaudeFixture(state);
+			await f.instantiation.invokeFunction(enableClaudeAgent);
+			assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts, enabled: f.configuration.getValue(AgentHostClaudeAgentEnabledSettingId) }, { reloads: [], restarts: 0, enabled: true });
+			assert.ok(f.restartChoice);
+			assert.match(f.notices[0], /running agent turns will be interrupted/);
+			await f.restartChoice.run();
+			assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts }, { reloads: [], restarts: 1 });
+		});
+	}
+
+	test('does not enable native Claude when policy disables it or the window belongs to a remote host', async () => {
+		for (const policyDisabled of [true, false]) {
+			const f = nativeClaudeFixture('registered', policyDisabled ? undefined : 'ssh-remote+example');
+			if (policyDisabled) { sinon.stub(f.configuration, 'inspect').returns({ policyValue: false }); }
+			await f.instantiation.invokeFunction(enableClaudeAgent);
+			assert.deepStrictEqual({ updates: f.updates.callCount, reloads: f.reloads, restarts: f.restarts, restartOffered: !!f.restartChoice }, { updates: 0, reloads: [], restarts: 0, restartOffered: false });
+		}
+	});
+
+	test('does not run a stale restart choice after Claude is disabled again', async () => {
+		const f = nativeClaudeFixture('missing');
+		await f.instantiation.invokeFunction(enableClaudeAgent);
+		await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, false);
+		assert.ok(f.restartChoice);
+		await f.restartChoice.run();
+		assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts }, { reloads: [], restarts: 0 });
+	});
+
+	for (const managed of [false, true]) {
+		test(`reuses enabled Claude preferences without writing a redundant user override (managed=${managed})`, async () => {
+			const f = nativeClaudeFixture();
+			await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, true);
+			if (managed) { sinon.stub(f.configuration, 'inspect').returns({ policyValue: true }); }
+			await f.instantiation.invokeFunction(enableClaudeAgent);
+			assert.deepStrictEqual({ updates: f.updates.callCount, reloads: f.reloads, restarts: f.restarts }, { updates: 0, reloads: ['claude'], restarts: 0 });
+		});
+	}
+
+	for (const policyChanged of [false, true]) {
+		test(`does not refresh or offer restart when enablement changes while settings are being saved (policy=${policyChanged})`, async () => {
+			const f = nativeClaudeFixture('missing');
+			f.updates.callsFake(async () => {
+				if (policyChanged) { sinon.stub(f.configuration, 'inspect').returns({ policyValue: false }); }
+				else { await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, false); }
+			});
+			await f.instantiation.invokeFunction(enableClaudeAgent);
+			assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts, restartOffered: !!f.restartChoice }, { reloads: [], restarts: 0, restartOffered: false });
+			assert.match(f.notices[0], /current settings/);
+		});
+	}
+
+	test('does not refresh Claude or offer restart after a failed preference write', async () => {
+		const f = nativeClaudeFixture('missing');
+		f.updates.rejects(new Error('Preference write failed'));
+		await assert.rejects(f.instantiation.invokeFunction(enableClaudeAgent), /Preference write failed/);
+		assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts, restartOffered: !!f.restartChoice }, { reloads: [], restarts: 0, restartOffered: false });
+	});
+
+	test('offers the native Claude action alongside official CLI sign-in and opening', async () => {
+		const f = nativeClaudeFixture();
+		const quickInput = new TestQuickInputService();
+		const picker = sinon.stub(quickInput, 'pick');
+		picker.onFirstCall().resolves({ id: 'claude', label: 'Anthropic' });
+		picker.onSecondCall().resolves({ id: 'native', label: 'Use in Agent Workspace' });
+		f.instantiation.stub(IQuickInputService, quickInput);
+		f.instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+		f.instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable({ kind: 'signedOut' }) }));
+		try {
+			await f.instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+			const items = picker.secondCall.args[0];
+			assert.ok(Array.isArray(items));
+			assert.deepStrictEqual(items.map(item => item.type === 'separator' ? 'separator' : item.label), ['Use in Agent Workspace', 'Open Claude Code', 'Sign in']);
+			assert.deepStrictEqual(f.reloads, ['claude']);
+		} finally { picker.restore(); }
+	});
+
+	for (const outcome of ['success', 'failure', 'unknownExit', 'launchError', 'closed', 'alreadyExited', 'alreadyDisposed', 'notRegistered', 'disabledDuringLogin', 'policyDuringLogin'] as const) {
+		test(`refreshes Claude models only after a successful official sign-in (${outcome})`, async () => {
+			const f = nativeClaudeFixture(outcome === 'notRegistered' ? 'missing' : 'registered');
+			await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, true);
+			const exited = store.add(new Emitter<number | ITerminalLaunchError | undefined>());
+			const disposed = store.add(new Emitter<ITerminalInstance>());
+			const terminal = upcastPartial<ITerminalInstance>({ onExit: exited.event, onDisposed: disposed.event, isDisposed: outcome === 'alreadyDisposed', exitCode: outcome === 'alreadyExited' ? 0 : undefined });
+			const cwd = URI.file('/workspace/login');
+			const host = upcastPartial<ISessionHost>({ session: constObservable(undefined), chat: constObservable(upcastPartial<IChat>({ workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [upcastPartial<ISessionWorkspace['folders'][number]>({ workingDirectory: cwd })] })) })) });
+			f.instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
+			f.instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => host }));
+			f.instantiation.stub(ITerminalService, upcastPartial<ITerminalService>({ createTerminal: async () => terminal, setActiveInstance: () => { }, revealTerminal: async () => { } }));
+			await f.instantiation.invokeFunction(openSubscriptionClient, 'claude', true);
+			if (outcome === 'disabledDuringLogin') { await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, false); }
+			if (outcome === 'policyDuringLogin') { sinon.stub(f.configuration, 'inspect').returns({ policyValue: false }); }
+			if (outcome === 'closed') { disposed.fire(terminal); }
+			exited.fire(outcome === 'failure' ? 1 : outcome === 'unknownExit' ? undefined : outcome === 'launchError' ? upcastPartial<ITerminalLaunchError>({ message: 'Simulated launch failure' }) : 0);
+			exited.fire(0);
+			assert.deepStrictEqual(f.reloads, outcome === 'success' || outcome === 'alreadyExited' ? ['claude'] : []);
+			assert.strictEqual(f.restarts, 0);
+			assert.strictEqual(f.updates.callCount, 0);
+		});
+	}
 
 	for (const cancelled of [false, true]) {
 		test(cancelled ? 'cancels the provider picker without opening sign-in' : 'offers Devin Subscription separately from Devin CLI and starts browser authentication', async () => {
@@ -121,7 +259,8 @@ suite('Agent Subscriptions', () => {
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
 				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => host }));
 				instantiation.stub(IConfigurationService, new TestConfigurationService({ [CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING]: '/clients/Claude Code/claude.exe' }));
-				const terminal = upcastPartial<ITerminalInstance>({});
+				const terminal = upcastPartial<ITerminalInstance>({ onExit: Event.None, onDisposed: Event.None, exitCode: 1 });
+				instantiation.stub(IAgentSdkSetupService, upcastPartial<IAgentSdkSetupService>({ requestReload: () => { } }));
 				const calls: unknown[] = [];
 				instantiation.stub(ITerminalService, upcastPartial<ITerminalService>({
 					createTerminal: async options => { calls.push(options); return terminal; },
