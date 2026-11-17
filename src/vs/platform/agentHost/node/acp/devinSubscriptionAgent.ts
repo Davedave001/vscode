@@ -244,14 +244,15 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const record = this.record(chat);
 			return this.runSend(record, async () => {
 				if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
+				const folders = URI.isUri(directories) ? [directories] : directories;
+				// Reject unsupported workspace shapes before changing the chat's directory or MCP owner.
+				if (folders && folders.length > 1) { throw new Error(localize('devin.singleWorkspaceRequired', "Devin Subscription requires one local workspace folder.")); }
 				const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
 				if (operation) { this.setRecordContext(record, resolveAgentChatContext(operation, chat)); }
 				record.preparing = true;
 				record.aborting = false;
 				try {
-					const folders = URI.isUri(directories) ? [directories] : directories;
 					if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
-					if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
 					if (record.aborting) { throw new CancellationError(); }
 					await this.ensureSession(record);
 					if (record.aborting) { throw new CancellationError(); }

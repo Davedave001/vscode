@@ -76,6 +76,36 @@ suite('Devin Subscription Agent', () => {
 		return { type: CustomizationType.Plugin, id: name, name, uri: `client-files://window/${name}`, nonce, childEnablement: { tools: [{ kind: CustomizationEnablementKind.Global, enabled: true }] } };
 	}
 
+	for (const materialized of [false, true]) {
+		test(`a rejected multi-folder send preserves the ${materialized ? 'running' : 'provisional'} workspace and MCP owner`, async () => {
+			const reads: { owner: string; cwd: string | undefined }[] = [];
+			const f = fixture(catalog, { onDidChange: Event.None, getServers: async (resource, _clients, directory) => {
+				reads.push({ owner: resource.toString(), cwd: directory?.toString() });
+				return [{ name: resource.toString() === owner.toString() ? 'original-tools' : 'other-tools', command: 'test-mcp', args: [], env: [] }];
+			} });
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			if (materialized) { await f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-valid'); }
+			reads.length = 0;
+			const otherDirectory = URI.file('/another project');
+			const rejectedDirectories = materialized ? [cwd, otherDirectory] : [otherDirectory, cwd];
+			const otherContext = resolveAgentChatContext(URI.parse('agent-host-devin-subscription:/other-session'), chat);
+			await assert.rejects(f.agent.chats.sendMessage(chat, 'invalid', rejectedDirectories, undefined, 'invalid-folders', undefined, otherContext), /requires one local workspace folder/);
+			const afterRejection = {
+				folders: (await f.agent.getChatMetadata(chat, owner))?.workingDirectories?.map(folder => folder.toString()),
+				launches: f.launches.length,
+				reads: [...reads],
+			};
+			await f.agent.chats.sendMessage(chat, 'retry', undefined, undefined, 'valid-retry');
+			assert.deepStrictEqual({ afterRejection, reads, launches: f.launches.length, prompts: f.transports.flatMap(transport => transport.sent.filter(request => request.method === 'session/prompt')).length }, {
+				afterRejection: { folders: [cwd.toString()], launches: materialized ? 1 : 0, reads: [] },
+				reads: reads.map(() => ({ owner: owner.toString(), cwd: cwd.toString() })),
+				launches: 1,
+				prompts: materialized ? 2 : 1,
+			});
+		});
+	}
+
 	test('keeps an active client handle and forwards its immutable customization snapshot on the first send', async () => {
 		const seen: string[] = [];
 		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (resource, clients = [], workingDirectory) => {
