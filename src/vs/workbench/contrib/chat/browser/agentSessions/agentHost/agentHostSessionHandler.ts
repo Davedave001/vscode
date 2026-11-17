@@ -1113,6 +1113,8 @@ export interface IAgentHostSessionHandlerConfig {
 	readonly resolveWorkingDirectory?: (sessionResource: URI) => RequestedWorkingDirectory;
 	/** Prepares a new session's directory before resolving its customization scope and creating it. */
 	readonly prepareSession?: (sessionResource: URI, token: CancellationToken) => Promise<void>;
+	/** Wraps the shared customization scope with resources owned by this exact chat. */
+	readonly createSessionCustomizationScope?: (sessionResource: URI, roots: readonly URI[] | undefined, scope: IAgentCustomizationScope) => IAgentCustomizationScope;
 	/** Whether a final-looking chat resource is still a client-side draft. */
 	readonly isNewSession?: (sessionResource: URI) => boolean;
 	/**
@@ -2919,7 +2921,9 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			return existing;
 		}
 
-		const scope = this._activeClientService.acquireScope(this._config.sessionType, this._resolveCustomizationScopeRoots(sessionResource));
+		const roots = this._resolveCustomizationScopeRoots(sessionResource);
+		const sharedScope = this._activeClientService.acquireScope(this._config.sessionType, roots);
+		const scope = this._config.createSessionCustomizationScope?.(sessionResource, roots, sharedScope) ?? sharedScope;
 		const entry = new ActiveClientEntry(
 			scope,
 			this._activeClientService.acquireSessionTools(sessionResource),

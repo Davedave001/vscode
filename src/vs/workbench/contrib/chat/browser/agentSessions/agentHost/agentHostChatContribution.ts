@@ -39,7 +39,8 @@ import { ILanguageModelsService } from '../../../common/languageModels.js';
 import { languageModelSourcePresentationRegistry } from '../../../common/languageModelSourcePresentation.js';
 import { Target } from '../../../common/promptSyntax/promptTypes.js';
 import { AgentCustomizationItemProvider } from './agentCustomizationItemProvider.js';
-import { agentHostProviderHasBuiltInGitHubMcpServer, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID } from './agentHostMcpServerSupport.js';
+import { agentHostProviderHasBuiltInGitHubMcpServer, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID, usesAgentHostMcpGateway } from './agentHostMcpServerSupport.js';
+import { AgentHostMcpGatewayCustomizationScope } from './agentHostMcpGatewayCustomizationScope.js';
 import { createCustomizationMcpServerCompatibilityScope } from './agentHostMcpServerSupportScope.js';
 import { AgentHostMcpServerMigrationProvider } from './agentHostMcpServerMigrationProvider.js';
 import { AgentHostCustomizationMarketplaceInstallProvider } from './agentHostCustomizationMarketplaceInstallProvider.js';
@@ -436,6 +437,9 @@ export class AgentHostContribution extends Disposable implements IWorkbenchContr
 			description: agent.description,
 			connection: this._agentHostService,
 			connectionAuthority: this._connectionAuthority,
+			createSessionCustomizationScope: this._isLocalAgentHost && !isWeb && usesAgentHostMcpGateway(sessionType)
+				? (resource, roots, scope) => this._instantiationService.createInstance(AgentHostMcpGatewayCustomizationScope, scope, resource, roots)
+				: undefined,
 			mirrorsPermissionGrants: this._isLocalAgentHost,
 			supportsCanvasPresentation: !isWeb && agent.provider === 'copilotcli' ? this._canvasPresentationAvailable : undefined,
 			supportsManagedPluginRetry: this._isLocalAgentHost && agent.provider === 'copilotcli' && !!this._agentHostService.retryManagedPlugins,

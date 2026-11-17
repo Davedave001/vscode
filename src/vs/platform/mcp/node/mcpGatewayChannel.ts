@@ -57,17 +57,22 @@ export class McpGatewayChannel<TContext> extends Disposable implements IServerCh
 
 		switch (command) {
 			case 'createGateway': {
-				const { chatSessionResource } = (args as { chatSessionResource?: string } | undefined) ?? {};
+				const { chatSessionResource, serverIds } = (args as { chatSessionResource?: string; serverIds?: readonly string[] } | undefined) ?? {};
+				if (serverIds !== undefined && (!Array.isArray(serverIds) || !serverIds.every(id => typeof id === 'string'))) {
+					throw new Error('Invalid MCP gateway server selection');
+				}
+				const allowed = serverIds === undefined ? undefined : new Set(serverIds);
+				const selectServers = (servers: readonly IMcpGatewayServerDescriptor[]) => allowed ? servers.filter(server => allowed.has(server.id)) : servers;
 				const brokerChannel = ipcChannelForContext(this._ipcServer, ctx);
 
 				// Fetch initial server list before creating the gateway (IPC is async, but the invoker interface is sync)
-				let currentServers = await brokerChannel.call<readonly IMcpGatewayServerDescriptor[]>('listServers');
+				let currentServers = selectServers(await brokerChannel.call<readonly IMcpGatewayServerDescriptor[]>('listServers'));
 				const onDidChangeServersListener = brokerChannel.listen<readonly IMcpGatewayServerDescriptor[]>('onDidChangeServers');
 
 				const result = await this.mcpGatewayService.createGateway(ctx, {
 					onDidChangeServers: Event.map(onDidChangeServersListener, servers => {
-						currentServers = servers;
-						return servers;
+						currentServers = selectServers(servers);
+						return currentServers;
 					}),
 					onDidChangeTools: brokerChannel.listen<void>('onDidChangeTools'),
 					onDidChangeResources: brokerChannel.listen<void>('onDidChangeResources'),

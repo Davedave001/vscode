@@ -25,7 +25,7 @@ import { SYNCED_CUSTOMIZATION_SCHEME, type ISyncableFile, type ISyncableMcpServe
 import { IFileService } from '../../../../../../platform/files/common/files.js';
 import { isDefined } from '../../../../../../base/common/types.js';
 import { PromptFileParser } from '../../../common/promptSyntax/promptFileParser.js';
-import { AgentHostMcpServerDelivery, resolveMcpServersForAgentHostDelivery } from './agentHostMcpServerSupport.js';
+import { AgentHostMcpServerDelivery, resolveMcpServersForAgentHostDelivery, usesAgentHostMcpGateway } from './agentHostMcpServerSupport.js';
 
 /**
  * Prompt types that participate in auto-sync to an agent host harness.
@@ -318,6 +318,8 @@ export async function resolveLocalCustomAgents(
  * Copilot-home `mcp-config.json` (`COPILOT_HOME`, otherwise `~/.copilot`) is runtime-discovered only by the window's own Copilot host on the same machine and is never forwarded.
  */
 export async function collectNonPluginMcpServers(mcpService: IMcpService, configurationResolverService: IConfigurationResolverService, sessionType: string, workingDirectories: readonly URI[], windowRemoteAuthority: string | null): Promise<ISyncableMcpServer[]> {
+	// The per-chat gateway bundle retains editor-owned launch, auth, and sandbox handling.
+	if (usesAgentHostMcpGateway(sessionType) && windowRemoteAuthority === null) { return []; }
 	const resolved = await resolveMcpServersForAgentHostDelivery(mcpService.servers.get(), configurationResolverService, sessionType, workingDirectories, windowRemoteAuthority);
 	return resolved.flatMap(({ server, definition, delivery, projectedConfiguration }) => {
 		if (delivery !== AgentHostMcpServerDelivery.ClientForwarded || !definition || !projectedConfiguration) {

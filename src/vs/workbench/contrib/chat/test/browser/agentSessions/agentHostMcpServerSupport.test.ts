@@ -9,7 +9,7 @@ import { errorHandler, setUnexpectedErrorHandler } from '../../../../../../base/
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { autorun, ISettableObservable, observableValue, waitForState } from '../../../../../../base/common/observable.js';
 import { URI } from '../../../../../../base/common/uri.js';
-import { mock } from '../../../../../../base/test/common/mock.js';
+import { mock, upcastPartial } from '../../../../../../base/test/common/mock.js';
 import { runWithFakedTimers } from '../../../../../../base/test/common/timeTravelScheduler.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
 import { IConfigurationChangeEvent, IConfigurationService, ConfigurationTarget } from '../../../../../../platform/configuration/common/configuration.js';
@@ -20,7 +20,7 @@ import { McpServerType } from '../../../../../../platform/mcp/common/mcpPlatform
 import { McpResourceFormat } from '../../../../../../platform/mcp/common/mcpWorkspaceConfiguration.js';
 import { COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_CONFIG } from '../../../../../../platform/policy/common/copilotManagedSettings.js';
 import { StorageScope } from '../../../../../../platform/storage/common/storage.js';
-import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForCopilotAgentHost, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot, mergeInstalledMcpServersIntoAgentHostSupportAssessment, resolveMcpServersForAgentHostDelivery } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
+import { AgentHostMcpServerApplicability, AgentHostMcpServerDelivery, AgentHostMcpServerEnablementState, AgentHostMcpServerSourceKind, AgentHostMcpSupportReason, assessMcpServersForCopilotAgentHost, COPILOT_CHAT_GITHUB_MCP_COLLECTION_ID, IAgentHostInstalledMcpServer, IAgentHostMcpServerSupport, IAgentHostMcpServerSupportSnapshot, isAgentHostMcpGatewayServer, mergeInstalledMcpServersIntoAgentHostSupportAssessment, resolveMcpServersForAgentHostDelivery, usesAgentHostMcpGateway } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
 import { AgentHostMcpServerSupportScope, createCustomizationMcpServerCompatibilityScope, getMcpCompatibilityDetail, IAgentHostMcpServerSupportScope } from '../../../browser/agentSessions/agentHost/agentHostMcpServerSupportScope.js';
 import { ContributionEnablementState } from '../../../common/enablement.js';
 import { AICustomizationSources } from '../../../common/aiCustomizationWorkspaceService.js';
@@ -28,6 +28,7 @@ import { ExternalDiscoverySource } from '../../../../mcp/common/mcpConfiguration
 import { IMcpConfigPath, IMcpServer, IMcpService, IMcpWorkbenchService, IWorkbenchMcpServer, LazyCollectionState, McpCollectionDefinition, McpCollectionProvenance, McpServerDefinition, McpServerEnablementState, McpServerLaunch, McpServerTransportStdio, McpServerTransportType, McpServerTrust } from '../../../../mcp/common/mcpTypes.js';
 import { IConfigurationResolverService } from '../../../../../services/configurationResolver/common/configurationResolver.js';
 import { ConfigurationResolverExpression } from '../../../../../services/configurationResolver/common/configurationResolverExpression.js';
+import { collectNonPluginMcpServers } from '../../../browser/agentSessions/agentHost/agentHostLocalCustomizations.js';
 import { IWorkbenchLocalMcpServer } from '../../../../../services/mcp/common/mcpWorkbenchManagementService.js';
 
 class TestMcpSupportConfigurationService extends TestConfigurationService {
@@ -49,6 +50,35 @@ class TestMcpSupportConfigurationService extends TestConfigurationService {
 
 suite('agentHostMcpServerSupport', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('local Devin leaves raw MCP launch configurations to the per-chat gateway', async () => {
+		const server = makeMcpServer({ id: 'tools', collectionId: 'test', provenance: McpCollectionProvenance.UserProfile });
+		const service = upcastPartial<IMcpService>({ servers: observableValue('servers', [server]), enablementModel: upcastPartial<IMcpService['enablementModel']>({ readProfileEnabled: () => true }) });
+		const resolver = makeConfigurationResolverService();
+		assert.deepStrictEqual(await collectNonPluginMcpServers(service, resolver, 'agent-host-devin-subscription', [], null), []);
+		assert.strictEqual((await collectNonPluginMcpServers(service, resolver, 'agent-host-codex', [], null)).length, 1);
+		assert.strictEqual((await collectNonPluginMcpServers(service, resolver, 'agent-host-devin-subscription', [], 'ssh-remote+example')).length, 1);
+	});
+
+	test('selects editor gateway servers within the exact chat roots and excludes private external discovery', () => {
+		const root = URI.file('/workspace-a');
+		const cases = [
+			{ provenance: McpCollectionProvenance.UserProfile, expected: true },
+			{ provenance: McpCollectionProvenance.Extension, expected: true },
+			{ provenance: McpCollectionProvenance.WorkspaceFolderConfiguration, configTarget: ConfigurationTarget.WORKSPACE_FOLDER, collectionOrigin: URI.joinPath(root, '.vscode/mcp.json'), expected: true },
+			{ provenance: McpCollectionProvenance.WorkspaceFolderConfiguration, configTarget: ConfigurationTarget.WORKSPACE_FOLDER, collectionOrigin: URI.file('/workspace-b/.vscode/mcp.json'), expected: false },
+			{ provenance: McpCollectionProvenance.ExternalConfiguration, discoverySource: ExternalDiscoverySource.Copilot, expected: false },
+			{ provenance: McpCollectionProvenance.Plugin, expected: false },
+		];
+		for (const { expected, ...options } of cases) {
+			const server = makeMcpServer({ id: 'tools', collectionId: 'test', ...options });
+			assert.strictEqual(isAgentHostMcpGatewayServer(server, server.readDefinitions().get().collection, [root]), expected);
+		}
+		const folder = makeMcpServer({ id: 'tools', collectionId: 'test', provenance: McpCollectionProvenance.WorkspaceFolderConfiguration, configTarget: ConfigurationTarget.WORKSPACE_FOLDER, collectionOrigin: URI.joinPath(root, '.vscode/mcp.json') });
+		assert.strictEqual(isAgentHostMcpGatewayServer(folder, folder.readDefinitions().get().collection, undefined), false);
+		assert.strictEqual(isAgentHostMcpGatewayServer(folder, undefined, [root]), false);
+		assert.deepStrictEqual(['agent-host-devin-subscription', 'agent-host-devin', 'agent-host-codex', 'remote-example-devin-subscription'].map(usesAgentHostMcpGateway), [true, false, false, false]);
+	});
 
 	test('describes property removals as requiring confirmation', () => {
 		assert.deepStrictEqual({

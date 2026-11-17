@@ -188,7 +188,7 @@ import { OpenAgentHostFolderPickerAction } from '../../../browser/agentSessions/
 import { MenuId, MenuRegistry, isIMenuItem, type IMenuItem } from '../../../../../../platform/actions/common/actions.js';
 import { ChatContextKeys } from '../../../common/actions/chatContextKeys.js';
 import { CHAT_SETUP_ACTION_ID } from '../../../browser/actions/chatActions.js';
-import { IAgentHostActiveClientService } from '../../../browser/agentSessions/agentHost/agentHostActiveClientService.js';
+import { IAgentCustomizationScope, IAgentHostActiveClientService } from '../../../browser/agentSessions/agentHost/agentHostActiveClientService.js';
 import { toAgentHostClientCustomization } from '../../../common/agentHostSessionCustomizations.js';
 import { IAgentHostProtectedResourcesService } from '../../../browser/agentSessions/agentHost/agentHostProtectedResourcesService.js';
 import { IAgentHostMcpAppToolsService } from '../../../browser/agentSessions/agentHost/agentHostMcpAppToolsService.js';
@@ -1369,7 +1369,8 @@ function createSessionListStore(disposables: DisposableStore, instantiationServi
 function createAgentHostSessionHandler(
 	disposables: DisposableStore,
 	instantiationService: TestInstantiationService,
-	agentHostService: ReturnType<typeof createTestServices>['agentHostService']
+	agentHostService: ReturnType<typeof createTestServices>['agentHostService'],
+	createSessionCustomizationScope?: (resource: URI, roots: readonly URI[] | undefined, scope: IAgentCustomizationScope) => IAgentCustomizationScope,
 ): AgentHostSessionHandler {
 	return disposables.add(instantiationService.createInstance(AgentHostSessionHandler, {
 		provider: 'copilot',
@@ -1379,6 +1380,7 @@ function createAgentHostSessionHandler(
 		description: 'test',
 		connection: agentHostService,
 		connectionAuthority: 'local',
+		createSessionCustomizationScope,
 	}));
 }
 
@@ -23878,6 +23880,40 @@ suite('AgentHostChatContribution', () => {
 				agentHostService.createSessionCalls.map(call => call.activeClient?.customizations?.map(customization => customization.uri)),
 				[['file:///initial-plugin']],
 			);
+		});
+
+		test('waits for an exact-chat customization wrapper and includes its bundle in the first session creation', async () => {
+			const { instantiationService, agentHostService, chatAgentService } = createTestServices(disposables);
+			const initialResolution = new DeferredPromise<void>();
+			const resolved = observableValue('chatWrapperResolved', false);
+			const wrapped: string[] = [];
+			const bundle: ClientPluginCustomization = { type: CustomizationType.Plugin, id: 'gateway', uri: 'vscode-synced-customization:/test-gateway', name: 'Editor MCP', childEnablement: { tools: [{ kind: CustomizationEnablementKind.Global, enabled: true }] } };
+			const sessionHandler = createAgentHostSessionHandler(disposables, instantiationService, agentHostService, (resource, _roots, base) => {
+				wrapped.push(resource.toString());
+				return {
+					customizations: constObservable([bundle]), customAgents: base.customAgents, tools: base.tools, isResolved: resolved,
+					activeClient: clientId => constObservable({ clientId, tools: [], customizations: [bundle] }),
+					whenResolved: () => initialResolution.p, getSyncedUri: uri => base.getSyncedUri(uri), dispose: () => base.dispose(),
+				};
+			});
+			const sessionResource = URI.from({ scheme: 'agent-host-copilot', path: '/new-chat-wrapper' });
+			const chatSession = await sessionHandler.provideChatSessionContent(sessionResource, CancellationToken.None);
+			disposables.add(toDisposable(() => chatSession.dispose()));
+			const registered = chatAgentService.registeredAgents.get('agent-host-copilot')!;
+			const turnPromise = registered.impl.invoke(makeRequest({ sessionResource }), () => { }, [], CancellationToken.None);
+			await timeout(10);
+			assert.strictEqual(agentHostService.createSessionCalls.length, 0);
+			resolved.set(true, undefined);
+			void initialResolution.complete();
+			await timeout(10);
+			const turn = agentHostService.turnActions[0];
+			assert.ok(turn);
+			const action = turn.action as ITurnStartedAction;
+			agentHostService.fireAction({ channel: turn.channel.toString(), action: turn.action, serverSeq: 1, origin: { clientId: agentHostService.clientId, clientSeq: turn.clientSeq } });
+			agentHostService.fireAction({ channel: turn.channel.toString(), action: { type: 'chat/turnComplete', endedAt: '2025-01-01T00:00:00.000Z', session: turn.channel.toString(), turnId: action.turnId } as ChatAction, serverSeq: 2, origin: undefined });
+			await turnPromise;
+			assert.deepStrictEqual(wrapped, [sessionResource.toString()]);
+			assert.deepStrictEqual(agentHostService.createSessionCalls.map(call => call.activeClient?.customizations?.map(ref => ref.uri)), [[bundle.uri]]);
 		});
 
 		test('cancels a turn while active client scope resolution is pending', async () => {

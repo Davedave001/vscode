@@ -6,6 +6,7 @@
 import { Iterable } from '../../../../../../base/common/iterator.js';
 import { isEqual, isEqualOrParent } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
+import { DevinSubscriptionProviderId } from '../../../../../../platform/agentHost/common/devinAgentConfiguration.js';
 import { Location } from '../../../../../../editor/common/languages.js';
 import { ConfigurationTarget } from '../../../../../../platform/configuration/common/configuration.js';
 import { ExtensionIdentifier } from '../../../../../../platform/extensions/common/extensions.js';
@@ -162,6 +163,19 @@ export interface IAgentHostInstalledMcpServer {
 
 export function agentHostProviderHasBuiltInGitHubMcpServer(provider: string): boolean {
 	return AGENT_HOST_PROVIDERS_WITH_GITHUB_MCP.has(provider);
+}
+
+/** Only the local Devin provider consumes editor-owned gateway connections. */
+export function usesAgentHostMcpGateway(sessionType: string): boolean {
+	return sessionType === `${LOCAL_AGENT_HOST_SESSION_TYPE_PREFIX}${DevinSubscriptionProviderId}`;
+}
+
+/** Select explicit editor configuration and extension servers within this chat's roots. */
+export function isAgentHostMcpGatewayServer(server: IMcpServer, collection: McpCollectionDefinition | undefined, workingDirectories: readonly URI[] | undefined): boolean {
+	if (!collection) { return false; }
+	const kind = getMcpServerSourceKind(server, collection);
+	return [AgentHostMcpServerSourceKind.UserProfile, AgentHostMcpServerSourceKind.RemoteUser, AgentHostMcpServerSourceKind.VscodeWorkspaceFolder, AgentHostMcpServerSourceKind.Extension].includes(kind)
+		&& getMcpServerApplicability(collection, kind, workingDirectories) === AgentHostMcpServerApplicability.Applicable;
 }
 
 export async function assessMcpServersForCopilotAgentHost(

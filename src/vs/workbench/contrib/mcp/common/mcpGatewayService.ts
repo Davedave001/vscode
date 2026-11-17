@@ -56,8 +56,10 @@ export interface IWorkbenchMcpGatewayService {
 	 * @param chatSessionResource Optional chat session resource URI to associate with this
 	 * gateway. When provided, MCP tool calls made through this gateway will be associated
 	 * with the chat session, enabling inline elicitation UI instead of notification fallback.
+	 * @param serverIds Optional fixed selection of server identities. An empty selection exposes
+	 * no servers; omitting it preserves the gateway's existing all-enabled-servers behavior.
 	 * @returns A promise that resolves to the gateway result if successful,
 	 * or `undefined` if the requested environment is not available.
 	 */
-	createGateway(inRemote: boolean, chatSessionResource?: URI): Promise<IMcpGatewayResult | undefined>;
+	createGateway(inRemote: boolean, chatSessionResource?: URI, serverIds?: readonly string[]): Promise<IMcpGatewayResult | undefined>;
 }
