@@ -222,11 +222,15 @@ suite('Web Open in Editor', () => {
 				sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null],
 				notifications: sharesAgentHost ? [] : ['This chat can\'t be opened in the editor because it uses a different agent host on the remote machine.'],
 			});
+			const uncFolder = toAgentHostUri(URI.from({ scheme: 'file', authority: 'fileserver', path: '/share/project # 100%' }), authority);
 			sessions.length = 0; notifications.length = 0; links.length = 0;
-			const roots = [folder, toAgentHostUri(URI.file('/second project # 100%/项目'), authority)];
+			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: uncFolder, workingDirectory: uncFolder, name: 'share', description: undefined }] })) } }));
+			assert.deepStrictEqual({ path: links[0].path, sessions }, { path: `/${parsed.remoteAuthority}//fileserver/share/project # 100%`, sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null] });
+			sessions.length = 0; notifications.length = 0; links.length = 0;
+			const roots = [folder, toAgentHostUri(URI.file('/second project # 100%/项目'), authority), uncFolder];
 			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: roots.map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) } }));
 			const multiRoot = parseExternalEditorWindowLinkUri(links[0], 'vscode-test');
-			assert.deepStrictEqual({ host: multiRoot?.remoteAuthority, roots: multiRoot?.folders?.map(folder => folder.toString()), sessions }, { host: parsed.remoteAuthority, roots: ['/project', '/second project # 100%/项目'].map(path => URI.from({ scheme: 'vscode-remote', authority: parsed.remoteAuthority, path }).toString()), sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null] });
+			assert.deepStrictEqual({ host: multiRoot?.remoteAuthority, roots: multiRoot?.folders?.map(folder => folder.toString()), sessions }, { host: parsed.remoteAuthority, roots: ['/project', '/second project # 100%/项目', '//fileserver/share/project # 100%'].map(path => URI.from({ scheme: 'vscode-remote', authority: parsed.remoteAuthority, path }).toString()), sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null] });
 			for (const otherHostRoot of [URI.parse('vscode-remote://ssh-remote+other/second'), toAgentHostUri(URI.file('/second'), agentHostAuthority('ssh:other'))]) {
 				for (const roots of [[folder, otherHostRoot], [otherHostRoot, otherHostRoot.with({ path: '/third' })]]) {
 					sessions.length = 0; notifications.length = 0; links.length = 0;

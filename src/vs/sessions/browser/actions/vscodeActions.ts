@@ -125,8 +125,9 @@ export class OpenInVSCodeAction extends Action2 {
 			await openerService.open(link, { openExternal: true });
 			return;
 		}
+		const resolvedFolderUri = resolvedFolderUris[0];
 		// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens the remote folder in a new window from its wrapped host URI
-		const folderUri = rawFolderUri.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(rawFolderUri) : rawFolderUri;
+		const folderUri = resolvedFolderUri.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(resolvedFolderUri) : resolvedFolderUri;
 		notifyUnsupportedChat();
 
 		if (remoteAuthority) {

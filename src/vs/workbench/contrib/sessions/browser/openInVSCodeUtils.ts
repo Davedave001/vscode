@@ -130,7 +130,9 @@ export function resolveRemoteFolderUri(
 	}
 
 	// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens a wrapped host folder through the target window's remote authority
-	return fromAgentHostUri(folderUri).with({ authority: remoteAuthority, scheme: Schemas.vscodeRemote });
+	const original = fromAgentHostUri(folderUri);
+	// The remote authority identifies the editor connection; a file's UNC server stays in its path.
+	return original.with({ authority: remoteAuthority, scheme: Schemas.vscodeRemote, path: original.scheme === Schemas.file && original.authority ? `//${original.authority}${original.path}` : original.path });
 }
 
 /** Why the editor window cannot open a session from the connected remote agent host. */

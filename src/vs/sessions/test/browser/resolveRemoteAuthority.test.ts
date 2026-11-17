@@ -272,6 +272,14 @@ suite('resolveRemoteAuthority', () => {
 		{ type: RemoteAgentHostEntryType.WSL, address: 'wsl:Ubuntu', distro: 'Ubuntu' },
 		{ type: RemoteAgentHostEntryType.DevContainer, address: 'devcontainer:project', hostPath: '/source/project' },
 	] satisfies IRemoteAgentHostEntry['connection'][]) {
+		test(`preserves a UNC server when resolving folders through ${connection.type}`, () => {
+			const entry = { name: 'Remote host', connection };
+			const address = getEntryAddress(entry);
+			const providers = makeProvidersService(address);
+			const remoteService = makeRemoteAgentHostService([entry]);
+			const folder = toAgentHostUri(URI.from({ scheme: 'file', authority: 'fileserver', path: '/share/project # 100%' }), agentHostAuthority(address));
+			assert.deepStrictEqual(resolveRemoteFolderUri(folder, 'agenthost-test', providers, remoteService), URI.from({ scheme: 'vscode-remote', authority: resolveRemoteAuthority('agenthost-test', providers, remoteService), path: '//fileserver/share/project # 100%' }));
+		});
 		test(`does not remap another host's folder through a ${connection.type} provider`, () => {
 			const entry = { name: 'Expected host', connection };
 			const address = getEntryAddress(entry);
