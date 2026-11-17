@@ -40,7 +40,7 @@ import { IStateService } from '../../state/node/state.js';
 import { AgentsWindowOpenSource, IAgentsWindowDraft, IAddRemoveFoldersRequest, INativeOpenFileRequest, INativeWindowConfiguration, IOpenEmptyWindowOptions, IPath, IPathsToWaitFor, isFileToOpen, isFolderToOpen, isWorkspaceToOpen, IWindowFolderLocation, IWindowOpenable, IWindowSettings } from '../../window/common/window.js';
 import { CodeWindow } from './windowImpl.js';
 import { IOpenConfiguration, IOpenEmptyConfiguration, IWindowsCountChangedEvent, IWindowsMainService, OpenContext, getLastFocused } from './windows.js';
-import { findWindowOnExtensionDevelopmentPath, findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceOrFolder } from './windowsFinder.js';
+import { findWindowOnExtensionDevelopmentPath, findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, findWindowOnWorkspaceOrFolder, workspaceMatchesFolders } from './windowsFinder.js';
 import { IFolderLocationsMainService, IValidatedFolderLocation } from './folderLocationsMainService.js';
 import { IWindowState, WindowsStateHandler } from './windowsStateHandler.js';
 import { IRecent } from '../../workspaces/common/workspaces.js';
@@ -58,7 +58,6 @@ import { ILoggerMainService } from '../../log/electron-main/loggerService.js';
 import { IAuxiliaryWindowsMainService } from '../../auxiliaryWindow/electron-main/auxiliaryWindows.js';
 import { IAuxiliaryWindow } from '../../auxiliaryWindow/electron-main/auxiliaryWindow.js';
 import { ICSSDevelopmentService } from '../../cssDev/node/cssDevService.js';
-import { ResourceSet } from '../../../base/common/map.js';
 import { VSBuffer } from '../../../base/common/buffer.js';
 import { resolveAgentsWindowFolder, sendAgentsWindowOpenIntent } from './agentsWindow.js';
 
@@ -936,9 +935,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 				if (foldersToOpen.every(folderToOpen => isEqualAuthority(folderToOpen.remoteAuthority, remoteAuthority))) {
 					let workspace: IWorkspaceIdentifier | undefined;
 
-					const lastSessionWorkspaceMatchingFolders = await this.doGetWorkspaceMatchingFoldersFromLastSession(remoteAuthority, foldersToOpen);
-					if (lastSessionWorkspaceMatchingFolders) {
-						workspace = lastSessionWorkspaceMatchingFolders;
+					const workspaceMatchingFolders = await this.doGetWorkspaceMatchingFolders(remoteAuthority, foldersToOpen);
+					if (workspaceMatchingFolders) {
+						workspace = workspaceMatchingFolders;
 					} else {
 						workspace = await this.workspacesManagementMainService.createUntitledWorkspace(foldersToOpen.map(folder => ({ uri: folder.workspace.uri })));
 					}
@@ -1147,23 +1146,22 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return restoreWindows;
 	}
 
-	private async doGetWorkspaceMatchingFoldersFromLastSession(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspaceIdentifier | undefined> {
+	private async doGetWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspaceIdentifier | undefined> {
+		const match = await findWindowOnWorkspaceFolders(this.getWindows(), folders.map(folder => folder.workspace.uri), remoteAuthority, workspace => this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath));
+		// Preserve the validated identity across this await, rather than substituting a later navigation.
+		const current = match?.window.openedWorkspace;
+		if (match && this.getWindows().includes(match.window) && isWorkspaceIdentifier(current)
+			&& current.id === match.workspace.id && extUriBiasedIgnorePathCase.isEqual(current.configPath, match.workspace.configPath)
+			&& match.window.remoteAuthority === remoteAuthority && !match.window.isExtensionDevelopmentHost) {
+			return match.workspace;
+		}
+		// Preserve the previous-session fallback when no currently open workspace matches.
 		const workspaces = (await this.doGetPathsFromLastSession()).filter(path => isWorkspacePathToOpen(path));
 		const folderUris = folders.map(folder => folder.workspace.uri);
 
 		for (const { workspace } of workspaces) {
 			const resolvedWorkspace = await this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath);
-			if (
-				!resolvedWorkspace ||
-				resolvedWorkspace.remoteAuthority !== remoteAuthority ||
-				resolvedWorkspace.transient ||
-				resolvedWorkspace.folders.length !== folders.length
-			) {
-				continue;
-			}
-
-			const folderSet = new ResourceSet(folderUris, uri => extUriBiasedIgnorePathCase.getComparisonKey(uri));
-			if (resolvedWorkspace.folders.every(folder => folderSet.has(folder.uri))) {
+			if (resolvedWorkspace && workspaceMatchesFolders(resolvedWorkspace, folderUris, remoteAuthority)) {
 				return resolvedWorkspace;
 			}
 		}

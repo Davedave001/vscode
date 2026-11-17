@@ -3,10 +3,17 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { extUriBiasedIgnorePathCase } from '../../../base/common/resources.js';
+import { extUri, extUriBiasedIgnorePathCase } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
+import { ResourceSet } from '../../../base/common/map.js';
+import { Schemas } from '../../../base/common/network.js';
 import { ICodeWindow } from '../../window/electron-main/window.js';
 import { IResolvedWorkspace, ISingleFolderWorkspaceIdentifier, isSingleFolderWorkspaceIdentifier, isWorkspaceIdentifier, IWorkspaceIdentifier } from '../../workspace/common/workspace.js';
+
+interface IWorkspaceWindowMatch {
+	readonly window: ICodeWindow;
+	readonly workspace: IWorkspaceIdentifier;
+}
 
 export async function findWindowOnFile(windows: ICodeWindow[], fileUri: URI, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>): Promise<ICodeWindow | undefined> {
 
@@ -57,6 +64,39 @@ export function findWindowOnWorkspaceOrFolder(windows: ICodeWindow[], folderOrWo
 	}
 
 	return undefined;
+}
+
+/** Finds a live multi-root workspace with exactly the requested folders and remote host. */
+export async function findWindowOnWorkspaceFolders(windows: readonly ICodeWindow[], folders: readonly URI[], remoteAuthority: string | undefined, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>): Promise<IWorkspaceWindowMatch | undefined> {
+	for (const window of windows) {
+		const workspace = window.openedWorkspace;
+		if (!isWorkspaceIdentifier(workspace) || window.isExtensionDevelopmentHost || window.remoteAuthority !== remoteAuthority) {
+			continue;
+		}
+		const resolved = await localWorkspaceResolver(workspace);
+		if (!resolved || !workspaceMatchesFolders(resolved, folders, remoteAuthority)) {
+			continue;
+		}
+		// Resolving the file can outlive navigation to another workspace or remote host.
+		const current = window.openedWorkspace;
+		if (!isWorkspaceIdentifier(current) || current.id !== workspace.id || !extUriBiasedIgnorePathCase.isEqual(current.configPath, workspace.configPath) || window.remoteAuthority !== remoteAuthority || window.isExtensionDevelopmentHost) {
+			continue;
+		}
+		return { window, workspace: { id: current.id, configPath: current.configPath } };
+	}
+	return undefined;
+}
+
+/** Uses one exact folder/host comparison for live windows and previous-session fallback. */
+export function workspaceMatchesFolders(workspace: IResolvedWorkspace, folders: readonly URI[], remoteAuthority: string | undefined): boolean {
+	if (workspace.transient || workspace.remoteAuthority !== remoteAuthority || workspace.folders.length !== folders.length) {
+		return false;
+	}
+	// Only local file paths can use this machine's casing rules; remote providers may be case-sensitive.
+	const comparisonKey = (uri: URI) => (remoteAuthority === undefined && uri.scheme === Schemas.file ? extUriBiasedIgnorePathCase : extUri).getComparisonKey(uri);
+	const requested = new ResourceSet(folders, comparisonKey);
+	const resolved = new ResourceSet(workspace.folders.map(folder => folder.uri), comparisonKey);
+	return requested.size === folders.length && resolved.size === requested.size && workspace.folders.every(folder => requested.has(folder.uri));
 }
 
 /**

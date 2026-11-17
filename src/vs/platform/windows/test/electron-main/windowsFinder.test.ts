@@ -6,6 +6,8 @@
 import assert from 'assert';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Event } from '../../../../base/common/event.js';
+import { DeferredPromise } from '../../../../base/common/async.js';
+import { upcastPartial } from '../../../../base/test/common/mock.js';
 import { join } from '../../../../base/common/path.js';
 import { extUriBiasedIgnorePathCase } from '../../../../base/common/resources.js';
 import { URI, UriDto } from '../../../../base/common/uri.js';
@@ -13,7 +15,7 @@ import { ICommandAction } from '../../../action/common/action.js';
 import { NativeParsedArgs } from '../../../environment/common/argv.js';
 import { INativeWindowConfiguration } from '../../../window/common/window.js';
 import { ICodeWindow, ILoadEvent, IWindowState } from '../../../window/electron-main/window.js';
-import { findWindowOnFile, findWindowOnRequestedPath } from '../../electron-main/windowsFinder.js';
+import { findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, workspaceMatchesFolders } from '../../electron-main/windowsFinder.js';
 import { toWorkspaceFolders } from '../../../workspaces/common/workspaces.js';
 import { IWorkspaceIdentifier } from '../../../workspace/common/workspace.js';
 import { FileAccess } from '../../../../base/common/network.js';
@@ -32,7 +34,7 @@ suite('WindowsFinder', () => {
 	const testWorkspaceFolders = toWorkspaceFolders([{ path: join(fixturesFolder, 'vscode_workspace_1_folder') }, { path: join(fixturesFolder, 'vscode_workspace_2_folder') }], testWorkspace.configPath, extUriBiasedIgnorePathCase);
 	const localWorkspaceResolver = async (workspace: IWorkspaceIdentifier) => { return workspace === testWorkspace ? { id: testWorkspace.id, configPath: workspace.configPath, folders: testWorkspaceFolders } : undefined; };
 
-	function createTestCodeWindow(options: { lastFocusTime: number; openedFolderUri?: URI; openedWorkspace?: IWorkspaceIdentifier }): ICodeWindow {
+	function createTestCodeWindow(options: { lastFocusTime: number; openedFolderUri?: URI; openedWorkspace?: IWorkspaceIdentifier; remoteAuthority?: string; isExtensionDevelopmentHost?: boolean }): ICodeWindow {
 		return new class implements ICodeWindow {
 			readonly onWillLoad: Event<ILoadEvent> = Event.None;
 			onDidMaximize = Event.None;
@@ -49,9 +51,9 @@ suite('WindowsFinder', () => {
 			config: INativeWindowConfiguration | undefined;
 			openedWorkspace = options.openedFolderUri ? { id: '', uri: options.openedFolderUri } : options.openedWorkspace;
 			backupPath?: string | undefined;
-			remoteAuthority?: string | undefined;
+			remoteAuthority = options.remoteAuthority;
 			iconPath?: URI | undefined;
-			isExtensionDevelopmentHost = false;
+			isExtensionDevelopmentHost = options.isExtensionDevelopmentHost ?? false;
 			isExtensionTestHost = false;
 			lastFocusTime = options.lastFocusTime;
 			isFullScreen = false;
@@ -116,6 +118,102 @@ suite('WindowsFinder', () => {
 		const window: ICodeWindow = createTestCodeWindow({ lastFocusTime: 1, openedWorkspace: testWorkspace });
 		assert.strictEqual(await findWindowOnFile([window], URI.file(join(fixturesFolder, 'vscode_workspace_2_folder', 'nested_vscode_folder', 'subfolder', 'file.txt')), localWorkspaceResolver), window);
 	});
+
+	test('Finds an open multi-root workspace by its complete folder set in either order', async () => {
+		const workspaceWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
+		const folderUris = testWorkspaceFolders.map(folder => folder.uri);
+		const candidates = [...windows, workspaceWindow];
+		assert.deepStrictEqual([
+			await findWindowOnWorkspaceFolders(candidates, folderUris, undefined, localWorkspaceResolver),
+			await findWindowOnWorkspaceFolders(candidates, [...folderUris].reverse(), undefined, localWorkspaceResolver),
+		].map(match => match?.window), [workspaceWindow, workspaceWindow]);
+	});
+
+	test('Returns the validated workspace identity instead of rereading a later window navigation', async () => {
+		let currentWorkspace = testWorkspace;
+		const window = upcastPartial<ICodeWindow>({
+			get openedWorkspace() { return currentWorkspace; },
+			remoteAuthority: undefined, isExtensionDevelopmentHost: false,
+		});
+		const match = await findWindowOnWorkspaceFolders([window], testWorkspaceFolders.map(folder => folder.uri), undefined, localWorkspaceResolver);
+		assert.ok(match);
+		currentWorkspace = { id: 'other', configPath: URI.file('/other.code-workspace') };
+		assert.deepStrictEqual({ sameWindow: match.window === window, workspace: match.workspace }, { sameWindow: true, workspace: testWorkspace });
+	});
+
+	test('Requires an exact unique folder set before reusing an open workspace', async () => {
+		const workspaceWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
+		const folderUris = testWorkspaceFolders.map(folder => folder.uri);
+		const anotherFolder = toWorkspaceFolders([{ uri: URI.file('/another-folder').toString() }], testWorkspace.configPath, extUriBiasedIgnorePathCase)[0];
+		for (const folders of [
+			[testWorkspaceFolders[0]],
+			[...testWorkspaceFolders, anotherFolder],
+			[testWorkspaceFolders[0], testWorkspaceFolders[0]],
+			[testWorkspaceFolders[0], anotherFolder],
+		]) {
+			assert.strictEqual(await findWindowOnWorkspaceFolders([workspaceWindow], folderUris, undefined, async () => ({ ...testWorkspace, folders })), undefined);
+		}
+		assert.strictEqual(await findWindowOnWorkspaceFolders([workspaceWindow], [folderUris[0], folderUris[0]], undefined, localWorkspaceResolver), undefined);
+	});
+
+	test('Does not match identical network paths on different file servers', async () => {
+		const workspaceWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
+		const requested = [URI.parse('file://server-a/share/one'), URI.parse('file://server-a/share/two')];
+		const folders = toWorkspaceFolders([{ uri: 'file://server-b/share/one' }, { uri: 'file://server-b/share/two' }], testWorkspace.configPath, extUriBiasedIgnorePathCase);
+		assert.strictEqual(await findWindowOnWorkspaceFolders([workspaceWindow], requested, undefined, async () => ({ ...testWorkspace, folders })), undefined);
+	});
+
+	test('Preserves remote folder case rather than applying the local Windows filesystem comparison', () => {
+		const remoteAuthority = 'ssh-remote+linux';
+		const folderUris = [URI.parse('vscode-remote://ssh-remote+linux/Repo'), URI.parse('vscode-remote://ssh-remote+linux/common')];
+		const folders = toWorkspaceFolders(folderUris.map(uri => ({ uri: uri.toString() })), testWorkspace.configPath, extUriBiasedIgnorePathCase);
+		const workspace = { ...testWorkspace, folders, remoteAuthority };
+		assert.deepStrictEqual([
+			workspaceMatchesFolders(workspace, [folderUris[0].with({ path: '/repo' }), folderUris[1]], remoteAuthority),
+			workspaceMatchesFolders(workspace, folderUris, remoteAuthority),
+		], [false, true]);
+	});
+
+	test('Does not reuse missing, transient, development-host, or mismatched remote workspaces', async () => {
+		const folderUris = testWorkspaceFolders.map(folder => folder.uri);
+		const remoteAuthority = 'ssh-remote+host';
+		const workspaceWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
+		const remoteWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace, remoteAuthority });
+		const developmentWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace, isExtensionDevelopmentHost: true });
+		const resolved = { ...testWorkspace, folders: testWorkspaceFolders };
+		assert.deepStrictEqual([
+			await findWindowOnWorkspaceFolders([workspaceWindow], folderUris, undefined, async () => undefined),
+			await findWindowOnWorkspaceFolders([workspaceWindow], folderUris, undefined, async () => ({ ...resolved, transient: true })),
+			await findWindowOnWorkspaceFolders([developmentWindow], folderUris, undefined, localWorkspaceResolver),
+			await findWindowOnWorkspaceFolders([remoteWindow], folderUris, undefined, async () => resolved),
+			await findWindowOnWorkspaceFolders([workspaceWindow], folderUris, remoteAuthority, async () => ({ ...resolved, remoteAuthority })),
+			await findWindowOnWorkspaceFolders([remoteWindow], folderUris, remoteAuthority, async () => resolved),
+			await findWindowOnWorkspaceFolders([remoteWindow], folderUris, remoteAuthority, async () => ({ ...resolved, remoteAuthority })),
+		].map(match => match?.window), [undefined, undefined, undefined, undefined, undefined, undefined, remoteWindow]);
+	});
+
+	for (const change of ['workspace', 'remote', 'developmentHost'] as const) {
+		test(`Ignores a window whose ${change} changes while its workspace file is resolving`, async () => {
+			let currentWorkspace = testWorkspace;
+			let remoteAuthority: string | undefined;
+			let isExtensionDevelopmentHost = false;
+			const window = upcastPartial<ICodeWindow>({
+				get openedWorkspace() { return currentWorkspace; },
+				get remoteAuthority() { return remoteAuthority; },
+				get isExtensionDevelopmentHost() { return isExtensionDevelopmentHost; },
+			});
+			const gate = new DeferredPromise<void>();
+			const found = findWindowOnWorkspaceFolders([window], testWorkspaceFolders.map(folder => folder.uri), undefined, async () => {
+				await gate.p;
+				return { ...testWorkspace, folders: testWorkspaceFolders };
+			});
+			if (change === 'workspace') { currentWorkspace = { id: 'other', configPath: URI.file('/other.code-workspace') }; }
+			if (change === 'remote') { remoteAuthority = 'ssh-remote+other'; }
+			if (change === 'developmentHost') { isExtensionDevelopmentHost = true; }
+			await gate.complete();
+			assert.strictEqual(await found, undefined);
+		});
+	}
 
 	test('Window on the requested path, not a restored one', () => {
 		const workspaceWindow: ICodeWindow = createTestCodeWindow({ lastFocusTime: 4, openedWorkspace: testWorkspace });
