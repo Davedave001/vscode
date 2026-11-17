@@ -1,6 +1,6 @@
 # Signal-C app connections
 
-Open **Signal-C: Connect App…** from the Command Palette, or choose **Connect an App (OAuth)…** inside **MCP: Add Server…**. These entry points use the same MCP installation, destination, policy, trust and authentication services as manually configured servers. The catalog is defined in `src/vs/workbench/contrib/mcp/common/signalCAppConnections.ts`; it does not own accounts or keep a parallel connection-status database.
+Open **Customizations → MCP Servers → Connect App**, invoke **Signal-C: Connect App…** from the Command Palette, or choose **Connect an App (OAuth)…** inside **MCP: Add Server…**. The page button preserves the selected customization session or workspace, like Add Server. Use the standalone command without an explicit target for local-only apps. These entry points use the same MCP installation, destination, policy, trust and authentication services as manually configured servers. The catalog is defined in `src/vs/workbench/contrib/mcp/common/signalCAppConnections.ts`; it does not own accounts or keep a parallel connection-status database.
 
 Search by app name or description. Selecting an app opens a standard keyboard-accessible review dialog showing its setup requirements and endpoint. **Open Setup Guide** opens the provider's documentation without changing configuration. **Cancel** or Escape exits the step without installing anything. For remote servers, continue with OAuth, name the connection, then select its destination. The suggested name includes a unique suffix so repeated app setup does not default to replacing an earlier account or manual connection; you can edit the name. Authorization happens when the installed server starts, using the owning MCP client's OAuth flow. An installed entry is not proof that authorization completed or that a provider exposed tools to a model.
 
@@ -8,7 +8,7 @@ Registered-client providers such as Asana, Slack, Canva and HubSpot ask for a pu
 
 ## Available apps
 
-The initial catalog covers 22 apps. Intercom has separate US and EU endpoints; QuickBooks has a local-server connection and a separate hosted-pilot setup entry.
+The catalog covers 34 apps. Intercom has separate US and EU endpoints; QuickBooks has a local-server connection and a separate hosted-pilot setup entry.
 
 | App | Route | Provider setup guide |
 | --- | --- | --- |
@@ -34,6 +34,20 @@ The initial catalog covers 22 apps. Intercom has separate US and EU endpoints; Q
 | Airtable | Remote HTTP with OAuth | [Airtable](https://support.airtable.com/articles/9897799762-using-the-airtable-mcp-server) |
 | Miro | Remote HTTP with OAuth | [Miro](https://developers.miro.com/docs/miro-mcp-server-faq-and-troubleshooting) |
 | Webflow | Remote HTTP with OAuth and site/Designer prerequisites | [Webflow](https://developers.webflow.com/mcp/reference/getting-started) |
+| Gmail | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Drive | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Docs | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Sheets | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Slides | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Calendar | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Chat | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Contacts | Registered OAuth; People API | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Google Classroom | Registered OAuth | [Google Workspace](https://developers.google.com/workspace/guides/configure-mcp-servers) |
+| Box | Registered OAuth; administrator integration setup | [Box](https://support.box.com/hc/en-us/articles/43847256139923-Managing-Box-MCP-Servers) |
+| Dropbox | Registered OAuth; automatic registration limited to approved clients | [Dropbox](https://help.dropbox.com/integrations/connect-dropbox-mcp-server) |
+| Xero | Registered OAuth with PKCE | [Xero](https://developer.xero.com/documentation/guides/remote-mcp/overview) |
+
+For Google Workspace, enable the relevant MCP APIs in a Cloud project, configure consent, and mark the OAuth client for an AI-powered agent. Register Signal-C's redirect URLs. Chat also needs a configured Chat app; follow the Classroom test prerequisites when testing that service. Each entry points to the provider's setup guide before collecting a public client ID.
 
 ## QuickBooks local connection
 
@@ -50,6 +64,6 @@ Intuit's hosted MCP is an invitation-only pilot requiring app/IP/scope onboardin
 
 The focused MCP configuration entry-point tests cover remote installation and start routing, registered client IDs, setup-guide actions, cancellation at each step, selected agent-host ownership and policy rejection, and QuickBooks local path-only configuration, local ownership and file-picker cancellation. No test reads a real token store or authorizes a provider account.
 
-Run `node scripts/test-agent-workspace-native.mts --empty-workspace --keyboard --app-connections` on the prepared Windows development runtime after compiling the client. It uses a fresh hidden portable fixture, opens the app picker from the real Command Palette, checks QuickBooks local availability and the hosted-pilot review, cancels setup, and checks that fixture MCP configuration remains unchanged. It then verifies mode-switch keyboard dispatch, window reuse, unsaved buffers and the Agents draft. Artifacts remain under `.build/agent-workspace-native-smoke/<run>/`.
+Run `node scripts/test-agent-workspace-native.mts --empty-workspace --keyboard --app-connections` on the prepared Windows development runtime after compiling the client. It uses a fresh hidden portable fixture, opens the app picker from the real Command Palette, checks QuickBooks local availability and the hosted-pilot review, then opens the MCP Servers management page and activates Connect App from the keyboard. It reviews Google's prerequisites, reaches the public client-ID step, cancels setup, verifies focus returns to the page button, and checks that fixture MCP configuration remains unchanged. It then verifies mode-switch keyboard dispatch, window reuse, unsaved buffers and the Agents draft. Artifacts remain under `.build/agent-workspace-native-smoke/<run>/`.
 
 Public discovery checks use the actual `AgentHostMcpOAuthMetadataService` with credential-free HTTPS GET requests. Discovery of a resource/issuer chain does not establish OAuth grant completion, account entitlement, refresh behavior, or successful tool calls. These require separate provider-account validation. The local QuickBooks wizard configures an existing official installation; it does not install that server or perform its initial OAuth handshake.

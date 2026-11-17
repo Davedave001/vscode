@@ -62,6 +62,7 @@ const report = {
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
 	modelRequestCount: 0,
 	appPickerVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
+	appHeaderVerified: false, googleOAuthSetupVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
 try {
@@ -131,12 +132,14 @@ try {
 	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
 	assert.deepEqual(await launched.evaluate(({ app }) => ({ portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') })), { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
 	const capture = async (page: Page, name: string, target = launched) => {
+		const window = await target.browserWindow(page);
+		// A first capture wakes the hidden compositor, which may otherwise return its previous frame.
+		await window.evaluate(async nativeWindow => { await nativeWindow.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true }); });
 		// DOM visibility can precede the hidden window's next compositor frame.
 		await page.evaluate(async () => {
 			await document.fonts.ready;
 			await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 		});
-		const window = await target.browserWindow(page);
 		try {
 			// CDP screenshots can stall after a hidden native window becomes inactive.
 			const png = await window.evaluate(async nativeWindow => (await nativeWindow.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString('base64'));
@@ -191,6 +194,38 @@ try {
 		await capture(page, 'app-connections-quickbooks.png');
 		await page.keyboard.press('Escape');
 		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		stage = 'MCP page app connection entry point';
+		await page.getByRole('switch', { name: 'IDE mode', exact: true }).focus();
+		await page.keyboard.press('Control+Shift+P');
+		await input.fill('>Customizations');
+		await page.getByRole('option').filter({ has: page.getByText('Customizations', { exact: true }) }).first().waitFor();
+		await input.press('Enter');
+		await page.getByText('MCP Servers', { exact: true }).first().click();
+		const editor = page.locator('.ai-customization-management-editor');
+		await editor.waitFor();
+		const connectApp = editor.getByRole('button', { name: 'Connect App', exact: true });
+		await connectApp.waitFor();
+		await capture(page, 'app-connections-mcp-page.png');
+		await connectApp.focus();
+		await connectApp.press('Enter');
+		await page.getByText('Signal-C App Connections', { exact: true }).waitFor();
+		report.appHeaderVerified = true;
+		await input.fill('Gmail');
+		await page.getByRole('option').filter({ has: page.getByText('Gmail', { exact: true }) }).waitFor();
+		await input.press('Enter');
+		const googleReview = page.getByRole('dialog').filter({ hasText: 'Connect Gmail' });
+		await googleReview.waitFor();
+		assert.ok((await googleReview.innerText()).includes('Google Cloud project'));
+		assert.ok((await googleReview.innerText()).includes('AI-powered agent'));
+		await capture(page, 'app-connections-google-oauth.png');
+		await googleReview.getByRole('button', { name: 'Connect with OAuth', exact: true }).press('Enter');
+		await page.getByText('Gmail OAuth App Client ID', { exact: true }).waitFor();
+		await input.press('Escape');
+		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		assert.ok(await connectApp.evaluate(element => element.ownerDocument.activeElement === element), 'Cancelled app setup must restore focus to its MCP header button');
+		report.googleOAuthSetupVerified = true;
+		await page.keyboard.press('Control+w');
+		await editor.waitFor({ state: 'hidden' });
 		assert.deepEqual(await readConfigurations(), before, 'Cancelled app setup must not modify any fixture MCP configuration');
 		report.appSetupCancellationVerified = true;
 		await checkWindows(stage);

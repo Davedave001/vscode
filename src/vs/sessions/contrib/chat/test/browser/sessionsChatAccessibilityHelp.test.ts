@@ -112,7 +112,9 @@ suite('SessionsChatAccessibilityHelp', () => {
 			less: content.includes('Activate Less to hide them again and return focus to More.'),
 			remembered: content.includes('The section remembers which of the two you used last.'),
 			allCategories: content.includes(`To always show every category, set ${SESSIONS_SIDEBAR_CUSTOMIZATIONS_CATEGORIES_SETTING} to all.`),
-		}, { more: true, less: true, remembered: true, allCategories: true });
+			connectApp: content.includes('On the MCP Servers page, Tab to Connect App and activate it with Enter or Space.'),
+			localApp: content.includes('For local-only connections, invoke Signal-C: Connect App from the Command Palette without an explicit target.'),
+		}, { more: true, less: true, remembered: true, allCategories: true, connectApp: true, localApp: true });
 	});
 
 	for (const { aiDisabled, hidden, htmlEnabled } of [

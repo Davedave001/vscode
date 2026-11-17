@@ -276,7 +276,7 @@ function createMcpAccessTestWidget(access: McpAccessValue, policyAccess: McpAcce
 suite('mcpListWidget', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('Add Server captures the management target and preserves explicit workspace and local destinations', async () => {
+	test('Add Server and Connect App preserve the selected management owner', async () => {
 		const selected = URI.parse('agent-host-devin-subscription:/opaque-selection');
 		const remote = URI.parse('remote-example:/different-selection?revision=2');
 		const activeSessionResource = observableValue(disposables, selected);
@@ -285,7 +285,7 @@ suite('mcpListWidget', () => {
 			customizationHarnessService: { activeSessionResource },
 			commandService: { executeCommand: async (...args: unknown[]) => { calls.push(args); } },
 		};
-		const addServer = Reflect.get(McpListWidget.prototype, 'addServer') as (this: typeof host, workspaceFolder?: URI) => Promise<void>;
+		const addServer = Reflect.get(McpListWidget.prototype, 'addServer') as (this: typeof host, workspaceFolder?: URI, connectApp?: boolean) => Promise<void>;
 		await addServer.call(host);
 		activeSessionResource.set(remote, undefined);
 		await addServer.call(host);
@@ -293,11 +293,18 @@ suite('mcpListWidget', () => {
 		await addServer.call(host, folder);
 		activeSessionResource.set(URI.parse('local:/chat'), undefined);
 		await addServer.call(host);
+		await addServer.call(host, undefined, true);
+		activeSessionResource.set(selected, undefined);
+		await addServer.call(host, undefined, true);
+		await addServer.call(host, folder, true);
 		assert.deepStrictEqual(calls, [
 			[McpCommandIds.AddConfiguration, selected],
 			[McpCommandIds.AddConfiguration, remote],
 			[McpCommandIds.AddConfiguration, folder],
 			[McpCommandIds.AddConfiguration, undefined],
+			[McpCommandIds.ConnectApp, undefined],
+			[McpCommandIds.ConnectApp, selected],
+			[McpCommandIds.ConnectApp, folder],
 		]);
 	});
 

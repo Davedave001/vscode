@@ -275,6 +275,24 @@ suite('MCP configuration entry points', () => {
 		assert.notStrictEqual(fixture.installs[0].server.name, fixture.installs[1].server.name);
 	});
 
+	for (const name of ['Gmail', 'Google Drive', 'Box', 'Dropbox', 'Xero']) {
+		test(`${name} uses registered OAuth setup without storing a client secret in configuration`, async () => {
+			const fixture = setup(true);
+			fixture.quickInput.selections.push(name, 'Connect with OAuth', 'Global');
+			fixture.quickInput.inputs.push('test-public-client-id', '$suggested');
+			await new ConnectAppAction().run(fixture.instantiation);
+			assert.deepStrictEqual(fixture.errors, []);
+			assert.strictEqual(fixture.installs.length, 1);
+			const config = fixture.installs[0].server.config;
+			assert.strictEqual(config.type, McpServerType.REMOTE);
+			if (config.type === McpServerType.REMOTE) {
+				assert.deepStrictEqual(config.oauth, { clientId: 'test-public-client-id' });
+				assert.strictEqual(config.headers, undefined);
+			}
+			assert.ok(fixture.quickInput.prompts.includes(`${name} OAuth App Client ID`));
+		});
+	}
+
 	test('QuickBooks hosted pilot cannot install while its metadata is incompatible', async () => {
 		const fixture = setup(true);
 		fixture.quickInput.selections.push('QuickBooks Online (Hosted Pilot)', undefined);

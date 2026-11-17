@@ -2332,6 +2332,14 @@ export class McpListWidget extends Disposable {
 		const sectionTitle = DOM.append(titleRow, $('h2.section-title'));
 		sectionTitle.textContent = localize('mcpServers', "MCP Servers");
 		const titleActions = DOM.append(titleRow, $('.section-title-actions'));
+		const connectLabel = localize('connectApp', "Connect App");
+		const connectAppButton = this._register(new Button(titleActions, {
+			...defaultButtonStyles, small: true,
+			title: localize('connectAppTitle', "Connect an app using OAuth or a local MCP server"),
+			ariaLabel: connectLabel,
+		}));
+		connectAppButton.label = connectLabel;
+		this._register(connectAppButton.onDidClick(() => this.addServer(undefined, true)));
 		const browseLabel = localize('browseMcps', "Browse");
 		this.browseCustomizationsButton = this._register(new Button(titleActions, {
 			...defaultButtonStyles,
@@ -3293,10 +3301,10 @@ export class McpListWidget extends Disposable {
 		disposables.add(add.onDidClick(() => this.addServer(workspaceFolder)));
 	}
 
-	addServer(workspaceFolder?: URI): Promise<void> {
+	addServer(workspaceFolder?: URI, connectApp = false): Promise<void> {
 		const sessionResource = this.customizationHarnessService.activeSessionResource.get();
 		const target = workspaceFolder ?? (isAgentHostSessionResource(sessionResource) ? sessionResource : undefined);
-		return this.commandService.executeCommand(McpCommandIds.AddConfiguration, target);
+		return this.commandService.executeCommand(connectApp ? McpCommandIds.ConnectApp : McpCommandIds.AddConfiguration, target);
 	}
 
 	private updateHeaderActions(): void {
