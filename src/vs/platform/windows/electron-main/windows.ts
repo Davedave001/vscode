@@ -133,7 +133,10 @@ export interface IOpenConfiguration extends IBaseOpenConfiguration {
 	readonly chatSessionToOpen?: ChatSessionToOpen;
 }
 
-export interface IOpenEmptyConfiguration extends IBaseOpenConfiguration { }
+export interface IOpenEmptyConfiguration extends IBaseOpenConfiguration {
+	/** Whether an empty editor is the first window opened for this application launch. */
+	readonly initialStartup?: boolean;
+}
 
 export interface IDefaultBrowserWindowOptionsOverrides {
 	forceNativeTitlebar?: boolean;

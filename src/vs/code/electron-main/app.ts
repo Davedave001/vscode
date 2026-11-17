@@ -102,7 +102,9 @@ import { NativeURLService } from '../../platform/url/common/urlService.js';
 import { ElectronURLListener } from '../../platform/url/electron-main/electronUrlListener.js';
 import { IWebviewManagerService } from '../../platform/webview/common/webviewManagerService.js';
 import { WebviewMainService } from '../../platform/webview/electron-main/webviewMainService.js';
-import { AgentsWindowOpenSource, ChatSessionToOpen, extractChatSessionToOpen, isFolderToOpen, isWorkspaceToOpen, IWindowOpenable, parseExternalAgentsWindowNewSessionLinkUri } from '../../platform/window/common/window.js';
+import { AgentsWindowOpenSource, ChatSessionToOpen, EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY, extractChatSessionToOpen, IEditorWindowLink, isFolderToOpen, isWorkspaceToOpen, IWindowOpenable, parseExternalAgentsWindowNewSessionLinkUri, parseExternalEditorWindowLinkUri } from '../../platform/window/common/window.js';
+import { openEmptyWindowWithChat } from '../../platform/native/electron-main/windowChatSession.js';
+import { shouldBlockProtocolRequest } from '../../platform/url/electron-main/protocolConfirmation.js';
 import { FolderLocationsMainService, IFolderLocationsMainService } from '../../platform/windows/electron-main/folderLocationsMainService.js';
 import { getAllWindowsExcludingOffscreen, isHiddenWindowMode, IWindowsMainService, OpenContext } from '../../platform/windows/electron-main/windows.js';
 import { ICodeWindow } from '../../platform/window/electron-main/window.js';
@@ -216,11 +218,6 @@ type OSProxyConfigClassification = {
  * even if the user starts many instances (e.g. from the command line).
  */
 export class CodeApplication extends Disposable {
-
-	private static readonly SECURITY_PROTOCOL_HANDLING_CONFIRMATION_SETTING_KEY = {
-		[Schemas.file]: 'security.promptForLocalFileProtocolHandling' as const,
-		[Schemas.vscodeRemote]: 'security.promptForRemoteFileProtocolHandling' as const
-	};
 
 	private windowsMainService: IWindowsMainService | undefined;
 	private auxiliaryWindowsMainService: IAuxiliaryWindowsMainService | undefined;
@@ -981,54 +978,18 @@ export class CodeApplication extends Disposable {
 			message = localize('confirmOpenMessageFileOrFolder', "An external application wants to open '{0}' in {1}. Do you want to open this file or folder?", openableUri.scheme === Schemas.file ? getPathLabel(openableUri, { os: OS, tildify: this.environmentMainService }) : openableUri.toString(true), this.productService.nameShort);
 		}
 
-		if (openableUri.scheme !== Schemas.file && openableUri.scheme !== Schemas.vscodeRemote) {
+		return shouldBlockProtocolRequest(openableUri.scheme, message, this.configurationService, windowsMainService, dialogMainService);
+	}
 
-			// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			//
-			// NOTE: we currently only ask for confirmation for `file` and `vscode-remote`
-			// authorities here. There is an additional confirmation for `extension.id`
-			// authorities from within the window.
-			//
-			// IF YOU ARE PLANNING ON ADDING ANOTHER AUTHORITY HERE, MAKE SURE TO ALSO
-			// ADD IT TO THE CONFIRMATION CODE BELOW OR INSIDE THE WINDOW!
-			//
-			// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	private shouldBlockEditorWindowLink(link: IEditorWindowLink, windowsMainService: IWindowsMainService, dialogMainService: IDialogMainService): Promise<boolean> {
+		const message = link.remoteAuthority
+			? localize('confirmOpenRemoteEditor', "An external application wants to open an editor on '{0}' in {1}. Do you want to continue?", link.remoteAuthority, this.productService.nameShort)
+			: localize('confirmOpenLocalEditor', "An external application wants to open an editor in {0}. Do you want to continue?", this.productService.nameShort);
+		return shouldBlockProtocolRequest(link.remoteAuthority ? Schemas.vscodeRemote : Schemas.file, message, this.configurationService, windowsMainService, dialogMainService, true);
+	}
 
-			return false;
-		}
-
-		const askForConfirmation = this.configurationService.getValue<unknown>(CodeApplication.SECURITY_PROTOCOL_HANDLING_CONFIRMATION_SETTING_KEY[openableUri.scheme]);
-		if (askForConfirmation === false) {
-			return false; // not blocked via settings
-		}
-
-		const { response, checkboxChecked } = await dialogMainService.showMessageBox({
-			type: 'warning',
-			buttons: [
-				localize({ key: 'open', comment: ['&& denotes a mnemonic'] }, "&&Yes"),
-				localize({ key: 'cancel', comment: ['&& denotes a mnemonic'] }, "&&No")
-			],
-			message,
-			detail: localize('confirmOpenDetail', "If you did not initiate this request, it may represent an attempted attack on your system. Unless you took an explicit action to initiate this request, you should press 'No'"),
-			checkboxLabel: openableUri.scheme === Schemas.file ? localize('doNotAskAgainLocal', "Allow opening local paths without asking") : localize('doNotAskAgainRemote', "Allow opening remote paths without asking"),
-			cancelId: 1
-		});
-
-		if (response !== 0) {
-			return true; // blocked by user choice
-		}
-
-		if (checkboxChecked) {
-			// Due to https://github.com/microsoft/vscode/issues/195436, we can only
-			// update settings from within a window. But we do not know if a window
-			// is about to open or can already handle the request, so we have to send
-			// to any current window and any newly opening window.
-			const request = { channel: 'vscode:disablePromptForProtocolHandling', args: openableUri.scheme === Schemas.file ? 'local' : 'remote' };
-			windowsMainService.sendToFocused(request.channel, request.args);
-			windowsMainService.sendToOpeningWindow(request.channel, request.args);
-		}
-
-		return false; // not blocked by user choice
+	private openEditorWindowLink(link: IEditorWindowLink, windowsMainService: IWindowsMainService, initialStartup = false): Promise<ICodeWindow[]> {
+		return openEmptyWindowWithChat(windowsMainService, { context: OpenContext.LINK, initialStartup }, { remoteAuthority: link.remoteAuthority ?? null, reuseExistingWindow: true, chatSessionToOpen: link.chatSessionToOpen });
 	}
 
 	private getWindowOpenableFromProtocolUrl(uri: URI): IWindowOpenable | undefined {
@@ -1092,6 +1053,14 @@ export class CodeApplication extends Disposable {
 
 	private async handleProtocolUrl(windowsMainService: IWindowsMainService, dialogMainService: IDialogMainService, urlService: IURLService, uri: URI, options?: IOpenURLOptions): Promise<boolean> {
 		this.logService.trace('app#handleProtocolUrl():', uri.toString(true), options);
+
+		if (uri.scheme === this.productService.urlProtocol && uri.authority === EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY) {
+			const link = parseExternalEditorWindowLinkUri(uri, this.productService.urlProtocol);
+			if (link && !await this.shouldBlockEditorWindowLink(link, windowsMainService, dialogMainService)) {
+				await this.openEditorWindowLink(link, windowsMainService);
+			}
+			return true;
+		}
 
 		const agentSessionLink = parseExternalOpenSessionLinkUri(uri, this.productService.urlProtocol);
 		if (agentSessionLink) {
@@ -1591,6 +1560,18 @@ export class CodeApplication extends Disposable {
 					chatSessionToOpen: initialProtocolUrls.chatSessionToOpen
 					// remoteAuthority: will be determined based on openables
 				});
+			}
+
+			// A dedicated editor handoff must be consumed here so later URL listeners do not open it twice.
+			for (let index = 0; index < initialProtocolUrls.urls.length; index++) {
+				const protocolUrl = initialProtocolUrls.urls[index];
+				if (protocolUrl.uri.scheme === this.productService.urlProtocol && protocolUrl.uri.authority === EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY) {
+					initialProtocolUrls.urls.splice(index--, 1);
+					const link = parseExternalEditorWindowLinkUri(protocolUrl.uri, this.productService.urlProtocol);
+					if (link && !await this.shouldBlockEditorWindowLink(link, windowsMainService, accessor.get(IDialogMainService))) {
+						return this.openEditorWindowLink(link, windowsMainService, true);
+					}
+				}
 			}
 
 			// Protocol links with `windowId=_blank` on startup

@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
@@ -19,10 +20,12 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation'].includes(arg)), 'Use --empty-workspace or --conversation');
-const conversation = process.argv.includes('--conversation');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol'].includes(arg)), 'Use --empty-workspace, --conversation, or --protocol');
+const protocol = process.argv.includes('--protocol');
+const conversation = protocol || process.argv.includes('--conversation');
 const emptyWorkspace = conversation || process.argv.includes('--empty-workspace');
-const profile = join(run, 'profile');
+const portable = join(run, 'portable');
+const profile = join(portable, 'user-data');
 const folders = [join(run, 'one'), join(run, 'two')];
 const agentHomes = ['codex', 'claude', 'copilot', 'state'];
 for (const directory of [...folders, join(run, 'extensions'), ...agentHomes.map(name => join(run, name))]) {
@@ -46,12 +49,30 @@ let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
-	scenario: conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
+	scenario: protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
+	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
+// Reserve separate ports so the dev runtime never needs the running editor's default inspectors.
+async function allocateInspectorArgs(): Promise<string[]> {
+	const reservations: { server: ReturnType<typeof createServer>; port: number }[] = [];
+	try {
+		for (let i = 0; i < 4; i++) {
+			const server = createServer();
+			await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+			const address = server.address();
+			assert.ok(address && typeof address !== 'string');
+			reservations.push({ server, port: address.port });
+		}
+		return ['agenthost', 'ptyhost', 'sharedprocess', 'extensions'].map((name, i) => `--inspect-${name}=${reservations[i].port}`);
+	} finally {
+		await Promise.all(reservations.map(({ server }) => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))));
+	}
+}
+
 try {
 	const settings = {
 		'workbench.startupEditor': 'none', 'workbench.editor.showTabs': 'multiple',
@@ -66,6 +87,7 @@ try {
 		'agents.subscriptions.devinExecutable': join(run, 'not-installed-devin.exe'),
 		'sessions.useWorktree': false, 'files.autoSave': 'off',
 		'extensions.autoUpdate': false, 'extensions.autoCheckUpdates': false,
+		...(protocol ? { 'security.promptForLocalFileProtocolHandling': false, 'security.promptForRemoteFileProtocolHandling': false } : {}),
 	};
 	for (const file of [join(profile, 'User', 'settings.json'), join(profile, 'User', 'profiles', 'builtin', 'agents', 'settings.json')]) {
 		await mkdir(dirname(file), { recursive: true });
@@ -87,36 +109,31 @@ try {
 		}
 	}
 	Object.assign(env, {
+		// Portable mode also confines argv.json and disables OS protocol registration.
+		VSCODE_PORTABLE: portable,
 		CODEX_HOME: join(run, 'codex'), CLAUDE_CONFIG_DIR: join(run, 'claude'), COPILOT_HOME: join(run, 'copilot'), XDG_STATE_HOME: join(run, 'state'),
 		COPILOT_API_URL: mock.url, COPILOT_DEBUG_GITHUB_API_URL: mock.url,
 		GITHUB_COPILOT_API_TOKEN: 'smoketest-fake-agent-host-token', VSCODE_AGENT_HOST_CAPI_URL_OVERRIDE: mock.url,
 	});
-	// Reserve separate ports so the dev runtime does not attempt the running editor's default inspectors.
-	const reservations: { server: ReturnType<typeof createServer>; port: number }[] = [];
-	let inspectArgs: string[];
-	try {
-		for (let i = 0; i < 4; i++) {
-			const server = createServer();
-			await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-			const address = server.address();
-			assert.ok(address && typeof address !== 'string');
-			reservations.push({ server, port: address.port });
-		}
-		inspectArgs = ['agenthost', 'ptyhost', 'sharedprocess', 'extensions'].map((name, i) => `--inspect-${name}=${reservations[i].port}`);
-	} finally {
-		await Promise.all(reservations.map(({ server }) => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))));
-	}
+	const inspectArgs = await allocateInspectorArgs();
 	stage = 'launching';
 	const executable = createLaunchOptions(root, workspace, true, {}).executable;
-	app = await _electron.launch({ executablePath: executable, args: [root, ...(emptyWorkspace ? ['--agents'] : [workspace]),
-		'--hidden-window', '--extensionTestsPath', runner, '--enable-smoke-test-driver', ...inspectArgs,
+	const commonArgs = ['--hidden-window', '--extensionTestsPath', runner, '--enable-smoke-test-driver',
 		'--user-data-dir', profile, '--shared-data-dir', join(run, 'shared'), '--extensions-dir', join(run, 'extensions'),
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
-		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests'], env, timeout: 60000 });
+		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
+		...(protocol ? ['--log', 'trace'] : [])];
+	app = await _electron.launch({ executablePath: executable, args: [root, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
 	const launched = app;
-	deadline = setTimeout(() => { void launched.close(); }, 180000);
-	const capture = async (page: Page, name: string) => {
-		const window = await launched.browserWindow(page);
+	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
+	assert.deepEqual(await launched.evaluate(({ app }) => ({ portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') })), { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
+	const capture = async (page: Page, name: string, target = launched) => {
+		// DOM visibility can precede the hidden window's next compositor frame.
+		await page.evaluate(async () => {
+			await document.fonts.ready;
+			await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		});
+		const window = await target.browserWindow(page);
 		try {
 			// CDP screenshots can stall after a hidden native window becomes inactive.
 			const png = await window.evaluate(async nativeWindow => (await nativeWindow.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString('base64'));
@@ -173,7 +190,7 @@ try {
 		}
 		assert.equal((await checkWindows(stage)).length, 1);
 		stage = 'first empty IDE';
-		const [ide] = await Promise.all([
+		let [ide] = await Promise.all([
 			launched.waitForEvent('window', { timeout: 45000 }),
 			agents.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
 		]);
@@ -182,6 +199,43 @@ try {
 			await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 45000 });
 			report.conversationRestoredInIDE = true;
 			console.log('Restored the native conversation in the folderless IDE');
+		}
+		let protocolUri: string | undefined;
+		if (protocol) {
+			stage = 'warm editor protocol';
+			let chatResource: string | undefined;
+			for (const log of await readdir(join(profile, 'logs'), { withFileTypes: true })) {
+				if (!log.isDirectory()) { continue; }
+				for (const window of await readdir(join(profile, 'logs', log.name), { withFileTypes: true })) {
+					if (!window.isDirectory() || !window.name.startsWith('window')) { continue; }
+					const renderer = await readFile(join(profile, 'logs', log.name, window.name, 'renderer.log'), 'utf8').catch(() => '');
+					for (const match of renderer.matchAll(/vscode:openChatSession\s+(\S+)/g)) { chatResource = match[1]; }
+				}
+			}
+			assert.ok(chatResource, 'The first native handoff must record its conversation identity');
+			const product = JSON.parse(await readFile(join(root, 'product.json'), 'utf8')) as { urlProtocol: string };
+			const link = new URL(`${product.urlProtocol}://editor-window/open`);
+			link.searchParams.set('session', chatResource);
+			protocolUri = link.toString();
+			const closed = ide.waitForEvent('close', { timeout: 30000 });
+			const window = await launched.browserWindow(ide);
+			try { await window.evaluate(nativeWindow => nativeWindow.close()); } finally { await window.dispose(); }
+			await closed;
+			// Direct CLI delivery exercises this fixture's URL receiver without OS protocol registration.
+			// A second instance must not carry extensionTestsPath: the launcher rejects test-instance forwarding.
+			const forwardingArgs = commonArgs.filter(arg => arg !== '--extensionTestsPath' && arg !== runner);
+			[ide] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				promisify(execFile)(executable, [root, '--open-url', ...forwardingArgs, '--', protocolUri], { env, windowsHide: true, timeout: 45000 }).catch(async (error: NodeJS.ErrnoException & { signal?: string; stdout?: string; stderr?: string }) => {
+					await writeFile(join(run, 'protocol-helper-error.json'), JSON.stringify({ code: error.code, signal: error.signal, stdout: error.stdout?.replace(/https?:\/\/\S+/g, '[URL]'), stderr: error.stderr?.replace(/https?:\/\/\S+/g, '[URL]') }, null, 2));
+					throw new Error('The isolated protocol helper did not exit successfully');
+				}),
+			]);
+			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 60000 });
+			await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 60000 });
+			report.warmProtocolConversationRestored = true;
+			await capture(ide, 'protocol-warm-editor.png');
+			console.log('Restored the conversation through the running editor protocol receiver');
 		}
 		const expectedIds = await checkWindows(stage);
 		assert.equal(expectedIds.length, 2);
@@ -212,6 +266,46 @@ try {
 		await capture(agents, 'empty-agents-retained.png');
 		if (conversation) { assert.equal(mock.getRequests().length, report.modelRequestCountBeforeHandoff, 'Restoring the conversation must not send another model request'); }
 		console.log('Two folderless round trips retained the editor window, dirty buffer, and Agents draft');
+		if (protocol) {
+			stage = 'cold editor protocol';
+			assert.ok(protocolUri);
+			await launched.close();
+			app = await _electron.launch({ executablePath: executable, args: [root, '--open-url', ...commonArgs, ...await allocateInspectorArgs(), '--', protocolUri], env, timeout: 60000 });
+			const coldApp = app;
+			await coldApp.firstWindow({ timeout: 45000 });
+			let coldIDE: Page | undefined;
+			const restored = Date.now() + 60000;
+			while (!coldIDE && Date.now() < restored) {
+				for (const page of coldApp.windows()) {
+					if (await page.locator('.interactive-session').getByText(responseText, { exact: false }).last().isVisible()) { coldIDE = page; break; }
+				}
+				if (!coldIDE) { await new Promise(resolve => setTimeout(resolve, 200)); }
+			}
+			assert.ok(coldIDE, 'Cold protocol startup must restore the conversation in one editor');
+			await coldIDE.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 60000 });
+			assert.equal(await coldIDE.getByRole('switch', { name: 'IDE mode', exact: true }).getAttribute('aria-checked'), 'true');
+			await coldIDE.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 60000 });
+			const windows = await coldApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(window => ({ id: window.id, hidden: !window.isVisible(), title: window.getTitle() })));
+			report.windowChecks.push({ stage, windows });
+			assert.equal(windows.length, 2, 'Cold startup must preserve the dirty backup alongside its requested editor');
+			assert.ok(windows.every(window => window.hidden));
+			let conversationWindows = 0;
+			let recoveredBuffer = false;
+			for (const page of coldApp.windows()) {
+				if (await page.locator('.interactive-session').getByText(responseText, { exact: false }).last().isVisible()) { conversationWindows++; }
+				if (await page.getByRole('code').getByText(marker, { exact: false }).isVisible()) {
+					await page.locator('.tabs-container .tab.active.dirty').waitFor();
+					recoveredBuffer = true;
+				}
+			}
+			assert.equal(conversationWindows, 1, 'Only the selected editor receives the external conversation');
+			assert.ok(recoveredBuffer, 'Cold startup must recover the unsaved editor buffer');
+			assert.equal(mock.getRequests().length, report.modelRequestCountBeforeHandoff, 'Cold restoration must not repeat the prompt');
+			report.coldProtocolConversationRestored = true;
+			await capture(coldIDE, 'protocol-cold-editor.png', coldApp);
+			console.log('Restored the persisted conversation through cold editor protocol startup');
+		}
+
 	} else {
 		const ide = await launched.firstWindow({ timeout: 30000 });
 		stage = 'native IDE';

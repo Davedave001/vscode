@@ -207,6 +207,42 @@ export function extractChatSessionToOpen(uri: URI): { readonly uri: URI; readonl
 	return { uri: uriWithoutChatSession, chatSessionToOpen: undefined };
 }
 
+export const EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY = 'editor-window';
+
+/** A folderless editor handoff; an absent chat identity only focuses or opens the editor. */
+export interface IEditorWindowLink {
+	readonly remoteAuthority?: string;
+	readonly chatSessionToOpen?: URI;
+}
+
+export function createExternalEditorWindowLinkUri(productUrlProtocol: string, options: IEditorWindowLink = {}): URI {
+	const params = new URLSearchParams();
+	if (options.remoteAuthority) { params.set('remoteAuthority', options.remoteAuthority); }
+	if (options.chatSessionToOpen) { params.set(CHAT_SESSION_LINK_QUERY_PARAM, options.chatSessionToOpen.toString()); }
+	return URI.from({ scheme: productUrlProtocol, authority: EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY, path: '/open', query: params.toString() });
+}
+
+/** Parses only the product's dedicated handoff route, without treating a remote host as a folder. */
+export function parseExternalEditorWindowLinkUri(uri: URI | string, productUrlProtocol: string): IEditorWindowLink | undefined {
+	try {
+		const parsed = typeof uri === 'string' ? URI.parse(uri, true) : uri;
+		if (parsed.scheme !== productUrlProtocol || parsed.authority !== EXTERNAL_EDITOR_WINDOW_LINK_AUTHORITY || parsed.path !== '/open' || parsed.fragment) { return undefined; }
+		const params = new URLSearchParams(parsed.query);
+		for (const key of params.keys()) {
+			if ((key !== CHAT_SESSION_LINK_QUERY_PARAM && key !== 'remoteAuthority') || params.getAll(key).length !== 1) { return undefined; }
+		}
+		const remoteAuthority = params.get('remoteAuthority');
+		if (remoteAuthority !== null && (remoteAuthority.length > 4096 || remoteAuthority !== remoteAuthority.trim() || !/^[a-z][a-z0-9-]*\+.+$/i.test(remoteAuthority) || /[/\\\x00-\x1f\x7f]/.test(remoteAuthority))) { return undefined; }
+		const resource = params.get(CHAT_SESSION_LINK_QUERY_PARAM);
+		if (resource !== null && (!resource || resource.length > 8192)) { return undefined; }
+		const chatSessionToOpen = resource === null ? undefined : URI.parse(resource, true);
+		if (chatSessionToOpen && !chatSessionToOpen.path && !chatSessionToOpen.authority) { return undefined; }
+		return { remoteAuthority: remoteAuthority ?? undefined, chatSessionToOpen };
+	} catch {
+		return undefined;
+	}
+}
+
 export const enum AgentsWindowOpenSource {
 	CommandPalette = 'commandPalette',
 	KeyboardShortcut = 'keyboardShortcut',

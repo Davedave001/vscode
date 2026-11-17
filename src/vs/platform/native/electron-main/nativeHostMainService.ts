@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
-import { sendChatSessionToWindow } from './windowChatSession.js';
+import { openEmptyWindowWithChat, sendChatSessionToWindow } from './windowChatSession.js';
 import { exec } from 'child_process';
 import { app, BrowserWindow, clipboard, contentTracing, desktopCapturer, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, nativeImage, Notification, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, powerSaveBlocker, SaveDialogOptions, SaveDialogReturnValue, screen, shell, systemPreferences, webContents } from 'electron';
 import { arch, cpus, freemem, loadavg, platform, release, totalmem, type } from 'os';
@@ -366,11 +366,10 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 	}
 
 	private async doOpenEmptyWindow(windowId: number | undefined, options?: IOpenEmptyWindowOptions): Promise<void> {
-		const windows = await this.windowsMainService.openEmptyWindow({
+		await openEmptyWindowWithChat(this.windowsMainService, {
 			context: OpenContext.API,
 			contextWindowId: windowId
 		}, options);
-		sendChatSessionToWindow(windows, options?.chatSessionToOpen);
 	}
 
 	async openAgentsWindow(windowId: number | undefined, options?: IOpenAgentsWindowOptions): Promise<void> {

@@ -36,6 +36,7 @@ import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWIT
 import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
+import { createExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
 
 export class OpenInVSCodeAction extends Action2 {
 	static readonly ID = 'sessions.openInVSCode';
@@ -66,13 +67,7 @@ export class OpenInVSCodeAction extends Action2 {
 		const sessionsProvidersService = accessor.get(ISessionsProvidersService);
 		const remoteAgentHostService = accessor.get(IRemoteAgentHostService);
 
-		const scheme = productService.quality === 'stable'
-			? 'vscode'
-			: productService.quality === 'exploration'
-				? 'vscode-exploration'
-				: productService.quality === 'insider'
-					? 'vscode-insiders'
-					: productService.urlProtocol;
+		const scheme = productService.urlProtocol;
 
 		const params = new URLSearchParams();
 		params.set('windowId', '_blank');
@@ -80,7 +75,7 @@ export class OpenInVSCodeAction extends Action2 {
 		const target = context?.session ? context : resolveSessionCommandTarget(accessor, []);
 		const activeSession = target?.session;
 		if (!activeSession) {
-			await openerService.open(URI.from({ scheme, query: params.toString() }), { openExternal: true });
+			await openerService.open(createExternalEditorWindowLinkUri(scheme), { openExternal: true });
 			return;
 		}
 
@@ -89,13 +84,11 @@ export class OpenInVSCodeAction extends Action2 {
 		const folder = workspace?.folders[0];
 		const rawFolderUri = workspace?.isVirtualWorkspace ? undefined : folder?.workingDirectory;
 
-		if (!rawFolderUri || !resolveRemoteFolderUri(rawFolderUri, activeSession.providerId, sessionsProvidersService, remoteAgentHostService)) {
+		if (rawFolderUri && !resolveRemoteFolderUri(rawFolderUri, activeSession.providerId, sessionsProvidersService, remoteAgentHostService)) {
 			await openerService.open(URI.from({ scheme, query: params.toString() }), { openExternal: true });
 			return;
 		}
 
-		// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens the remote folder in a new window from its wrapped host URI
-		const folderUri = rawFolderUri.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(rawFolderUri) : rawFolderUri;
 		const remoteAuthority = resolveRemoteAuthority(
 			activeSession.providerId, sessionsProvidersService, remoteAgentHostService);
 
@@ -104,8 +97,15 @@ export class OpenInVSCodeAction extends Action2 {
 		if (URI.isUri(chatSession)) {
 			params.set('session', chatSession.toString());
 		} else if (chatSession) {
-			notifyEditorWindowSessionUnsupported(accessor.get(INotificationService), chatSession);
+			notifyEditorWindowSessionUnsupported(accessor.get(INotificationService), chatSession, !!rawFolderUri);
 		}
+
+		if (!rawFolderUri) {
+			await openerService.open(createExternalEditorWindowLinkUri(scheme, { remoteAuthority, chatSessionToOpen: URI.isUri(chatSession) ? chatSession : undefined }), { openExternal: true });
+			return;
+		}
+		// eslint-disable-next-line local/code-agent-host-uri-mapping -- opens the remote folder in a new window from its wrapped host URI
+		const folderUri = rawFolderUri.scheme === AGENT_HOST_SCHEME ? fromAgentHostUri(rawFolderUri) : rawFolderUri;
 
 		if (remoteAuthority) {
 			await openerService.open(URI.from({

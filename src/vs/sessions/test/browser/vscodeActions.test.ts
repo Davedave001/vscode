@@ -38,6 +38,7 @@ import { ISessionsProvidersService } from '../../../workbench/contrib/sessions/b
 import { ISessionsService } from '../../../workbench/contrib/sessions/browser/sessionsService.js';
 import { ISessionsProvider } from '../../../workbench/contrib/sessions/common/sessionsProvider.js';
 import { IChat, ISession, ISessionWorkspace, SessionStatus } from '../../../workbench/services/sessions/common/session.js';
+import { parseExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../workbench/services/sessions/browser/sessionHost.js';
 import { ITestSessionsService, ITestSessionWithChat, stubSessionHostsFromSessionsService } from '../../../workbench/contrib/sessions/test/browser/sessionHostTestUtils.js';
 
@@ -45,18 +46,18 @@ suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
 	for (const [status, parentStatus] of [[SessionStatus.Completed, SessionStatus.Completed], [SessionStatus.Untitled, SessionStatus.Untitled], [SessionStatus.Untitled, SessionStatus.Completed]]) {
-		for (const { explicit, network } of [{ explicit: false, network: false }, { explicit: true, network: false }, { explicit: false, network: true }, { explicit: true, network: true }]) {
-			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
+		for (const { explicit, network, folderless } of [{ explicit: false, network: false, folderless: false }, { explicit: true, network: false, folderless: false }, { explicit: false, network: true, folderless: false }, { explicit: true, network: true, folderless: false }, { explicit: false, network: false, folderless: true }, { explicit: true, network: false, folderless: true }]) {
+			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${folderless ? 'folderless' : network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
 				const instantiation = store.add(new TestInstantiationService());
 				const mainFolder = URI.file('/main project');
 				const folder = network
 					? URI.from({ scheme: 'file', authority: 'fileserver', path: explicit ? '/shared projects/clicked # & 100%/项目' : '/shared projects/nested # & 100%/项目' })
 					: URI.file(explicit ? '/clicked project' : '/nested project');
 				const mainChat = upcastPartial<IChat>({ resource: URI.parse('test:/main-chat'), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: mainFolder, workingDirectory: mainFolder, name: 'main', description: undefined }] })) });
-				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), status: constObservable(status), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
+				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), status: constObservable(status), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folderless ? [] : [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
 				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(parentStatus), mainChat: constObservable(mainChat) });
 				const focused = upcastPartial<ISessionHost>({ session: constObservable(session), chat: constObservable(explicit ? mainChat : chat) });
-				const opened: { authority: string; path: string; folder: string; session: string | null }[] = [];
+				const opened: { scheme: string; authority: string; path: string; folder: string | undefined; session: string | null }[] = [];
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
 				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => focused }));
 				instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
@@ -66,15 +67,17 @@ suite('Web Open in Editor', () => {
 				instantiation.stub(ISSHRemoteAgentHostService, upcastPartial<ISSHRemoteAgentHostService>({ connections: [] }));
 				instantiation.stub(ITunnelAgentHostService, upcastPartial<ITunnelAgentHostService>({ getSelectedServerType: () => undefined }));
 				instantiation.stub(ITelemetryService, NullTelemetryService);
-				instantiation.stub(IProductService, upcastPartial<IProductService>({ urlProtocol: 'vscode-test' }));
 				instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async resource => {
 					const uri = URI.parse(resource.toString());
 					// The native protocol handler reconstructs the file URI from the link's fsPath.
-					opened.push({ authority: uri.authority, path: uri.path, folder: URI.file(uri.fsPath).toString(), session: new URLSearchParams(uri.query).get('session') });
+					opened.push({ scheme: uri.scheme, authority: uri.authority, path: uri.path, folder: uri.authority === 'file' ? URI.file(uri.fsPath).toString() : undefined, session: new URLSearchParams(uri.query).get('session') });
 					return true;
 				} }));
-				await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, explicit ? { session, chat } : undefined));
-				assert.deepStrictEqual(opened, [{ authority: 'file', path: network ? `//fileserver${folder.path}` : folder.path, folder: folder.toString(), session: status === SessionStatus.Untitled ? null : chat.resource.toString() }]);
+				for (const quality of [undefined, 'stable', 'insider', 'exploration'] as const) {
+					instantiation.stub(IProductService, upcastPartial<IProductService>({ quality, urlProtocol: 'signal-c' }));
+					await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, explicit ? { session, chat } : undefined));
+				}
+				assert.deepStrictEqual(opened, Array.from({ length: 4 }, () => ({ scheme: 'signal-c', authority: folderless ? 'editor-window' : 'file', path: folderless ? '/open' : network ? `//fileserver${folder.path}` : folder.path, folder: folderless ? undefined : folder.toString(), session: status === SessionStatus.Untitled ? null : chat.resource.toString() })));
 			});
 		}
 	}
@@ -166,6 +169,7 @@ suite('Web Open in Editor', () => {
 			const session = upcastPartial<ITestSessionWithChat>({ resource, providerId: 'test', status: constObservable(SessionStatus.Completed), activeChat: constObservable(chat) });
 			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
 			const sessions: (string | null)[] = [];
+			const links: URI[] = [];
 			const notifications: string[] = [];
 			instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
 			instantiationService.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => entry }));
@@ -182,7 +186,9 @@ suite('Web Open in Editor', () => {
 			instantiationService.stub(IProductService, upcastPartial<IProductService>({ urlProtocol: 'vscode-test' }));
 			instantiationService.stub(IOpenerService, upcastPartial<IOpenerService>({
 				open: async resource => {
-					sessions.push(new URLSearchParams((typeof resource === 'string' ? URI.parse(resource) : resource).query).get('session'));
+					const link = typeof resource === 'string' ? URI.parse(resource) : resource;
+					links.push(link);
+					sessions.push(new URLSearchParams(link.query).get('session'));
 					return true;
 				},
 			}));
@@ -193,6 +199,15 @@ suite('Web Open in Editor', () => {
 			assert.deepStrictEqual({ sessions, notifications }, {
 				sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null],
 				notifications: !sharesAgentHost ? ['The session\'s folder was opened in a new editor window, but the session can\'t be opened there. This window is connected to a different agent host on the remote machine than the one its editor windows use.'] : [],
+			});
+			sessions.length = 0; notifications.length = 0; links.length = 0;
+			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(undefined) } }));
+			const parsed = parseExternalEditorWindowLinkUri(links[0], 'vscode-test');
+			assert.ok(parsed);
+			assert.strictEqual(parsed.remoteAuthority, connection.type === RemoteAgentHostEntryType.SSH ? 'ssh-remote+host' : connection.type === RemoteAgentHostEntryType.WSL ? 'wsl+Ubuntu' : 'dev-container+2f736f757263652f70726f6a656374');
+			assert.deepStrictEqual({ sessions, notifications }, {
+				sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null],
+				notifications: sharesAgentHost ? [] : ['This chat can\'t be opened in the editor because it uses a different agent host on the remote machine.'],
 			});
 		});
 	}

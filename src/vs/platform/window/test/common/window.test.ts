@@ -6,11 +6,52 @@
 import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { extractChatSessionToOpen, getMacOSWindowControlsPosition, isValidCopilotCliSessionId, parseExternalAgentsWindowNewSessionLinkUri } from '../../common/window.js';
+import { createExternalEditorWindowLinkUri, extractChatSessionToOpen, getMacOSWindowControlsPosition, isValidCopilotCliSessionId, parseExternalAgentsWindowNewSessionLinkUri, parseExternalEditorWindowLinkUri } from '../../common/window.js';
 
 suite('window', () => {
 
 	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('round-trips folderless editor links with an optional host and conversation', () => {
+		const chat = URI.from({ scheme: 'agent-host-copilotcli', path: '/session # 100%/项目', query: 'mode=1&example=2', fragment: 'chat&part=2' });
+		for (const remoteAuthority of [undefined, 'ssh-remote+host', 'tunnel+host.region', 'wsl+My Distro', 'dev-container+abcdef@wsl+Ubuntu']) {
+			for (const chatSessionToOpen of [undefined, chat]) {
+				const link = createExternalEditorWindowLinkUri('signal-c', { remoteAuthority, chatSessionToOpen });
+				assert.strictEqual(link.authority, 'editor-window');
+				assert.strictEqual(link.path, '/open');
+				const params = new URLSearchParams(link.query);
+				assert.strictEqual(params.get('remoteAuthority'), remoteAuthority ?? null);
+				assert.strictEqual(params.get('session'), chatSessionToOpen?.toString() ?? null);
+				const parsed = parseExternalEditorWindowLinkUri(link.toString(), 'signal-c');
+				assert.ok(parsed);
+				assert.deepStrictEqual({ remoteAuthority: parsed.remoteAuthority, chat: parsed.chatSessionToOpen?.toString() }, { remoteAuthority, chat: chatSessionToOpen?.toString() });
+			}
+		}
+	});
+
+	test('rejects foreign, ambiguous, malformed, and oversized editor links', () => {
+		for (const link of [
+			'vscode://editor-window/open',
+			'signal-c://other/open',
+			'signal-c://editor-window/other',
+			'signal-c://editor-window/open#fragment',
+			'signal-c://editor-window/open?session=',
+			'signal-c://editor-window/open?session=not-a-uri',
+			'signal-c://editor-window/open?session=empty%3A',
+			'signal-c://editor-window/open?session=test%3A%2Fone&session=test%3A%2Ftwo',
+			'signal-c://editor-window/open?remoteAuthority=',
+			'signal-c://editor-window/open?remoteAuthority=host',
+			'signal-c://editor-window/open?remoteAuthority=ssh-remote%2Bhost%2Fpath',
+			'signal-c://editor-window/open?remoteAuthority=ssh-remote%2Bhost%5Cpath',
+			'signal-c://editor-window/open?remoteAuthority=ssh-remote%2Bhost%0A',
+			'signal-c://editor-window/open?remoteAuthority=wsl%2BUbuntu&remoteAuthority=wsl%2BDebian',
+			'signal-c://editor-window/open?windowId=_blank',
+			`signal-c://editor-window/open?remoteAuthority=ssh-remote%2B${'x'.repeat(4097)}`,
+			`signal-c://editor-window/open?session=test%3A%2F${'x'.repeat(8193)}`,
+		]) {
+			assert.strictEqual(parseExternalEditorWindowLinkUri(link, 'signal-c'), undefined);
+		}
+	});
 
 	test('preserves legacy macOS traffic-light positioning without a fixed inset', () => {
 		assert.deepStrictEqual({
