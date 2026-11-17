@@ -198,12 +198,13 @@ function getWorkspaceHTML() {
 		.demo-label { color: #aaa; }
 	</style></head><body>
 	<header hidden><button type="button" role="switch" aria-label="IDE mode" aria-checked="true"><span>Agents</span><span class="selected">IDE</span></button><span class="demo-label">Local demo · Agents stay open while you edit</span></header>
-	<iframe id="agents" title="Agents workspace" src="/agents?skip-sessions-welcome"></iframe>
+	<iframe id="agents" title="Agents workspace"></iframe>
 	<script>
 		const agents = document.getElementById('agents');
 		const header = document.querySelector('header');
 		let ide;
 		function switchMode(mode) {
+			if (mode === 'agents' && !agents.hasAttribute('src')) { agents.src = '/agents?skip-sessions-welcome'; }
 			if (mode === 'ide' && !ide) {
 				ide = document.createElement('iframe'); ide.id = 'ide'; ide.title = 'IDE workspace'; ide.src = '/ide'; document.body.appendChild(ide);
 			}
@@ -217,7 +218,9 @@ function getWorkspaceHTML() {
 			if (event.origin !== location.origin || ![agents.contentWindow, ide?.contentWindow].includes(event.source)) { return; }
 			if (event.data?.type === 'agent-workspace.switch-mode' && ['agents', 'ide'].includes(event.data.mode)) { switchMode(event.data.mode); }
 		});
+		// A direct IDE load starts only that workbench; retain each frame after its first use.
 		if (new URLSearchParams(location.search).get('mode') === 'ide') { switchMode('ide'); }
+		else { agents.src = '/agents?skip-sessions-welcome'; }
 	</script></body></html>`;
 }
 
