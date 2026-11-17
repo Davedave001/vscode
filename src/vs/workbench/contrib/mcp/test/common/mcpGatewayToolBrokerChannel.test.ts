@@ -5,20 +5,118 @@
 
 import assert from 'assert';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { DeferredPromise } from '../../../../../base/common/async.js';
 import { observableValue } from '../../../../../base/common/observable.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { runWithFakedTimers } from '../../../../../base/test/common/timeTravelScheduler.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ContributionEnablementState } from '../../../chat/common/enablement.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { IMcpGatewayServerDescriptor } from '../../../../../platform/mcp/common/mcpGateway.js';
 import { MCP } from '../../common/modelContextProtocol.js';
 import { McpGatewayToolBrokerChannel } from '../../common/mcpGatewayToolBrokerChannel.js';
-import { IMcpIcons, IMcpServer, IMcpTool, IMcpToolCallContext, McpConnectionState, McpServerCacheState, McpToolVisibility } from '../../common/mcpTypes.js';
+import { IMcpIcons, IMcpServer, IMcpServerConnection, IMcpTool, IMcpToolCallContext, McpCapability, McpConnectionState, McpServerCacheState, McpToolVisibility } from '../../common/mcpTypes.js';
+import { McpServerRequestHandler } from '../../common/mcpServerRequestHandler.js';
 import { TestMcpService } from './testMcpService.js';
 
 suite('McpGatewayToolBrokerChannel', () => {
-	ensureNoDisposablesAreLeakedInTestSuite();
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	for (const disabled of [ContributionEnablementState.DisabledProfile, ContributionEnablementState.DisabledWorkspace]) {
+		test(`does not expose or invoke a disabled server even with cached tools (enablement=${disabled})`, async () => {
+			const mcpService = new TestMcpService();
+			const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+			let invoked = false;
+			const server = createServer('collection', 'disabled', [createTool('echo', async () => { invoked = true; return { content: [] }; })], McpServerCacheState.Cached, disabled);
+			mcpService.servers.set([server], undefined);
+			await assert.rejects(channel.call(undefined, 'callToolForServer', { serverId: 'disabled', name: 'echo', args: {} }), /Unknown server/);
+			await assert.rejects(channel.call(undefined, 'readResourceForServer', { serverId: 'disabled', uri: 'ui://probe/app' }), /Unknown server/);
+			for (const method of ['listServers', 'listToolsForServer', 'listResourcesForServer', 'listResourceTemplatesForServer']) {
+				assert.deepStrictEqual(await channel.call(undefined, method, { serverId: 'disabled' }), []);
+			}
+			assert.strictEqual(invoked, false);
+			assert.strictEqual(server.startCalls, 0);
+		});
+	}
+
+	test('does not start a disabled server for tool discovery', async () => {
+		const mcpService = new TestMcpService();
+		const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+		const server = createServer('collection', 'disabled', [], McpServerCacheState.Unknown, ContributionEnablementState.DisabledProfile);
+		mcpService.servers.set([server], undefined);
+		assert.deepStrictEqual(await channel.call(undefined, 'listToolsForServer', { serverId: 'disabled' }), []);
+		assert.strictEqual(server.startCalls, 0);
+	});
+
+	test('updates gateway descriptors when server enablement changes and allows an enabled server again', async () => {
+		const mcpService = new TestMcpService();
+		const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+		const server = createServer('collection', 'probe', [createTool('echo', async () => ({ content: [] }))]);
+		mcpService.servers.set([server], undefined);
+		const changes: (readonly IMcpGatewayServerDescriptor[])[] = [];
+		store.add(channel.listen<readonly IMcpGatewayServerDescriptor[]>(undefined, 'onDidChangeServers')(servers => changes.push(servers)));
+		server.enablementValue.set(ContributionEnablementState.DisabledWorkspace, undefined);
+		assert.deepStrictEqual(changes.at(-1), []);
+		server.enablementValue.set(ContributionEnablementState.EnabledWorkspace, undefined);
+		assert.deepStrictEqual(changes.at(-1), [{ id: 'probe', label: 'probe' }]);
+		assert.deepStrictEqual((await channel.call<readonly MCP.Tool[]>(undefined, 'listToolsForServer', { serverId: 'probe' })).map(tool => tool.name), ['echo']);
+	});
+
+	test('does not return tools when a server is disabled while discovery waits for startup', async () => {
+		const mcpService = new TestMcpService();
+		const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+		const server = createServer('collection', 'probe', [createTool('echo', async () => ({ content: [] }))], McpServerCacheState.Unknown);
+		const started = new DeferredPromise<void>();
+		const finish = new DeferredPromise<void>();
+		const originalStart = server.start;
+		Object.assign(server, { start: async () => { void started.complete(); await finish.p; return originalStart(); } });
+		mcpService.servers.set([server], undefined);
+		const listing = channel.call(undefined, 'listToolsForServer', { serverId: 'probe' });
+		await started.p;
+		server.enablementValue.set(ContributionEnablementState.DisabledProfile, undefined);
+		void finish.complete();
+		assert.deepStrictEqual(await listing, []);
+	});
+
+	test('does not return cached tools when disable lands between readiness resolution and listing', async () => {
+		const mcpService = new TestMcpService();
+		const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+		const server = createServer('collection', 'probe', [createTool('echo', async () => ({ content: [] }))]);
+		mcpService.servers.set([server], undefined);
+		const listing = channel.call(undefined, 'listToolsForServer', { serverId: 'probe' });
+		server.enablementValue.set(ContributionEnablementState.DisabledProfile, undefined);
+		assert.deepStrictEqual(await listing, []);
+	});
+
+	for (const method of ['readResourceForServer', 'listResourcesForServer', 'listResourceTemplatesForServer']) {
+		test(`does not dispatch ${method} after a server is disabled while its connection becomes ready`, async () => {
+			const mcpService = new TestMcpService();
+			const channel = store.add(new McpGatewayToolBrokerChannel(mcpService, new NullLogService()));
+			const server = createServer('collection', 'probe', []);
+			const handler = observableValue<McpServerRequestHandler | undefined>('handler', undefined);
+			const started = new DeferredPromise<void>();
+			let dispatched = 0;
+			const connection = upcastPartial<IMcpServerConnection>({ handler, state: observableValue<McpConnectionState>('state', { state: McpConnectionState.Kind.Running }) });
+			Object.assign(server, {
+				connection: observableValue('connection', connection),
+				capabilities: observableValue('capabilities', McpCapability.Resources),
+				start: async () => { void started.complete(); return { state: McpConnectionState.Kind.Running }; },
+			});
+			mcpService.servers.set([server], undefined);
+			const request = channel.call(undefined, method, { serverId: 'probe', uri: 'ui://probe/app' });
+			await started.p;
+			server.enablementValue.set(ContributionEnablementState.DisabledProfile, undefined);
+			handler.set(upcastPartial<McpServerRequestHandler>({
+				readResource: async () => { dispatched++; return { contents: [] }; },
+				listResources: async () => { dispatched++; return []; },
+				listResourceTemplates: async () => { dispatched++; return []; },
+			}), undefined);
+			if (method === 'readResourceForServer') { await assert.rejects(request, /Unknown server/); }
+			else { assert.deepStrictEqual(await request, []); }
+			assert.strictEqual(dispatched, 0);
+		});
+	}
 
 	test('lists model-visible tools for a specific server', async () => {
 		const mcpService = new TestMcpService();
@@ -359,11 +457,13 @@ function createServer(
 	definitionId: string,
 	initialTools: readonly IMcpTool[],
 	initialCacheState: McpServerCacheState = McpServerCacheState.Live,
-): IMcpServer & { toolsValue: ReturnType<typeof observableValue<readonly IMcpTool[]>>; startCalls: number } {
+	initialEnablement: ContributionEnablementState = ContributionEnablementState.EnabledProfile,
+): IMcpServer & { toolsValue: ReturnType<typeof observableValue<readonly IMcpTool[]>>; enablementValue: ReturnType<typeof observableValue<ContributionEnablementState>>; startCalls: number } {
 	const owner = {};
 	const tools = observableValue<readonly IMcpTool[]>(owner, initialTools);
 	const connectionState = observableValue<McpConnectionState>(owner, { state: McpConnectionState.Kind.Running });
 	const cacheState = observableValue<McpServerCacheState>(owner, initialCacheState);
+	const enablement = observableValue(owner, initialEnablement);
 	let startCalls = 0;
 
 	return {
@@ -371,7 +471,8 @@ function createServer(
 		definition: { id: definitionId, label: definitionId },
 		connection: observableValue(owner, undefined),
 		connectionState,
-		enablement: observableValue(owner, ContributionEnablementState.EnabledProfile),
+		enablement,
+		enablementValue: enablement,
 		serverMetadata: observableValue(owner, undefined),
 		readDefinitions: () => observableValue(owner, { server: undefined, collection: undefined }),
 		showOutput: async () => { },
