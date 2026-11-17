@@ -37,11 +37,44 @@ import { IAgentHostSessionsProvider } from '../../../workbench/contrib/sessions/
 import { ISessionsProvidersService } from '../../../workbench/contrib/sessions/browser/sessionsProvidersService.js';
 import { ISessionsService } from '../../../workbench/contrib/sessions/browser/sessionsService.js';
 import { ISessionsProvider } from '../../../workbench/contrib/sessions/common/sessionsProvider.js';
-import { IChat, ISessionWorkspace } from '../../../workbench/services/sessions/common/session.js';
+import { IChat, ISession, ISessionWorkspace, SessionStatus } from '../../../workbench/services/sessions/common/session.js';
+import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../workbench/services/sessions/browser/sessionHost.js';
 import { ITestSessionsService, ITestSessionWithChat, stubSessionHostsFromSessionsService } from '../../../workbench/contrib/sessions/test/browser/sessionHostTestUtils.js';
 
 suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	for (const status of [SessionStatus.Completed, SessionStatus.Untitled]) {
+		for (const explicit of [false, true]) {
+			test(`opens the ${explicit ? 'clicked' : 'focused'} chat workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'}`, async () => {
+				const instantiation = store.add(new TestInstantiationService());
+				const mainFolder = URI.file('/main project');
+				const folder = URI.file(explicit ? '/clicked project' : '/nested project');
+				const mainChat = upcastPartial<IChat>({ resource: URI.parse('test:/main-chat'), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: mainFolder, workingDirectory: mainFolder, name: 'main', description: undefined }] })) });
+				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
+				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(status), mainChat: constObservable(mainChat) });
+				const focused = upcastPartial<ISessionHost>({ session: constObservable(session), chat: constObservable(explicit ? mainChat : chat) });
+				const opened: { authority: string; path: string; session: string | null }[] = [];
+				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
+				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => focused }));
+				instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
+				instantiation.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => undefined }));
+				instantiation.stub(IAgentHostConnectionsService, upcastPartial<IAgentHostConnectionsService>({ resolveSessionResourceIdentity: () => undefined }));
+				instantiation.stub(IRemoteAgentHostLocationPreferenceService, upcastPartial<IRemoteAgentHostLocationPreferenceService>({ getPreference: () => undefined }));
+				instantiation.stub(ISSHRemoteAgentHostService, upcastPartial<ISSHRemoteAgentHostService>({ connections: [] }));
+				instantiation.stub(ITunnelAgentHostService, upcastPartial<ITunnelAgentHostService>({ getSelectedServerType: () => undefined }));
+				instantiation.stub(ITelemetryService, NullTelemetryService);
+				instantiation.stub(IProductService, upcastPartial<IProductService>({ urlProtocol: 'vscode-test' }));
+				instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async resource => {
+					const uri = typeof resource === 'string' ? URI.parse(resource) : resource;
+					opened.push({ authority: uri.authority, path: uri.path, session: new URLSearchParams(uri.query).get('session') });
+					return true;
+				} }));
+				await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, explicit ? { session, chat } : undefined));
+				assert.deepStrictEqual(opened, [{ authority: 'file', path: folder.path, session: status === SessionStatus.Untitled ? null : chat.resource.toString() }]);
+			});
+		}
+	}
 
 	for (const [connection, expected] of [
 		[
@@ -61,6 +94,7 @@ suite('Web Open in Editor', () => {
 			const session = upcastPartial<ITestSessionWithChat>({
 				resource: URI.from({ scheme: 'test', path: '/session' }),
 				providerId: 'test',
+				status: constObservable(SessionStatus.Completed),
 				activeChat: constObservable(upcastPartial<IChat>({ workspace: constObservable(workspace) })),
 			});
 			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: connection.address });
@@ -124,7 +158,7 @@ suite('Web Open in Editor', () => {
 				resource,
 				workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ workingDirectory: folder, root: folder, name: 'project', description: undefined }] })),
 			});
-			const session = upcastPartial<ITestSessionWithChat>({ resource, providerId: 'test', activeChat: constObservable(chat) });
+			const session = upcastPartial<ITestSessionWithChat>({ resource, providerId: 'test', status: constObservable(SessionStatus.Completed), activeChat: constObservable(chat) });
 			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
 			const sessions: (string | null)[] = [];
 			const notifications: string[] = [];

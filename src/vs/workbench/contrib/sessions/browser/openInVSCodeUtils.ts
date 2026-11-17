@@ -19,6 +19,12 @@ import { Schemas } from '../../../../base/common/network.js';
 import { ISessionsProvider } from '../common/sessionsProvider.js';
 import { findDevContainerSample } from '../../../../platform/agentHost/common/devContainerSamples.js';
 import { localize } from '../../../../nls.js';
+import { IChat, ISession, isSessionCreated } from '../../../services/sessions/common/session.js';
+
+/** Provisional sessions stay owned by the Agents composer until their first send. */
+export function getChatSessionToOpenInEditor(session: ISession | undefined, chat?: IChat): URI | undefined {
+	return session && isSessionCreated(session) ? chat?.resource ?? session.resource : undefined;
+}
 
 export interface IDevContainerSourceWorkspace {
 	readonly folderUri: URI;

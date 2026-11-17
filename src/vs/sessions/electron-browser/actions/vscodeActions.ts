@@ -36,12 +36,12 @@ import { IConfigurationService } from '../../../platform/configuration/common/co
 import { IActionViewItemService } from '../../../platform/actions/browser/actionViewItemService.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
-import { getEditorWindowSessionResource, notifyEditorWindowSessionUnsupported, resolveRemoteAuthority, resolveRemoteFolderUri } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
+import { getChatSessionToOpenInEditor, getEditorWindowSessionResource, notifyEditorWindowSessionUnsupported, resolveRemoteAuthority, resolveRemoteFolderUri } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
 import { INativeHostService } from '../../../platform/native/common/native.js';
 import { IFolderToOpen, IOpenedMainWindow } from '../../../platform/window/common/window.js';
 import { ILabelService, Verbosity } from '../../../platform/label/common/label.js';
 import { OPEN_VSCODE_WINDOW_COMMAND_ID, RETURN_TO_VSCODE_EDITOR_COMMAND_ID, SHOULD_SHOW_RETURN_TO_VSCODE_EDITOR_COMMAND_ID } from '../../../workbench/contrib/sessions/common/sessionCommands.js';
-import { IChat, ISession, isSessionCreated } from '../../../workbench/services/sessions/common/session.js';
+import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
 
 export class OpenSessionInVSCodeAction extends Action2 {
 	static readonly ID = 'agents.openSessionInVSCode';
@@ -108,13 +108,6 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession);
 	}
 	return nativeHostService.openWindow(foldersToOpen, { forceNewWindow: true, chatSessionToOpen: URI.isUri(editorChatSession) ? editorChatSession : undefined });
-}
-
-/**
- * Provisional sessions remain owned by the Agents composer and may be replaced or disposed, so only materialized sessions are safe to share across windows.
- */
-export function getChatSessionToOpenInEditor(session: ISession | undefined, chat?: IChat): URI | undefined {
-	return session && isSessionCreated(session) ? chat?.resource ?? session.resource : undefined;
 }
 
 export class OpenVSCodeWindowAction extends Action2 {

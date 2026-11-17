@@ -2,6 +2,8 @@
 
 The title bar now offers a persistent, labelled Agents / IDE switch. Agents highlights the orchestration view; IDE highlights the code editor. The switch uses the existing workspace-aware actions, so folder, remote-host, chat-session, and draft handoff rules remain owned by the existing implementation.
 
+Handoff uses the focused chat, including a nested chat with its own workspace. An explicitly clicked chat takes precedence over focus. The browser route passes that chat's identity with its folder instead of combining a nested workspace with the parent session. Browser and native routes share the materialized-session check: an unsent draft's folder may open in the IDE, while its provisional conversation stays owned by the Agents composer.
+
 In the Agents Window the control appears at the start of the title bar, before sidebar navigation. The native IDE's existing return-to-Agents title-bar action uses the same control. The setting `workbench.titleBar.workspaceModeSwitch` defaults to true; setting it to false and reloading restores the existing icon-style controls.
 
 The control exposes a single keyboard focus target and a switch role with IDE mode on/off state. Click, Enter, and Space activate the existing action. Disabled actions remain disabled and cannot execute. Theme colors, spacing, radii, and focus outlines use existing tokens. The Agents accessibility help documents the control.
@@ -26,8 +28,8 @@ This is a local demo and does not establish access to an agent's desktop filesys
 
 ## Verification
 
-- Client build, source type check with the native TypeScript compiler, targeted lint, CSS lint, and import-layer checks passed.
-- 85 focused browser tests passed for the mode switch, web workspace routing, and accessibility help. These include three-platform chord resolution, desktop/welcome/auxiliary-window restrictions, remapping/removal descriptions, mouse/Enter/Space activation, focus, and disabled-action behavior.
+- Incremental client compilation, source type checking, targeted lint, the import-layer checker, and all environment layer type checks passed for the handoff fix. The environment checks required restoring the generated `.build/typings/electron.d.ts` using the repository's checksum-verified `node build/npm/electronTypes.ts` setup task. No package inputs or installed editor profiles changed. Earlier CSS lint passed; this increment does not change styles.
+- 89 focused browser tests passed for the mode switch, web workspace routing, and accessibility help. These include three-platform chord resolution, desktop/welcome/auxiliary-window restrictions, remapping/removal descriptions, mouse/Enter/Space activation, focus, and disabled-action behavior. Four routing checks cover focused and explicitly clicked chats, created versus draft conversations, separate workspaces, and resource ids containing spaces and query delimiters. Before the fix, three checks reproduced the parent-identity mismatch and provisional-resource handoff. The native-only action tests are excluded by the browser runner and are not counted as passes; the extracted native helper retains its existing behavior. The updated browser handoff has not been inspected live because desktop automation remains stopped.
 - The browser preview was observed rendering the actual IDE workbench with the shared sample workspace. The Agents Files panel was also visually verified listing src, package.json, and README.md without the prior fake-credentials error.
 - In the isolated preview on port 8098, the keyboard chord changed the host URL to IDE mode and revealed the return switch. Computer Use then stopped because its URL safety check could not confidently determine the current browser URL. A complete UI edit/save/return/reload workflow remains unverified.
 - Native Electron test invocation did not produce a usable completion report and was stopped. It is not counted as a pass. Browser evidence does not establish a packaged native build.
