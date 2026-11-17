@@ -248,12 +248,13 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 				// Reject unsupported workspace shapes before changing the chat's directory or MCP owner.
 				if (folders && folders.length > 1) { throw new Error(localize('devin.singleWorkspaceRequired', "Devin Subscription requires one local workspace folder.")); }
 				const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
-				if (operation) { this.setRecordContext(record, resolveAgentChatContext(operation, chat)); }
 				record.preparing = true;
 				record.aborting = false;
 				try {
 					if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
 					if (record.aborting) { throw new CancellationError(); }
+					// A rejected directory change must not replace the owner used to resolve MCP tools.
+					if (operation) { this.setRecordContext(record, resolveAgentChatContext(operation, chat)); }
 					await this.ensureSession(record);
 					if (record.aborting) { throw new CancellationError(); }
 					if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }

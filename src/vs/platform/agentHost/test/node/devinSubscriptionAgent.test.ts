@@ -76,8 +76,12 @@ suite('Devin Subscription Agent', () => {
 		return { type: CustomizationType.Plugin, id: name, name, uri: `client-files://window/${name}`, nonce, childEnablement: { tools: [{ kind: CustomizationEnablementKind.Global, enabled: true }] } };
 	}
 
-	for (const materialized of [false, true]) {
-		test(`a rejected multi-folder send preserves the ${materialized ? 'running' : 'provisional'} workspace and MCP owner`, async () => {
+	for (const { materialized, invalidKind } of [
+		{ materialized: false, invalidKind: 'multi-folder' }, { materialized: true, invalidKind: 'multi-folder' },
+		{ materialized: false, invalidKind: 'remote-folder' }, { materialized: true, invalidKind: 'remote-folder' },
+		{ materialized: true, invalidKind: 'different-folder' },
+	] as const) {
+		test(`a rejected ${invalidKind} send preserves the ${materialized ? 'running' : 'provisional'} workspace and MCP owner`, async () => {
 			const reads: { owner: string; cwd: string | undefined }[] = [];
 			const f = fixture(catalog, { onDidChange: Event.None, getServers: async (resource, _clients, directory) => {
 				reads.push({ owner: resource.toString(), cwd: directory?.toString() });
@@ -88,9 +92,11 @@ suite('Devin Subscription Agent', () => {
 			if (materialized) { await f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-valid'); }
 			reads.length = 0;
 			const otherDirectory = URI.file('/another project');
-			const rejectedDirectories = materialized ? [cwd, otherDirectory] : [otherDirectory, cwd];
+			const remoteDirectory = URI.parse('vscode-remote://ssh-remote+other/project');
+			const rejectedDirectories = invalidKind === 'multi-folder' ? materialized ? [cwd, otherDirectory] : [otherDirectory, cwd]
+				: invalidKind === 'remote-folder' ? materialized ? [remoteDirectory] : remoteDirectory : [otherDirectory];
 			const otherContext = resolveAgentChatContext(URI.parse('agent-host-devin-subscription:/other-session'), chat);
-			await assert.rejects(f.agent.chats.sendMessage(chat, 'invalid', rejectedDirectories, undefined, 'invalid-folders', undefined, otherContext), /requires one local workspace folder/);
+			await assert.rejects(f.agent.chats.sendMessage(chat, 'invalid', rejectedDirectories, undefined, 'invalid-folders', undefined, otherContext), invalidKind === 'multi-folder' ? /requires one local workspace folder/ : /Cannot move a running Devin chat/);
 			const afterRejection = {
 				folders: (await f.agent.getChatMetadata(chat, owner))?.workingDirectories?.map(folder => folder.toString()),
 				launches: f.launches.length,
@@ -105,6 +111,25 @@ suite('Devin Subscription Agent', () => {
 			});
 		});
 	}
+
+	test('a valid provisional workspace change applies its new MCP owner and directory before startup', async () => {
+		const nextDirectory = URI.file('/another project');
+		const nextOwner = URI.parse('agent-host-devin-subscription:/other-session');
+		const reads: { owner: string; cwd: string | undefined }[] = [];
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (resource, _clients, directory) => {
+			reads.push({ owner: resource.toString(), cwd: directory?.toString() });
+			return [];
+		} });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		await f.agent.chats.sendMessage(chat, 'first', [nextDirectory], undefined, 'valid-move', undefined, resolveAgentChatContext(nextOwner, chat));
+		const created = f.transports[0].sent.find(request => request.method === 'session/new')!;
+		assert.ok(isAcpRecord(created.params));
+		assert.ok(reads.length > 0);
+		assert.deepStrictEqual({ reads, nativeDirectory: created.params.cwd, folders: (await f.agent.getChatMetadata(chat, owner))?.workingDirectories?.map(folder => folder.toString()), launches: f.launches.length }, {
+			reads: reads.map(() => ({ owner: nextOwner.toString(), cwd: nextDirectory.toString() })), nativeDirectory: nextDirectory.fsPath, folders: [nextDirectory.toString()], launches: 1,
+		});
+	});
 
 	test('keeps an active client handle and forwards its immutable customization snapshot on the first send', async () => {
 		const seen: string[] = [];
