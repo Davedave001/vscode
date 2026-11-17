@@ -44,17 +44,17 @@ import { ITestSessionsService, ITestSessionWithChat, stubSessionHostsFromSession
 suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	for (const status of [SessionStatus.Completed, SessionStatus.Untitled]) {
+	for (const [status, parentStatus] of [[SessionStatus.Completed, SessionStatus.Completed], [SessionStatus.Untitled, SessionStatus.Untitled], [SessionStatus.Untitled, SessionStatus.Completed]]) {
 		for (const { explicit, network } of [{ explicit: false, network: false }, { explicit: true, network: false }, { explicit: false, network: true }, { explicit: true, network: true }]) {
-			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'}`, async () => {
+			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
 				const instantiation = store.add(new TestInstantiationService());
 				const mainFolder = URI.file('/main project');
 				const folder = network
 					? URI.from({ scheme: 'file', authority: 'fileserver', path: explicit ? '/shared projects/clicked # & 100%/项目' : '/shared projects/nested # & 100%/项目' })
 					: URI.file(explicit ? '/clicked project' : '/nested project');
 				const mainChat = upcastPartial<IChat>({ resource: URI.parse('test:/main-chat'), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: mainFolder, workingDirectory: mainFolder, name: 'main', description: undefined }] })) });
-				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
-				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(status), mainChat: constObservable(mainChat) });
+				const chat = upcastPartial<IChat>({ resource: URI.from({ scheme: 'test', path: explicit ? '/clicked chat' : '/nested chat', fragment: 'chat&part=2' }), status: constObservable(status), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }] })) });
+				const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(parentStatus), mainChat: constObservable(mainChat) });
 				const focused = upcastPartial<ISessionHost>({ session: constObservable(session), chat: constObservable(explicit ? mainChat : chat) });
 				const opened: { authority: string; path: string; folder: string; session: string | null }[] = [];
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
@@ -98,7 +98,7 @@ suite('Web Open in Editor', () => {
 				resource: URI.from({ scheme: 'test', path: '/session' }),
 				providerId: 'test',
 				status: constObservable(SessionStatus.Completed),
-				activeChat: constObservable(upcastPartial<IChat>({ workspace: constObservable(workspace) })),
+				activeChat: constObservable(upcastPartial<IChat>({ status: constObservable(SessionStatus.Completed), workspace: constObservable(workspace) })),
 			});
 			const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: connection.address });
 			instantiationService.stub(ISessionsService, upcastPartial<ITestSessionsService>({ activeSession: constObservable(session) }));
@@ -130,6 +130,7 @@ suite('Web Open in Editor', () => {
 			calls.length = 0;
 			const clickedChat = upcastPartial<IChat>({
 				resource: URI.parse('test:/nested-chat'),
+				status: constObservable(SessionStatus.Completed),
 				workspace: constObservable(workspace),
 			});
 			await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: clickedChat }));
@@ -159,6 +160,7 @@ suite('Web Open in Editor', () => {
 			const resource = URI.from({ scheme: remoteAgentHostSessionTypeId(authority, 'copilotcli'), path: '/session', fragment: 'chat' });
 			const chat = upcastPartial<IChat>({
 				resource,
+				status: constObservable(SessionStatus.Completed),
 				workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ workingDirectory: folder, root: folder, name: 'project', description: undefined }] })),
 			});
 			const session = upcastPartial<ITestSessionWithChat>({ resource, providerId: 'test', status: constObservable(SessionStatus.Completed), activeChat: constObservable(chat) });

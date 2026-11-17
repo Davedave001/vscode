@@ -8,7 +8,7 @@ import { mock, upcastPartial } from '../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
 import { INativeHostService } from '../../../platform/native/common/native.js';
 import { IOpenedMainWindow, IOpenEmptyWindowOptions, IOpenWindowOptions, IWindowOpenable, isFolderToOpen } from '../../../platform/window/common/window.js';
-import { constObservable } from '../../../base/common/observable.js';
+import { constObservable, observableValue } from '../../../base/common/observable.js';
 import { URI } from '../../../base/common/uri.js';
 import { openSessionInVSCode, returnToVSCodeEditor, shouldShowReturnToVSCodeEditor } from '../../electron-browser/actions/vscodeActions.js';
 import { getChatSessionToOpenInEditor } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
@@ -89,6 +89,7 @@ suite('VS Code Actions', () => {
 	test('only transfers materialized sessions to the editor window', () => {
 		const provisional = createSession('provisional', false);
 		const materialized = createSession('materialized', true);
+		const nestedDraft = createSession('nested-draft', false).mainChat.get();
 
 		// Created per the provider's status: a draft carries no flag that says it is one.
 		assert.deepStrictEqual({
@@ -96,14 +97,28 @@ suite('VS Code Actions', () => {
 			provisionalChat: getChatSessionToOpenInEditor(provisional, provisional.mainChat.get())?.toString(),
 			materialized: getChatSessionToOpenInEditor(materialized)?.toString(),
 			materializedChat: getChatSessionToOpenInEditor(materialized, materialized.mainChat.get())?.toString(),
+			nestedDraft: getChatSessionToOpenInEditor(materialized, nestedDraft)?.toString(),
 			missing: getChatSessionToOpenInEditor(undefined),
 		}, {
 			provisional: undefined,
 			provisionalChat: undefined,
 			materialized: 'test:/materialized',
 			materializedChat: 'test:/materialized/chat',
+			nestedDraft: undefined,
 			missing: undefined,
 		});
+	});
+
+	test('hands off the selected chat after its first send, including active and failed conversations', () => {
+		const session = createSession('created-parent', true);
+		const status = observableValue<SessionStatus>('chatStatus', SessionStatus.Untitled);
+		const resource = URI.parse('test:/nested');
+		const chat = upcastPartial<IChat>({ resource, status });
+		assert.strictEqual(getChatSessionToOpenInEditor(session, chat), undefined);
+		for (const sentStatus of [SessionStatus.InProgress, SessionStatus.NeedsInput, SessionStatus.Completed, SessionStatus.Error]) {
+			status.set(sentStatus, undefined);
+			assert.strictEqual(getChatSessionToOpenInEditor(session, chat), resource);
+		}
 	});
 
 	test('opens every active chat workspace folder in one editor window', async () => {
@@ -140,6 +155,19 @@ suite('VS Code Actions', () => {
 		}());
 		await instantiationService.invokeFunction(openSessionInVSCode, createSession('draft', false, [URI.file('/repo')]));
 		assert.deepStrictEqual(calls, [{ forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: undefined }]);
+	});
+
+	test('opens an unsent nested chat folder without transferring the draft from its created parent', async () => {
+		const calls: { folders: string[]; chat: string | undefined }[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> {
+				calls.push({ folders: Array.isArray(toOpen) ? toOpen.filter(isFolderToOpen).map(folder => folder.folderUri.toString()) : [], chat: options?.chatSessionToOpen?.toString() });
+			}
+		}());
+		const parent = createSession('created-parent', true, [URI.file('/parent')]);
+		const draft = createSession('nested-draft', false, [URI.file('/nested')]).mainChat.get();
+		await instantiationService.invokeFunction(openSessionInVSCode, parent, draft);
+		assert.deepStrictEqual(calls, [{ folders: ['file:///nested'], chat: undefined }]);
 	});
 
 	test('opens an empty local editor window without a remote session workspace', async () => {
@@ -199,6 +227,7 @@ suite('VS Code Actions', () => {
 		const folder = URI.file('/nested');
 		const chat = upcastPartial<IChat>({
 			resource: URI.parse('test:/nested-chat'),
+			status: constObservable(SessionStatus.Completed),
 			workspace: constObservable({
 				...session.mainChat.get().workspace.get()!,
 				folders: [{ root: folder, workingDirectory: folder, name: 'nested', description: undefined }],
@@ -396,6 +425,7 @@ function createSession(id: string, isCreated: boolean, folders?: URI[], resource
 	} : undefined);
 	const mainChat = new class extends mock<IChat>() {
 		override readonly resource = URI.from({ scheme: 'test', path: `/${id}/chat` });
+		override readonly status = constObservable(isCreated ? SessionStatus.Completed : SessionStatus.Untitled);
 		override readonly workspace = workspace;
 	}();
 	return new class extends mock<ISession>() {

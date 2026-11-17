@@ -21,9 +21,9 @@ import { findDevContainerSample } from '../../../../platform/agentHost/common/de
 import { localize } from '../../../../nls.js';
 import { IChat, ISession, isSessionCreated } from '../../../services/sessions/common/session.js';
 
-/** Provisional sessions stay owned by the Agents composer until their first send. */
+/** Unsent chats stay owned by the Agents composer, even when their parent session has already been sent. */
 export function getChatSessionToOpenInEditor(session: ISession | undefined, chat?: IChat): URI | undefined {
-	return session && isSessionCreated(session) ? chat?.resource ?? session.resource : undefined;
+	return session && isSessionCreated(session) && (!chat || isSessionCreated(chat)) ? chat?.resource ?? session.resource : undefined;
 }
 
 export interface IDevContainerSourceWorkspace {
