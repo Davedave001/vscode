@@ -6,6 +6,7 @@
 import { execFile, spawn } from 'child_process';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
+import { CancellationError } from '../../../../base/common/errors.js';
 import { observableValue } from '../../../../base/common/observable.js';
 import { equals } from '../../../../base/common/objects.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -51,6 +52,7 @@ interface IChat {
 	readonly history: Turn[];
 	readonly tools: Map<string, ITool>;
 	activeTurn?: Turn;
+	preparing?: boolean;
 	aborting?: boolean;
 	textPart?: MarkdownResponsePart;
 	replaying: boolean;
@@ -188,26 +190,31 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		sendMessage: async (chat, prompt, directories, attachments, turnId, _sender, clientTypeOrContext, context) => {
 			if (!turnId) { throw new Error('A host turn id is required.'); }
 			const record = this.record(chat);
-			const folders = URI.isUri(directories) ? [directories] : directories;
-			if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
-			if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
-			await this.ensureSession(record);
-			if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
-			if (record.activeTurn) { throw new Error('A Devin turn is already running.'); }
+			if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
+			record.preparing = true;
+			record.aborting = false;
+			try {
+				const folders = URI.isUri(directories) ? [directories] : directories;
+				if (folders?.length) { await this.setWorkingDirectory(chat, context ?? chat, folders[0]); }
+				if (folders && folders.length > 1) { throw new Error('Devin Subscription requires one local workspace folder.'); }
+				if (record.aborting) { throw new CancellationError(); }
+				await this.ensureSession(record);
+				if (record.aborting) { throw new CancellationError(); }
+				if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
+			} finally { record.preparing = false; }
 			const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
 			const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
 			const text = instructions?.length ? `${instructions.join('\n\n')}\n\n${prompt}` : prompt;
 			const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
 			const turn: Turn = { id: turnId, startedAt: new Date().toISOString(), message: { text: prompt, attachments: attachments ? [...attachments] : undefined, origin: { kind: MessageKind.User } }, responseParts: [], usage: undefined, state: TurnState.Complete };
 			record.activeTurn = turn;
-			record.aborting = false;
 			record.history.push(turn);
 			record.tools.clear();
 			record.textPart = undefined;
 			const started = Date.now();
 			try {
 				const result = await record.client!.request('session/prompt', { sessionId: record.nativeId, prompt: content }, { timeoutMs: 0 });
-				const cancelled = isObject(result) && result.stopReason === 'cancelled';
+				const cancelled = record.aborting || isObject(result) && result.stopReason === 'cancelled';
 				turn.state = cancelled ? TurnState.Cancelled : TurnState.Complete;
 				this.cancelPermissions(record);
 				for (const tool of record.tools.values()) { if (!tool.complete) { this.completeTool(record, turn, tool, false); } }
@@ -228,16 +235,25 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		},
 		abort: async chat => {
 			const record = this.record(chat);
+			if ((!record.activeTurn && !record.preparing) || record.aborting) { return; }
 			record.aborting = true;
 			this.cancelPermissions(record);
-			if (record.client && record.nativeId && record.activeTurn) {
-				record.client.notify('session/cancel', { sessionId: record.nativeId });
-				record.forceStop = setTimeout(() => this.release(record), 2000);
+			if (record.preparing) { this.release(record); return; }
+			const client = record.client;
+			const turn = record.activeTurn;
+			if (client && record.nativeId && turn) {
+				client.notify('session/cancel', { sessionId: record.nativeId });
+				// A deadline belongs to this client and turn, never a later reconnect.
+				if (record.client === client && record.activeTurn === turn) {
+					record.forceStop = setTimeout(() => {
+						if (record.client === client && record.activeTurn === turn) { this.release(record); }
+					}, 2000);
+				}
 			}
 		},
 		changeModel: async (chat, model) => {
 			const record = this.record(chat);
-			if (record.activeTurn) { throw new Error('Wait for the current Devin turn before changing models.'); }
+			if (record.activeTurn || record.preparing) { throw new Error('Wait for the current Devin turn before changing models.'); }
 			if (!record.modelNeedsReconciliation && record.model?.id === model.id && equals(record.model.config ?? {}, model.config ?? {})) { return; }
 			if (record.nativeId && !record.client) { await this.ensureSession(record, false); }
 			if (record.client) { await this.applyModel(record, model); }
@@ -451,7 +467,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 
 	private async permission(record: IChat, params: unknown): Promise<unknown> {
 		const cancelled = { outcome: { outcome: 'cancelled' } };
-		if (!record.activeTurn || !isObject(params) || params.sessionId !== record.nativeId || !isObject(params.toolCall) || typeof params.toolCall.toolCallId !== 'string' || !Array.isArray(params.options)) { return cancelled; }
+		if (!record.activeTurn || record.aborting || !isObject(params) || params.sessionId !== record.nativeId || !isObject(params.toolCall) || typeof params.toolCall.toolCallId !== 'string' || !Array.isArray(params.options)) { return cancelled; }
 		const tool = this.tool(record, params.toolCall);
 		const allow = params.options.find(option => isObject(option) && option.kind === 'allow_once' && typeof option.optionId === 'string');
 		const deny = params.options.find(option => isObject(option) && option.kind === 'reject_once' && typeof option.optionId === 'string');

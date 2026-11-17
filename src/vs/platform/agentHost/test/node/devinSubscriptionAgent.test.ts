@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import sinon from 'sinon';
+import { DeferredPromise } from '../../../../base/common/async.js';
+import { isCancellationError } from '../../../../base/common/errors.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { AcpClient } from '../../node/acp/acpClient.js';
@@ -35,6 +38,7 @@ suite('Devin Subscription Agent', () => {
 		let onPrompt: ((transport: TestAcpTransport, request: Record<string, unknown>) => void) | undefined;
 		let onLoad: typeof onPrompt;
 		let onConfig: typeof onPrompt;
+		let onInitialize: typeof onPrompt;
 		const agent = store.add(new DevinSubscriptionAgent('devin.exe', {
 			listModels: async () => modelCatalog,
 			createClient: (_cwd, args, env) => {
@@ -44,7 +48,9 @@ suite('Devin Subscription Agent', () => {
 				transports.push(transport);
 				transport.handle = request => {
 					switch (request.method) {
-						case 'initialize': transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); break;
+						case 'initialize':
+							if (onInitialize) { onInitialize(transport, request); } else { transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); }
+							break;
 						case 'session/new': transport.reply(request, { sessionId: 'native', configOptions }); break;
 						case 'session/load':
 							if (onLoad) { onLoad(transport, request); break; }
@@ -61,7 +67,7 @@ suite('Devin Subscription Agent', () => {
 			},
 		}));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
-		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; } };
+		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; }, set onInitialize(value: typeof onInitialize) { onInitialize = value; } };
 	}
 
 	test('keeps subscription credentials separate from inherited CLI credentials and parses a live catalog shape', () => {
@@ -258,6 +264,145 @@ suite('Devin Subscription Agent', () => {
 		const completed = f.events.flatMap(event => event.kind === 'action' && event.action.type === ActionType.ChatToolCallComplete ? [event.action] : []);
 		assert.strictEqual(completed.length, 1);
 		assert.strictEqual(completed[0].result.success, false);
+	});
+
+	test('repeated Stop does not leave a deadline that kills the next turn', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const firstPrompt = new DeferredPromise<Record<string, unknown>>();
+			f.onPrompt = (_transport, request) => { void firstPrompt.complete(request); };
+			const first = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn');
+			const firstRequest = await firstPrompt.p;
+			await f.agent.chats.abort(chat, owner);
+			await f.agent.chats.abort(chat, owner);
+			f.transports[0].reply(firstRequest, { stopReason: 'cancelled' });
+			await first;
+			const secondPrompt = new DeferredPromise<Record<string, unknown>>();
+			f.onPrompt = (_transport, request) => { void secondPrompt.complete(request); };
+			const second = f.agent.chats.sendMessage(chat, 'second', [cwd], undefined, 'second-turn').then(() => undefined, error => error);
+			const secondRequest = await secondPrompt.p;
+			await clock.tickAsync(2100);
+			f.transports[0].reply(secondRequest, { stopReason: 'end_turn' });
+			assert.strictEqual(await second, undefined);
+			assert.strictEqual(f.transports[0].sent.filter(message => message.method === 'session/cancel').length, 1);
+			assert.strictEqual(f.launches.length, 1);
+		} finally { clock.restore(); }
+	});
+
+	test('Stop before process startup prevents the prompt and permits a later turn', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const send = f.agent.chats.sendMessage(chat, 'stopped', [cwd], undefined, 'stopped-turn');
+		const rejected = assert.rejects(send, error => isCancellationError(error));
+		await f.agent.chats.abort(chat, owner);
+		await rejected;
+		assert.strictEqual(f.launches.length, 0);
+		await f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'retry-turn');
+		assert.strictEqual(f.launches.length, 1);
+	});
+
+	test('forces an unresponsive stopped client closed and resumes the same conversation on the next turn', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd], model: { id: 'swe-2-high' } });
+		const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			const started = new DeferredPromise<void>();
+			f.onPrompt = transport => {
+				toolUpdate(transport, { sessionUpdate: 'tool_call', toolCallId: 'read', title: 'Read file', status: 'in_progress', rawOutput: 'partial content' });
+				void started.complete();
+			};
+			const stopped = f.agent.chats.sendMessage(chat, 'stopped', [cwd], undefined, 'stopped-turn').then(() => undefined, error => error);
+			await started.p;
+			const history = await f.agent.chats.getMessages(chat, owner);
+			await f.agent.chats.abort(chat, owner);
+			await clock.tickAsync(2001);
+			assert.ok(isCancellationError(await stopped));
+			assert.strictEqual(history[0].state, TurnState.Cancelled);
+			const tool = history[0].responseParts[0];
+			assert.ok(tool.kind === ResponsePartKind.ToolCall && tool.toolCall.status === ToolCallStatus.Completed);
+			assert.strictEqual(tool.toolCall.success, false);
+			assert.deepStrictEqual(tool.toolCall.content, [{ type: ToolResultContentType.Text, text: 'partial content' }]);
+			f.onPrompt = undefined;
+			await f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'retry-turn');
+			assert.strictEqual(f.launches.length, 2);
+			assert.deepStrictEqual(f.launches[1].args, ['acp', '--model', 'swe-2-high']);
+			const requests = f.transports[1].sent;
+			assert.ok(!requests.some(message => message.method === 'session/new'));
+			assert.deepStrictEqual(requests.find(message => message.method === 'session/load')?.params, { sessionId: 'native', cwd: cwd.fsPath, mcpServers: [] });
+			assert.strictEqual(requests.filter(message => message.method === 'session/prompt').length, 1);
+		} finally { clock.restore(); }
+	});
+
+	test('a competing send or model change cannot change the workspace while a turn prepares', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd], model: { id: 'swe-2-high' } });
+		const started = new DeferredPromise<{ transport: TestAcpTransport; request: Record<string, unknown> }>();
+		f.onInitialize = (transport, request) => { void started.complete({ transport, request }); };
+		const send = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-turn');
+		const { transport, request } = await started.p;
+		await assert.rejects(f.agent.chats.sendMessage(chat, 'competing', [URI.file('/another project')], undefined, 'other-turn'), /turn is already running/);
+		await assert.rejects(f.agent.chats.changeModel(chat, { id: 'another-model' }, owner), /Wait for the current Devin turn/);
+		transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } });
+		await send;
+		assert.strictEqual(f.launches.length, 1);
+		assert.deepStrictEqual(transport.sent.find(message => message.method === 'session/new')?.params, { cwd: cwd.fsPath, mcpServers: [] });
+		assert.strictEqual(transport.sent.filter(message => message.method === 'session/prompt').length, 1);
+	});
+
+	for (const phase of ['initialize', 'load'] as const) {
+		test(`Stop cancels pending ${phase} and ignores its late response without sending a prompt`, async () => {
+			const f = fixture();
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			if (phase === 'load') {
+				await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'swe-2-high' }));
+			} else {
+				await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			}
+			const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			try {
+				const started = new DeferredPromise<{ transport: TestAcpTransport; request: Record<string, unknown> }>();
+				const onSetup = (transport: TestAcpTransport, request: Record<string, unknown>) => { void started.complete({ transport, request }); };
+				if (phase === 'initialize') { f.onInitialize = onSetup; } else { f.onLoad = onSetup; }
+				const result = f.agent.chats.sendMessage(chat, 'stopped', [cwd], undefined, 'stopped-turn').then(() => undefined, error => error);
+				const { transport, request } = await started.p;
+				await f.agent.chats.abort(chat, owner);
+				transport.reply(request, phase === 'initialize' ? { protocolVersion: 1, agentCapabilities: { loadSession: true } } : { configOptions: [] });
+				await clock.tickAsync(1);
+				assert.ok(isCancellationError(await result));
+				assert.ok(!transport.sent.some(message => message.method === 'session/prompt'));
+				assert.ok(!transport.sent.some(message => message.method === 'session/cancel'));
+				f.onInitialize = undefined;
+				f.onLoad = undefined;
+				await f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'retry-turn');
+				assert.strictEqual(f.launches.length, 2);
+				assert.strictEqual(f.transports[1].sent.filter(message => message.method === (phase === 'load' ? 'session/load' : 'session/new')).length, 1);
+			} finally { clock.restore(); }
+		});
+	}
+
+	test('declines new permission requests after Stop without asking the user to approve', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const prompt = new DeferredPromise<{ transport: TestAcpTransport; request: Record<string, unknown> }>();
+		f.onPrompt = (transport, request) => { void prompt.complete({ transport, request }); };
+		const send = f.agent.chats.sendMessage(chat, 'prompt', [cwd], undefined, 'stopped-turn');
+		const { transport, request } = await prompt.p;
+		await f.agent.chats.abort(chat, owner);
+		const response = Event.toPromise(Event.filter(transport.onSend, message => message.id === 'late-permission'));
+		transport.receive({ jsonrpc: '2.0', id: 'late-permission', method: 'session/request_permission', params: { sessionId: 'native', toolCall: { toolCallId: 'late-tool', title: 'Late tool' }, options: [{ kind: 'allow_once', optionId: 'once' }] } });
+		assert.deepStrictEqual((await response).result, { outcome: { outcome: 'cancelled' } });
+		assert.ok(!f.events.some(event => event.kind === 'pending_confirmation'));
+		// A normal completion can race with Stop; the user's cancellation still wins.
+		transport.reply(request, { stopReason: 'end_turn' });
+		await send;
+		assert.strictEqual((await f.agent.chats.getMessages(chat, owner))[0].state, TurnState.Cancelled);
 	});
 
 	test('settles a superseded permission RPC and requires a decision for the replacement request', async () => {
