@@ -63,7 +63,7 @@ suite('ACP Client', () => {
 		const client = store.add(new AcpClient(transport));
 		const failed = client.request('first', {});
 		transport.receive({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'auth required' } });
-		await assert.rejects(failed, error => error instanceof AcpRpcError && error.code === -32000);
+		await assert.rejects(failed, error => error instanceof AcpRpcError && error.code === -32000 && error.message === 'first: auth required');
 		const malformed = client.request('second', {});
 		transport.receive({ jsonrpc: '2.0', id: 2, result: {}, error: {} });
 		await assert.rejects(malformed, /Invalid ACP response/);

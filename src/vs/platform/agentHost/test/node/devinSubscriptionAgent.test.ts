@@ -28,6 +28,7 @@ suite('Devin Subscription Agent', () => {
 		const launches: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
 		const events: AgentSignal[] = [];
 		let onPrompt: ((transport: TestAcpTransport, request: Record<string, unknown>) => void) | undefined;
+		let onLoad: typeof onPrompt;
 		const agent = store.add(new DevinSubscriptionAgent('devin.exe', {
 			listModels: async () => catalog,
 			createClient: (_cwd, args, env) => {
@@ -39,6 +40,7 @@ suite('Devin Subscription Agent', () => {
 						case 'initialize': transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); break;
 						case 'session/new': transport.reply(request, { sessionId: 'native', configOptions: [{ id: 'model-choice', category: 'model' }] }); break;
 						case 'session/load':
+							if (onLoad) { onLoad(transport, request); break; }
 							transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'original' } } } });
 							transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'restored' } } } });
 							transport.reply(request, { configOptions: [{ id: 'model-choice', category: 'model' }] }); break;
@@ -50,7 +52,7 @@ suite('Devin Subscription Agent', () => {
 			},
 		}));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
-		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; } };
+		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; } };
 	}
 
 	test('keeps subscription credentials separate from inherited CLI credentials and parses a live catalog shape', () => {
@@ -157,5 +159,101 @@ suite('Devin Subscription Agent', () => {
 		assert.ok(f.transports[0].sent.some(message => message.method === 'session/load'));
 		assert.ok(!f.transports[0].sent.some(message => message.method === 'session/new'));
 		assert.deepStrictEqual(f.events, []);
+	});
+
+	test('exposes persisted metadata before materialization and restores model, folder, and timestamps without starting a client', async () => {
+		const f = fixture();
+		const data = JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'swe-2-high', createdAt: 1000, modifiedAt: 2000 });
+		const metadata = await f.agent.getChatMetadata(chat, owner, data);
+		assert.strictEqual(metadata?.startTime, 1000);
+		assert.strictEqual(metadata?.modifiedTime, 2000);
+		assert.deepStrictEqual(metadata?.model, { id: 'swe-2-high' });
+		assert.deepStrictEqual(metadata?.workingDirectories?.map(uri => uri.toString()), [cwd.toString()]);
+		assert.strictEqual(f.launches.length, 0);
+		await f.agent.materializeChat(chat, owner, data);
+		const materialized = await f.agent.getChatMetadata(chat, owner);
+		assert.strictEqual(materialized?.startTime, metadata?.startTime);
+		assert.strictEqual(materialized?.modifiedTime, metadata?.modifiedTime);
+		assert.deepStrictEqual(materialized?.model, metadata?.model);
+		assert.strictEqual(materialized?.project?.uri.toString(), cwd.toString());
+		assert.strictEqual(f.launches.length, 0);
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.getMessages(chat, owner);
+		assert.deepStrictEqual(f.launches[0].args, ['acp', '--model', 'swe-2-high']);
+		assert.ok(!f.transports[0].sent.some(message => message.method === 'session/set_config_option'));
+		assert.strictEqual((await f.agent.getChatMetadata(chat, owner))?.startTime, 1000);
+	});
+
+	test('rejects corrupt or nonlocal backings without starting a client and accepts the older timestamp format', async () => {
+		const f = fixture();
+		for (const data of ['{', JSON.stringify({ version: 1, sessionId: '', cwd: cwd.toString() }), JSON.stringify({ version: 1, sessionId: 'native', cwd: 'https://example.com' })]) {
+			assert.strictEqual(await f.agent.getChatMetadata(chat, owner, data), undefined);
+			await assert.rejects(f.agent.materializeChat(chat, owner, data), /Invalid persisted Devin chat/);
+		}
+		const old = await f.agent.getChatMetadata(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), createdAt: 1000 }));
+		assert.strictEqual(old?.modifiedTime, 1000);
+		assert.deepStrictEqual(f.launches, []);
+	});
+
+	test('preserves a restored variant represented by separate native model and thinking selectors', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'swe-2-max', createdAt: 1000 }));
+		f.onLoad = (transport, request) => transport.reply(request, { configOptions: [
+			{ id: 'model', category: 'model', type: 'select', currentValue: 'swe-2-high', options: [{ value: 'swe-2-high', name: 'SWE-2' }] },
+			{ id: 'thought_level', category: 'thought_level', type: 'select', currentValue: 'max', options: [{ value: 'high' }, { value: 'max' }] },
+		] });
+		await f.agent.chats.getMessages(chat, owner);
+		assert.deepStrictEqual((await f.agent.getChatMetadata(chat, owner))?.model, { id: 'swe-2-max' });
+		// The host reconciles its model selection before every outgoing turn.
+		await f.agent.chats.changeModel(chat, { id: 'swe-2-max', config: {} }, owner);
+		assert.ok(!f.transports[0].sent.some(message => message.method === 'session/set_config_option'));
+	});
+
+	test('keeps the previous transcript when a replay fails partway, then allows a clean retry', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString() }));
+		const turns = await f.agent.chats.getMessages(chat, owner);
+		const previous = structuredClone(turns);
+		await f.agent.chats.releaseChat(chat, owner);
+		f.onLoad = (transport, request) => {
+			transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'incomplete replay' } } } });
+			transport.receive({ jsonrpc: '2.0', id: request.id, error: { code: -32603, message: 'Replay interrupted' } });
+		};
+		await assert.rejects(f.agent.chats.getMessages(chat, owner), /Replay interrupted/);
+		assert.deepStrictEqual(turns, previous);
+		f.onLoad = undefined;
+		const retried = await f.agent.chats.getMessages(chat, owner);
+		assert.strictEqual(retried.length, 1);
+		assert.strictEqual(retried[0].message.text, 'original');
+		assert.strictEqual(f.transports.length, 3);
+		assert.ok(f.transports.every(transport => transport.sent.every(message => message.method !== 'session/new')));
+	});
+
+	test('reopens a released native session before applying an explicit model change', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), model: 'swe-2-max' }));
+		await f.agent.chats.changeModel(chat, { id: 'swe-2-high' }, owner);
+		const methods = f.transports[0].sent.map(request => request.method);
+		assert.ok(methods.indexOf('session/load') < methods.indexOf('session/set_config_option'));
+		assert.ok(!methods.includes('session/new'));
+		assert.deepStrictEqual((await f.agent.getChatMetadata(chat, owner))?.model, { id: 'swe-2-high' });
+	});
+
+	test('persists the latest activity timestamp when a turn completes', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		let saved: string | undefined;
+		store.add(f.agent.onDidChangeChatData(event => { saved = event.providerData; }));
+		await f.agent.chats.sendMessage(chat, 'hey', [cwd], undefined, 'host-turn');
+		assert.ok(saved);
+		const savedMetadata = await fixture().agent.getChatMetadata(chat, owner, saved);
+		const live = await f.agent.getChatMetadata(chat, owner);
+		assert.strictEqual(savedMetadata?.startTime, live?.startTime);
+		assert.strictEqual(savedMetadata?.modifiedTime, live?.modifiedTime);
+		assert.strictEqual(savedMetadata?.project?.uri.toString(), cwd.toString());
 	});
 });

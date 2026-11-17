@@ -19,6 +19,7 @@ export interface IAcpTransport extends IDisposable {
 }
 
 interface IPendingRequest {
+	readonly method: string;
 	readonly resolve: (result: unknown) => void;
 	readonly reject: (error: Error) => void;
 	cancellation?: IDisposable;
@@ -66,7 +67,7 @@ export class AcpClient extends Disposable {
 		if (!Number.isFinite(timeout) || timeout < 0) { return Promise.reject(new RangeError('Invalid ACP request timeout')); }
 		const id = this.nextRequestId++;
 		return new Promise((resolve, reject) => {
-			const pending: IPendingRequest = { resolve, reject };
+			const pending: IPendingRequest = { method, resolve, reject };
 			this.pending.set(id, pending);
 			pending.cancellation = token.onCancellationRequested(() => this.finish(id, new CancellationError()));
 			if (timeout > 0) {
@@ -125,7 +126,7 @@ export class AcpClient extends Disposable {
 			if (!isAcpRecord(message.error) || typeof message.error.code !== 'number' || !Number.isInteger(message.error.code) || typeof message.error.message !== 'string') {
 				this.close(new Error('Invalid ACP error response'));
 			} else {
-				this.finish(message.id, new AcpRpcError(message.error.code as number, message.error.message));
+				this.finish(message.id, new AcpRpcError(message.error.code as number, `${this.pending.get(message.id)!.method}: ${message.error.message}`));
 			}
 		} else {
 			this.finish(message.id, undefined, message.result);

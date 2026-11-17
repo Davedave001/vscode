@@ -7,6 +7,7 @@ import { execFile, spawn } from 'child_process';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { observableValue } from '../../../../base/common/observable.js';
+import { equals } from '../../../../base/common/objects.js';
 import { URI } from '../../../../base/common/uri.js';
 import { isEqual, basename } from '../../../../base/common/resources.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -51,6 +52,27 @@ interface IChat {
 	forceStop?: ReturnType<typeof setTimeout>;
 	readonly createdAt: number;
 	modifiedAt: number;
+}
+
+interface IPersistedChat {
+	readonly sessionId: string;
+	readonly cwd: URI;
+	readonly model?: ModelSelection;
+	readonly createdAt: number;
+	readonly modifiedAt: number;
+}
+
+/** Metadata is needed before materializeChat runs, including before account reconnect. */
+function readPersistedChat(data: string | undefined): IPersistedChat | undefined {
+	try {
+		const value: unknown = data ? JSON.parse(data) : undefined;
+		if (!isObject(value) || value.version !== 1 || typeof value.sessionId !== 'string' || !value.sessionId || typeof value.cwd !== 'string') { return undefined; }
+		const cwd = URI.parse(value.cwd);
+		if (cwd.scheme !== 'file') { return undefined; }
+		const createdAt = typeof value.createdAt === 'number' && Number.isFinite(value.createdAt) && value.createdAt >= 0 ? value.createdAt : 0;
+		const modifiedAt = typeof value.modifiedAt === 'number' && Number.isFinite(value.modifiedAt) && value.modifiedAt >= createdAt ? value.modifiedAt : createdAt;
+		return { sessionId: value.sessionId, cwd, model: typeof value.model === 'string' && value.model ? { id: value.model } : undefined, createdAt, modifiedAt };
+	} catch { return undefined; }
 }
 
 export interface IDevinClientAdapter {
@@ -175,6 +197,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 					if (!tool.complete) { this.completeTool(record, turn, tool, false, []); }
 				}
 				record.modifiedAt = Date.now();
+				this.dataChanged.fire({ chat, providerData: this.providerData(record) });
 				this.fire(record, { type: ActionType.ChatTurnComplete, turnId, duration: Date.now() - started });
 			} catch (error) {
 				turn.state = TurnState.Error;
@@ -198,6 +221,8 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		changeModel: async (chat, model) => {
 			const record = this.record(chat);
 			if (record.activeTurn) { throw new Error('Wait for the current Devin turn before changing models.'); }
+			if (record.model?.id === model.id && equals(record.model.config ?? {}, model.config ?? {})) { return; }
+			if (record.nativeId && !record.client) { await this.ensureSession(record); }
 			if (record.client) { await this.applyModel(record, model); }
 			record.model = model;
 			if (record.nativeId) { this.dataChanged.fire({ chat, providerData: this.providerData(record) }); }
@@ -206,9 +231,9 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		getMessages: async chat => { const record = this.record(chat); if (record.nativeId && !record.client) { await this.ensureSession(record); } return record.history; },
 	};
 
-	private createRecord(chat: URI, cwd: URI, model?: ModelSelection): IChat {
+	private createRecord(chat: URI, cwd: URI, model?: ModelSelection, createdAt = Date.now(), modifiedAt = createdAt): IChat {
 		if (this.records.has(chat.toString())) { throw new Error('Devin chat already exists.'); }
-		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, createdAt: Date.now(), modifiedAt: Date.now() };
+		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, createdAt, modifiedAt };
 		this.records.set(chat.toString(), record);
 		return record;
 	}
@@ -221,12 +246,9 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 
 	async materializeChat(chat: URI, _context: Parameters<IAgent['materializeChat']>[1], data: string | undefined): Promise<void> {
 		if (this.records.has(chat.toString())) { return; }
-		const value: unknown = data ? JSON.parse(data) : undefined;
-		if (!isObject(value) || value.version !== 1 || typeof value.sessionId !== 'string' || typeof value.cwd !== 'string') { throw new Error('Invalid persisted Devin chat.'); }
-		const cwd = URI.parse(value.cwd);
-		if (cwd.scheme !== 'file') { throw new Error('Devin chat requires a local workspace.'); }
-		const model = typeof value.model === 'string' ? { id: value.model } : undefined;
-		this.createRecord(chat, cwd, model).nativeId = value.sessionId;
+		const value = readPersistedChat(data);
+		if (!value) { throw new Error('Invalid persisted Devin chat.'); }
+		this.createRecord(chat, value.cwd, value.model, value.createdAt, value.modifiedAt).nativeId = value.sessionId;
 	}
 
 	async setWorkingDirectory(chat: URI, _context: Parameters<IAgent['setWorkingDirectory']>[1], cwd: URI): Promise<void> {
@@ -235,7 +257,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		record.cwd = cwd;
 	}
 
-	private providerData(record: IChat): string { return JSON.stringify({ version: 1, sessionId: record.nativeId, cwd: record.cwd.toString(), model: record.model?.id, createdAt: record.createdAt }); }
+	private providerData(record: IChat): string { return JSON.stringify({ version: 1, sessionId: record.nativeId, cwd: record.cwd.toString(), model: record.model?.id, createdAt: record.createdAt, modifiedAt: record.modifiedAt }); }
 
 	private async ensureSession(record: IChat): Promise<void> {
 		if (record.initializing) { return record.initializing; }
@@ -260,6 +282,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			if (isObject(notification.params.update)) { this.update(record, notification.params.update); }
 		}));
 		record.store.add(client.registerRequestHandler('session/request_permission', params => this.permission(record, params)));
+		const previousHistory = [...record.history];
 		try {
 			const initialized = await initializeAcp(client, { name: 'agent-workspace', version: '0.1.0' });
 			const capabilities = isObject(initialized.agentCapabilities) ? initialized.agentCapabilities.promptCapabilities : undefined;
@@ -267,7 +290,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const loading = !!record.nativeId;
 			if (loading && (!isObject(initialized.agentCapabilities) || initialized.agentCapabilities.loadSession !== true)) { throw new Error('Devin does not support restoring this session.'); }
 			record.replaying = loading;
-			if (loading) { record.history.length = 0; }
+			if (loading) { record.history.length = 0; record.lastReplayUserId = undefined; record.textPart = undefined; record.tools.clear(); }
 			const result = await client.request(loading ? 'session/load' : 'session/new', { ...(loading ? { sessionId: record.nativeId } : {}), cwd: record.cwd.fsPath, mcpServers: [] });
 			record.replaying = false;
 			if (!isObject(result)) { throw new Error('Invalid Devin session response.'); }
@@ -278,9 +301,17 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const modelOption = Array.isArray(result.configOptions) ? result.configOptions.find(option => isObject(option) && option.category === 'model') : undefined;
 			record.modelConfigId = isObject(modelOption) && typeof modelOption.id === 'string' ? modelOption.id : undefined;
 			record.legacyModels = isObject(result.models);
-			if (loading && record.model) { await this.applyModel(record, record.model); }
+			// session/load restores the native model and its separate reasoning/speed
+			// selectors. Catalog variant ids are not necessarily model-selector values.
 			this.materialized.fire({ chat: record.chat, result: { providerData: this.providerData(record), resolvedWorkingDirectory: record.cwd }, workingDirectories: [record.cwd], project: undefined });
-		} catch (error) { this.release(record); throw error; }
+		} catch (error) {
+			this.release(record);
+			// A partial replay must not replace the last successfully loaded transcript.
+			record.history.splice(0, record.history.length, ...previousHistory);
+			record.textPart = undefined;
+			record.tools.clear();
+			throw error;
+		}
 	}
 
 	private async applyModel(record: IChat, model: ModelSelection): Promise<void> {
@@ -391,7 +422,10 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	async chatConfigCompletions() { return { items: [] }; }
 	async getChatCustomizations() { return []; }
 	async listChatsToMigrate() { return []; }
-	async getChatMetadata(chat: URI): Promise<IAgentChatMetadata | undefined> { const record = this.records.get(chat.toString()); return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined; }
+	async getChatMetadata(chat: URI, _context: Parameters<IAgent['getChatMetadata']>[1], providerData?: string): Promise<IAgentChatMetadata | undefined> {
+		const record = this.records.get(chat.toString()) ?? readPersistedChat(providerData);
+		return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, model: record.model, workingDirectories: [record.cwd], project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined;
+	}
 	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.release(record); } }
 	override dispose(): void { for (const record of this.records.values()) { this.release(record); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
 }
