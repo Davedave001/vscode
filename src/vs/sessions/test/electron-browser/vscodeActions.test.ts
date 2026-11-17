@@ -31,6 +31,7 @@ import { IRemoteAgentHostLocationPreferenceService, RemoteAgentHostLocationPrefe
 import { PathStyle } from '../../../platform/agentHost/common/state/protocol/common/commands.js';
 import { ISSHAgentHostConnection, ISSHRemoteAgentHostService } from '../../../platform/agentHost/common/sshRemoteAgentHost.js';
 import { ITunnelAgentHostService, TunnelGatewayServerType } from '../../../platform/agentHost/common/tunnelAgentHost.js';
+import { IWorkbenchEnvironmentService } from '../../../workbench/services/environment/common/environmentService.js';
 
 suite('VS Code Actions', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
@@ -52,6 +53,22 @@ suite('VS Code Actions', () => {
 		notifications = [];
 		instantiationService.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notifications.push(String(message)); } }));
 	});
+	for (const source of [undefined, 'ssh-remote+target', 'ssh-remote+other']) {
+		for (const count of [1, 2]) {
+			for (const sent of [false, true]) {
+				test(`keeps explicit remote chats on their source connection (${source ?? 'local'}, ${count}, ${sent ? 'sent' : 'draft'})`, async () => {
+					const folders = Array.from({ length: count }, (_, i) => URI.from({ scheme: 'vscode-remote', authority: 'ssh-remote+target', path: `/project${i}` }));
+					const calls: { folders: string[]; chat: string | undefined }[] = [];
+					instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: source }));
+					instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+						override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> { calls.push({ folders: Array.isArray(toOpen) ? toOpen.filter(isFolderToOpen).map(folder => folder.folderUri.toString()) : [], chat: options?.chatSessionToOpen?.toString() }); }
+					}());
+					await instantiationService.invokeFunction(openSessionInVSCode, createSession('explicit-remote', sent, folders));
+					assert.deepStrictEqual({ calls, notifications }, { calls: [{ folders: folders.map(folder => folder.toString()), chat: sent && source === 'ssh-remote+target' ? 'test:/explicit-remote' : undefined }], notifications: sent && source !== 'ssh-remote+target' ? ['This chat stays in Agents because the selected editor workspace uses a different connection.'] : [] });
+				});
+			}
+		}
+	}
 
 	test('shows return action only when there is no other main window', () => {
 		const currentWindow = createWindow(1);
@@ -362,6 +379,7 @@ suite('VS Code Actions', () => {
 		[URI.parse('vscode-remote://wsl+Ubuntu/one'), URI.parse('vscode-remote://WSL+ubuntu/two')],
 	]) {
 		test(`retains all compatible ${folders[0].scheme} roots`, async () => {
+			instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: folders[0].scheme === 'vscode-remote' ? folders[0].authority : undefined }));
 			const opened: string[][] = [];
 			instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
 				override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { opened.push(Array.isArray(toOpen) ? toOpen.filter(isFolderToOpen).map(folder => folder.folderUri.toString()) : []); }

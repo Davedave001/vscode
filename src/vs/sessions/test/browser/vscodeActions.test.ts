@@ -41,9 +41,59 @@ import { IChat, ISession, ISessionWorkspace, SessionStatus } from '../../../work
 import { parseExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../workbench/services/sessions/browser/sessionHost.js';
 import { ITestSessionsService, ITestSessionWithChat, stubSessionHostsFromSessionsService } from '../../../workbench/contrib/sessions/test/browser/sessionHostTestUtils.js';
+import { IWorkbenchEnvironmentService } from '../../../workbench/services/environment/common/environmentService.js';
 
 suite('Web Open in Editor', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	function explicitRemoteFixture(source?: string) {
+		const instantiation = store.add(new TestInstantiationService());
+		const links: URI[] = [];
+		const notifications: string[] = [];
+		instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
+		instantiation.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => undefined }));
+		instantiation.stub(IAgentHostConnectionsService, upcastPartial<IAgentHostConnectionsService>({ resolveSessionResourceIdentity: () => undefined }));
+		instantiation.stub(IRemoteAgentHostLocationPreferenceService, upcastPartial<IRemoteAgentHostLocationPreferenceService>({ getPreference: () => undefined }));
+		instantiation.stub(ISSHRemoteAgentHostService, upcastPartial<ISSHRemoteAgentHostService>({ connections: [] }));
+		instantiation.stub(ITunnelAgentHostService, upcastPartial<ITunnelAgentHostService>({ getSelectedServerType: () => undefined }));
+		instantiation.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: source }));
+		instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notifications.push(String(message)); } }));
+		instantiation.stub(ITelemetryService, NullTelemetryService);
+		instantiation.stub(IProductService, upcastPartial<IProductService>({ urlProtocol: 'signal-c' }));
+		instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async uri => { links.push(URI.parse(uri.toString())); return true; } }));
+		return { instantiation, links, notifications };
+	}
+	for (const source of [undefined, 'ssh-remote+target', 'ssh-remote+other']) {
+		for (const count of [1, 2]) {
+			for (const sent of [false, true]) {
+				test(`preserves explicit remote roots and chat ownership without a provider resolver (${source ?? 'local'}, ${count}, ${sent ? 'sent' : 'draft'})`, async () => {
+					const { instantiation, links, notifications } = explicitRemoteFixture(source);
+					const folders = Array.from({ length: count }, (_, i) => URI.from({ scheme: 'vscode-remote', authority: 'ssh-remote+target', path: `/project${i}` }));
+					const chat = upcastPartial<IChat>({ resource: URI.parse('test:/chat'), status: constObservable(sent ? SessionStatus.Completed : SessionStatus.Untitled), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folders.map(root => ({ root, workingDirectory: root, name: 'project', description: undefined })) })) });
+					const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(SessionStatus.Completed) });
+					await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat }));
+					assert.strictEqual(links.length, 1);
+					const link = links[0];
+					const parsed = parseExternalEditorWindowLinkUri(link, 'signal-c');
+					assert.deepStrictEqual({ authority: link.authority, path: link.path, folders: parsed?.folders?.map(folder => folder.toString()), remote: parsed?.remoteAuthority, chat: new URLSearchParams(link.query).get('session'), notifications }, {
+						authority: count === 1 ? 'vscode-remote' : 'editor-window', path: count === 1 ? '/ssh-remote+target/project0' : '/open', folders: count === 1 ? undefined : folders.map(folder => folder.toString()), remote: count === 1 ? undefined : 'ssh-remote+target', chat: sent && source === 'ssh-remote+target' ? chat.resource.toString() : null, notifications: sent && source !== 'ssh-remote+target' ? ['This chat stays in Agents because the selected editor workspace uses a different connection.'] : [],
+					});
+				});
+			}
+		}
+	}
+	for (const folders of [
+		[URI.parse('vscode-remote://ssh-remote+target/project'), URI.file('/local')],
+		[URI.parse('vscode-remote://ssh-remote+target/project'), URI.parse('vscode-remote://ssh-remote+other/other')],
+		[URI.from({ scheme: 'vscode-remote', path: '/missing-host' })],
+	]) {
+		test(`does not infer one remote destination from incompatible roots: ${folders.map(folder => folder.toString()).join(', ')}`, async () => {
+			const { instantiation, links, notifications } = explicitRemoteFixture();
+			const chat = upcastPartial<IChat>({ resource: URI.parse('test:/chat'), status: constObservable(SessionStatus.Completed), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folders.map(root => ({ root, workingDirectory: root, name: 'project', description: undefined })) })) });
+			const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(SessionStatus.Completed) });
+			await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat }));
+			assert.deepStrictEqual({ links, notifications }, { links: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
+		});
+	}
 
 	for (const [status, parentStatus] of [[SessionStatus.Completed, SessionStatus.Completed], [SessionStatus.Untitled, SessionStatus.Untitled], [SessionStatus.Untitled, SessionStatus.Completed]]) {
 		for (const { explicit, network, folderless, multiRoot } of [

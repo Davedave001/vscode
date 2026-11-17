@@ -37,6 +37,7 @@ import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
 import { createExternalEditorWindowLinkUri, parseExternalEditorWindowLinkUri } from '../../../platform/window/common/window.js';
+import { IWorkbenchEnvironmentService } from '../../../workbench/services/environment/common/environmentService.js';
 
 export class OpenInVSCodeAction extends Action2 {
 	static readonly ID = 'sessions.openInVSCode';
@@ -92,11 +93,18 @@ export class OpenInVSCodeAction extends Action2 {
 			return;
 		}
 
-		const remoteAuthority = resolveRemoteAuthority(
+		const providerRemoteAuthority = resolveRemoteAuthority(
 			activeSession.providerId, sessionsProvidersService, remoteAgentHostService);
+		const explicitRemoteFolder = resolvedFolderUris.find(folder => folder.scheme === Schemas.vscodeRemote);
+		const remoteAuthority = providerRemoteAuthority ?? explicitRemoteFolder?.authority;
+		if (!providerRemoteAuthority && explicitRemoteFolder && !parseExternalEditorWindowLinkUri(createExternalEditorWindowLinkUri(scheme, { remoteAuthority, folders: resolvedFolderUris }), scheme)) {
+			notifyUnsupportedWorkspace();
+			return;
+		}
+		const workspaceConnection = remoteAuthority ? { targetRemoteAuthority: remoteAuthority, sourceRemoteAuthority: providerRemoteAuthority ?? accessor.get(IWorkbenchEnvironmentService).remoteAuthority } : undefined;
 
 		const chatSessionToOpen = getChatSessionToOpenInEditor(activeSession, chat);
-		const chatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, activeSession.providerId, sessionsProvidersService, remoteAgentHostService, accessor.get(IAgentHostConnectionsService), accessor.get(ITunnelAgentHostService), accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService));
+		const chatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, activeSession.providerId, sessionsProvidersService, remoteAgentHostService, accessor.get(IAgentHostConnectionsService), accessor.get(ITunnelAgentHostService), accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService), workspaceConnection);
 		if (URI.isUri(chatSession)) {
 			params.set('session', chatSession.toString());
 		}

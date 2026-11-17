@@ -136,7 +136,7 @@ export function resolveRemoteFolderUri(
 }
 
 /** Why the editor window cannot open a session from the connected remote agent host. */
-export type EditorWindowSessionUnsupportedReason = 'unsupported' | 'differentAgentHost';
+export type EditorWindowSessionUnsupportedReason = 'unsupported' | 'differentAgentHost' | 'workspaceHostMismatch';
 
 /** Editor-owned endpoints are shared only when the editor window follows the same stored SSH preference. */
 export function getEditorWindowSessionUnsupportedReason(
@@ -176,9 +176,13 @@ export function getEditorWindowSessionResource(
 	tunnelAgentHostService: ITunnelAgentHostService,
 	sshRemoteAgentHostService: ISSHRemoteAgentHostService,
 	locationPreferenceService: IRemoteAgentHostLocationPreferenceService,
+	workspaceConnection?: { readonly targetRemoteAuthority?: string; readonly sourceRemoteAuthority?: string },
 ): URI | EditorWindowSessionUnsupportedReason {
 	const connectionAuthority = agentHostConnectionsService.resolveSessionResourceIdentity(resource)?.connectionAuthority;
 	if (!connectionAuthority || connectionAuthority === AMBIENT_AGENT_HOST_AUTHORITY) {
+		if (workspaceConnection?.targetRemoteAuthority && !isEqualAuthority(workspaceConnection.targetRemoteAuthority, workspaceConnection.sourceRemoteAuthority)) {
+			return 'workspaceHostMismatch';
+		}
 		return resource;
 	}
 	const sessionType = toLocalAgentHostSessionType(resource.scheme, connectionAuthority);
@@ -195,6 +199,10 @@ export function getEditorWindowSessionResource(
 
 /** Explains why an editor window cannot open the session's chat. */
 export function notifyEditorWindowSessionUnsupported(notificationService: INotificationService, reason: EditorWindowSessionUnsupportedReason, hasWorkspace = true): void {
+	if (reason === 'workspaceHostMismatch') {
+		notificationService.info(localize('openInVSCode.workspaceHostMismatch', "This chat stays in Agents because the selected editor workspace uses a different connection."));
+		return;
+	}
 	if (!hasWorkspace) {
 		notificationService.info(reason === 'differentAgentHost'
 			? localize('openInVSCode.folderlessDifferentAgentHost', "This chat can't be opened in the editor because it uses a different agent host on the remote machine.")

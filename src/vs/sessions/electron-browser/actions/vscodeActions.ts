@@ -43,6 +43,7 @@ import { ILabelService, Verbosity } from '../../../platform/label/common/label.j
 import { OPEN_VSCODE_WINDOW_COMMAND_ID, RETURN_TO_VSCODE_EDITOR_COMMAND_ID, SHOULD_SHOW_RETURN_TO_VSCODE_EDITOR_COMMAND_ID } from '../../../workbench/contrib/sessions/common/sessionCommands.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
 import { AGENT_HOST_SCHEME } from '../../../platform/agentHost/common/agentHostUri.js';
+import { IWorkbenchEnvironmentService } from '../../../workbench/services/environment/common/environmentService.js';
 
 export class OpenSessionInVSCodeAction extends Action2 {
 	static readonly ID = 'agents.openSessionInVSCode';
@@ -115,8 +116,10 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 		return;
 	}
 
+	const targetRemoteAuthority = foldersToOpen.find(folder => folder.folderUri.scheme === Schemas.vscodeRemote)?.folderUri.authority;
+	const workspaceConnection = targetRemoteAuthority ? { targetRemoteAuthority, sourceRemoteAuthority: resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService) ?? accessor.get(IWorkbenchEnvironmentService).remoteAuthority } : undefined;
 	const chatSessionToOpen = getChatSessionToOpenInEditor(session, chat);
-	const editorChatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, session.providerId, sessionsProvidersService, remoteAgentHostService, agentHostConnectionsService, tunnelAgentHostService, accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService));
+	const editorChatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, session.providerId, sessionsProvidersService, remoteAgentHostService, agentHostConnectionsService, tunnelAgentHostService, accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService), workspaceConnection);
 	if (typeof editorChatSession === 'string') {
 		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession, folders.length > 0);
 	}
