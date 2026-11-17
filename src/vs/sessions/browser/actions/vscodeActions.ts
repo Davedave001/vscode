@@ -67,6 +67,7 @@ export class OpenInVSCodeAction extends Action2 {
 		const productService = accessor.get(IProductService);
 		const sessionsProvidersService = accessor.get(ISessionsProvidersService);
 		const remoteAgentHostService = accessor.get(IRemoteAgentHostService);
+		const ambientRemoteAuthority = accessor.get(IWorkbenchEnvironmentService).remoteAuthority;
 
 		const scheme = productService.urlProtocol;
 
@@ -76,7 +77,7 @@ export class OpenInVSCodeAction extends Action2 {
 		const target = context?.session ? context : resolveSessionCommandTarget(accessor, []);
 		const activeSession = target?.session;
 		if (!activeSession) {
-			await openerService.open(createExternalEditorWindowLinkUri(scheme), { openExternal: true });
+			await openerService.open(createExternalEditorWindowLinkUri(scheme, { remoteAuthority: ambientRemoteAuthority }), { openExternal: true });
 			return;
 		}
 
@@ -89,19 +90,19 @@ export class OpenInVSCodeAction extends Action2 {
 		const resolvedFolderUris = rawFolderUris.map(folder => resolveRemoteFolderUri(folder, activeSession.providerId, sessionsProvidersService, remoteAgentHostService));
 		if (!resolvedFolderUris.every((folder): folder is URI => !!folder)) {
 			if (rawFolderUris.length > 1) { notifyUnsupportedWorkspace(); return; }
-			await openerService.open(URI.from({ scheme, query: params.toString() }), { openExternal: true });
+			await openerService.open(ambientRemoteAuthority ? createExternalEditorWindowLinkUri(scheme, { remoteAuthority: ambientRemoteAuthority }) : URI.from({ scheme, query: params.toString() }), { openExternal: true });
 			return;
 		}
 
 		const providerRemoteAuthority = resolveRemoteAuthority(
 			activeSession.providerId, sessionsProvidersService, remoteAgentHostService);
 		const explicitRemoteFolder = resolvedFolderUris.find(folder => folder.scheme === Schemas.vscodeRemote);
-		const remoteAuthority = providerRemoteAuthority ?? explicitRemoteFolder?.authority;
-		if (!providerRemoteAuthority && explicitRemoteFolder && !parseExternalEditorWindowLinkUri(createExternalEditorWindowLinkUri(scheme, { remoteAuthority, folders: resolvedFolderUris }), scheme)) {
+		const remoteAuthority = rawFolderUri ? explicitRemoteFolder?.authority : providerRemoteAuthority ?? ambientRemoteAuthority;
+		if (explicitRemoteFolder && !parseExternalEditorWindowLinkUri(createExternalEditorWindowLinkUri(scheme, { remoteAuthority, folders: resolvedFolderUris }), scheme)) {
 			notifyUnsupportedWorkspace();
 			return;
 		}
-		const workspaceConnection = remoteAuthority ? { targetRemoteAuthority: remoteAuthority, sourceRemoteAuthority: providerRemoteAuthority ?? accessor.get(IWorkbenchEnvironmentService).remoteAuthority } : undefined;
+		const workspaceConnection = { targetRemoteAuthority: remoteAuthority, sourceRemoteAuthority: providerRemoteAuthority ?? ambientRemoteAuthority };
 
 		const chatSessionToOpen = getChatSessionToOpenInEditor(activeSession, chat);
 		const chatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, activeSession.providerId, sessionsProvidersService, remoteAgentHostService, accessor.get(IAgentHostConnectionsService), accessor.get(ITunnelAgentHostService), accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService), workspaceConnection);

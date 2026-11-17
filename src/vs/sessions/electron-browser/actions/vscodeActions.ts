@@ -85,9 +85,10 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	const tunnelAgentHostService = accessor.get(ITunnelAgentHostService);
 	const notificationService = accessor.get(INotificationService);
 	const labelService = accessor.get(ILabelService);
+	const ambientRemoteAuthority = accessor.get(IWorkbenchEnvironmentService).remoteAuthority;
 
 	if (!session) {
-		return nativeHostService.openWindow({ remoteAuthority: null, reuseExistingWindow: true });
+		return nativeHostService.openWindow({ remoteAuthority: ambientRemoteAuthority ?? null, reuseExistingWindow: true });
 	}
 
 	const folders = (chat ?? session.mainChat.get())?.workspace.get()?.folders ?? [];
@@ -102,7 +103,7 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 		const folderUri = resolveRemoteFolderUri(folder.workingDirectory, session.providerId, sessionsProvidersService, remoteAgentHostService);
 		if (!folderUri) {
 			if (folders.length > 1) { notifyUnsupportedWorkspace(); return; }
-			return nativeHostService.openWindow({ remoteAuthority: null });
+			return nativeHostService.openWindow({ remoteAuthority: ambientRemoteAuthority ?? null });
 		}
 		// Keep the host's path formatter while labeling the same resolved path the editor will open.
 		const labelUri = folder.workingDirectory.scheme === AGENT_HOST_SCHEME ? folder.workingDirectory.with({ path: folderUri.path }) : folder.workingDirectory;
@@ -116,16 +117,16 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 		return;
 	}
 
-	const targetRemoteAuthority = foldersToOpen.find(folder => folder.folderUri.scheme === Schemas.vscodeRemote)?.folderUri.authority;
-	const workspaceConnection = targetRemoteAuthority ? { targetRemoteAuthority, sourceRemoteAuthority: resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService) ?? accessor.get(IWorkbenchEnvironmentService).remoteAuthority } : undefined;
+	const providerRemoteAuthority = resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService);
+	const targetRemoteAuthority = foldersToOpen.length ? foldersToOpen.find(folder => folder.folderUri.scheme === Schemas.vscodeRemote)?.folderUri.authority : providerRemoteAuthority ?? ambientRemoteAuthority;
+	const workspaceConnection = { targetRemoteAuthority, sourceRemoteAuthority: providerRemoteAuthority ?? ambientRemoteAuthority };
 	const chatSessionToOpen = getChatSessionToOpenInEditor(session, chat);
 	const editorChatSession = chatSessionToOpen && getEditorWindowSessionResource(chatSessionToOpen, session.providerId, sessionsProvidersService, remoteAgentHostService, agentHostConnectionsService, tunnelAgentHostService, accessor.get(ISSHRemoteAgentHostService), accessor.get(IRemoteAgentHostLocationPreferenceService), workspaceConnection);
 	if (typeof editorChatSession === 'string') {
 		notifyEditorWindowSessionUnsupported(notificationService, editorChatSession, folders.length > 0);
 	}
 	if (!foldersToOpen.length) {
-		const remoteAuthority = resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService);
-		return nativeHostService.openWindow({ remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true, ...(URI.isUri(editorChatSession) ? { chatSessionToOpen: editorChatSession } : {}) });
+		return nativeHostService.openWindow({ remoteAuthority: targetRemoteAuthority ?? null, reuseExistingWindow: true, ...(URI.isUri(editorChatSession) ? { chatSessionToOpen: editorChatSession } : {}) });
 	}
 	return nativeHostService.openWindow(foldersToOpen, { forceNewWindow: true, reuseWorkspaceContainingFolder: true, chatSessionToOpen: URI.isUri(editorChatSession) ? editorChatSession : undefined });
 }

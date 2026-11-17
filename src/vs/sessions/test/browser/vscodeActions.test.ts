@@ -62,6 +62,52 @@ suite('Web Open in Editor', () => {
 		instantiation.stub(IOpenerService, upcastPartial<IOpenerService>({ open: async uri => { links.push(URI.parse(uri.toString())); return true; } }));
 		return { instantiation, links, notifications };
 	}
+	for (const source of [undefined, 'ssh-remote+source']) {
+		for (const count of [0, 1, 2]) {
+			for (const sent of [false, true]) {
+				test(`keeps ambient connection context for local or folderless handoff (${source ?? 'local'}, ${count}, ${sent ? 'sent' : 'draft'})`, async () => {
+					const { instantiation, links, notifications } = explicitRemoteFixture(source);
+					const folders = Array.from({ length: count }, (_, i) => URI.file(`/local${i}`));
+					const chat = upcastPartial<IChat>({ resource: URI.parse('test:/ambient'), status: constObservable(sent ? SessionStatus.Completed : SessionStatus.Untitled), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: folders.map(root => ({ root, workingDirectory: root, name: 'local', description: undefined })) })) });
+					const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(SessionStatus.Completed) });
+					await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat }));
+					assert.strictEqual(links.length, 1);
+					const link = links[0];
+					const parsed = parseExternalEditorWindowLinkUri(link, 'signal-c');
+					assert.deepStrictEqual({ authority: link.authority, path: link.path, remote: parsed?.remoteAuthority, folders: parsed?.folders?.map(folder => folder.toString()), chat: new URLSearchParams(link.query).get('session'), notifications }, {
+						authority: count === 1 ? 'file' : 'editor-window', path: count === 1 ? folders[0].path : '/open', remote: count === 0 ? source : undefined, folders: count === 2 ? folders.map(folder => folder.toString()) : undefined, chat: sent && (!source || count === 0) ? chat.resource.toString() : null, notifications: sent && source && count > 0 ? ['This chat stays in Agents because the selected editor workspace uses a different connection.'] : [],
+					});
+				});
+			}
+		}
+	}
+	test('keeps a remote ambient connection when there is no selected session', async () => {
+		const { instantiation, links } = explicitRemoteFixture('ssh-remote+source');
+		instantiation.stub(ISessionsService, upcastPartial<ITestSessionsService>({ activeSession: constObservable(undefined) }));
+		stubSessionHostsFromSessionsService(instantiation);
+		await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor));
+		assert.strictEqual(parseExternalEditorWindowLinkUri(links[0], 'signal-c')?.remoteAuthority, 'ssh-remote+source');
+	});
+	test('keeps the ambient remote on an unsupported single-folder fallback without transferring a chat', async () => {
+		const { instantiation, links, notifications } = explicitRemoteFixture('ssh-remote+source');
+		const folder = toAgentHostUri(URI.file('/unsupported'), agentHostAuthority('ws:other'));
+		const chat = upcastPartial<IChat>({ resource: URI.parse('test:/chat'), status: constObservable(SessionStatus.Completed), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'other', description: undefined }] })) });
+		const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(SessionStatus.Completed) });
+		await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat }));
+		const parsed = parseExternalEditorWindowLinkUri(links[0], 'signal-c');
+		assert.deepStrictEqual({ remote: parsed?.remoteAuthority, chat: parsed?.chatSessionToOpen, notifications }, { remote: 'ssh-remote+source', chat: undefined, notifications: [] });
+	});
+	test('does not reinterpret explicit local folders through a remote provider', async () => {
+		const { instantiation, links, notifications } = explicitRemoteFixture();
+		const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: 'ssh:source' });
+		instantiation.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
+		instantiation.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => ({ name: 'Source', connection: { type: RemoteAgentHostEntryType.SSH, address: 'ssh:source', hostName: 'source' } }) }));
+		const folder = URI.file('/local');
+		const chat = upcastPartial<IChat>({ resource: URI.parse('test:/remote'), status: constObservable(SessionStatus.Completed), workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [{ root: folder, workingDirectory: folder, name: 'local', description: undefined }] })) });
+		const session = upcastPartial<ISession>({ resource: URI.parse('test:/parent'), providerId: 'test', status: constObservable(SessionStatus.Completed) });
+		await instantiation.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat }));
+		assert.deepStrictEqual({ links: links.map(link => ({ authority: link.authority, path: link.path, chat: new URLSearchParams(link.query).get('session') })), notifications }, { links: [{ authority: 'file', path: '/local', chat: null }], notifications: ['This chat stays in Agents because the selected editor workspace uses a different connection.'] });
+	});
 	for (const source of [undefined, 'ssh-remote+target', 'ssh-remote+other']) {
 		for (const count of [1, 2]) {
 			for (const sent of [false, true]) {
@@ -103,6 +149,7 @@ suite('Web Open in Editor', () => {
 			test(`opens the ${explicit ? 'clicked' : 'focused'} chat ${multiRoot ? 'multi-root' : folderless ? 'folderless' : network ? 'network' : 'local'} workspace and ${status === SessionStatus.Untitled ? 'keeps the draft in Agents' : 'hands off that chat'} (parent status: ${parentStatus})`, async () => {
 				const instantiation = store.add(new TestInstantiationService());
 				const mainFolder = URI.file('/main project');
+				instantiation.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: undefined }));
 				const folder = network
 					? URI.from({ scheme: 'file', authority: 'fileserver', path: explicit ? '/shared projects/clicked # & 100%/项目' : '/shared projects/nested # & 100%/项目' })
 					: URI.file(explicit ? '/clicked project' : '/nested project');
@@ -158,6 +205,7 @@ suite('Web Open in Editor', () => {
 		test(`routes ${connection.type} without opening remote paths locally`, async () => {
 			const instantiationService = store.add(new TestInstantiationService());
 			const calls: { authority: string; path: string; query: string; openExternal: boolean | undefined }[] = [];
+			instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: undefined }));
 			const folder = toAgentHostUri(URI.from({ scheme: 'file', path: '/c:/Users/test/project' }), agentHostAuthority(connection.address));
 			const workspace = upcastPartial<ISessionWorkspace>({ folders: [{ workingDirectory: folder, root: folder, name: 'project', description: undefined }] });
 			const session = upcastPartial<ITestSessionWithChat>({
@@ -220,6 +268,7 @@ suite('Web Open in Editor', () => {
 		test(`hands off ${connection.type} sessions when the editor follows the selected host (${serverType ?? 'standalone'}, ${preference ?? 'no preference'})`, async () => {
 			const instantiationService = store.add(new TestInstantiationService());
 			const entry = { name: 'Remote host', connection };
+			instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: undefined }));
 			const address = getEntryAddress(entry);
 			const authority = agentHostAuthority(address);
 			const folder = toAgentHostUri(URI.file('/project'), authority);

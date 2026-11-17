@@ -178,11 +178,11 @@ export function getEditorWindowSessionResource(
 	locationPreferenceService: IRemoteAgentHostLocationPreferenceService,
 	workspaceConnection?: { readonly targetRemoteAuthority?: string; readonly sourceRemoteAuthority?: string },
 ): URI | EditorWindowSessionUnsupportedReason {
+	if (workspaceConnection && !isEqualAuthority(workspaceConnection.targetRemoteAuthority, workspaceConnection.sourceRemoteAuthority)) {
+		return 'workspaceHostMismatch';
+	}
 	const connectionAuthority = agentHostConnectionsService.resolveSessionResourceIdentity(resource)?.connectionAuthority;
 	if (!connectionAuthority || connectionAuthority === AMBIENT_AGENT_HOST_AUTHORITY) {
-		if (workspaceConnection?.targetRemoteAuthority && !isEqualAuthority(workspaceConnection.targetRemoteAuthority, workspaceConnection.sourceRemoteAuthority)) {
-			return 'workspaceHostMismatch';
-		}
 		return resource;
 	}
 	const sessionType = toLocalAgentHostSessionType(resource.scheme, connectionAuthority);

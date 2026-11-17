@@ -43,6 +43,7 @@ suite('VS Code Actions', () => {
 	setup(() => {
 		instantiationService = workbenchInstantiationService(undefined, disposables);
 		labelService = disposables.add(instantiationService.createInstance(LabelService));
+		instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: undefined }));
 		instantiationService.stub(ILabelService, labelService);
 		instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: () => undefined }));
 		instantiationService.stub(IRemoteAgentHostService, new class extends mock<IRemoteAgentHostService>() { }());
@@ -52,6 +53,56 @@ suite('VS Code Actions', () => {
 		instantiationService.stub(ITunnelAgentHostService, upcastPartial<ITunnelAgentHostService>({ getSelectedServerType: () => undefined }));
 		notifications = [];
 		instantiationService.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notifications.push(String(message)); } }));
+	});
+	for (const source of [undefined, 'ssh-remote+source']) {
+		for (const count of [0, 1, 2]) {
+			for (const sent of [false, true]) {
+				test(`retains ambient ownership for local or folderless workspaces (${source ?? 'local'}, ${count}, ${sent ? 'sent' : 'draft'})`, async () => {
+					instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: source }));
+					const folders = Array.from({ length: count }, (_, i) => URI.file(`/local${i}`));
+					const calls: { folders?: string[]; remote?: string | null; chat?: string }[] = [];
+					instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+						override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> { calls.push(Array.isArray(toOpen) ? { folders: toOpen.filter(isFolderToOpen).map(folder => folder.folderUri.toString()), chat: options?.chatSessionToOpen?.toString() } : { remote: toOpen?.remoteAuthority, chat: toOpen?.chatSessionToOpen?.toString() }); }
+					}());
+					await instantiationService.invokeFunction(openSessionInVSCode, createSession('ambient', sent, folders));
+					const chat = sent && (!source || count === 0) ? 'test:/ambient' : undefined;
+					assert.deepStrictEqual({ calls, notifications }, { calls: [count === 0 ? { remote: source ?? null, chat } : { folders: folders.map(folder => folder.toString()), chat }], notifications: sent && source && count > 0 ? ['This chat stays in Agents because the selected editor workspace uses a different connection.'] : [] });
+				});
+			}
+		}
+	}
+	test('keeps the ambient remote when opening an editor without a selected session', async () => {
+		instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: 'ssh-remote+source' }));
+		const calls: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { calls.push(toOpen); }
+		}());
+		await instantiationService.invokeFunction(openSessionInVSCode, undefined);
+		assert.deepStrictEqual(calls, [{ remoteAuthority: 'ssh-remote+source', reuseExistingWindow: true }]);
+	});
+	test('keeps the ambient remote for an unsupported single-folder fallback', async () => {
+		instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: 'ssh-remote+source' }));
+		const calls: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { calls.push(toOpen); }
+		}());
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('unsupported', true, [toAgentHostUri(URI.file('/unsupported'), agentHostAuthority('ws:other'))]));
+		assert.deepStrictEqual(calls, [{ remoteAuthority: 'ssh-remote+source' }]);
+	});
+	test('keeps a registered remote conversation out of an explicit local workspace', async () => {
+		const address = 'ssh:source';
+		const authority = agentHostAuthority(address);
+		const resource = URI.from({ scheme: remoteAgentHostSessionTypeId(authority, 'copilotcli'), path: '/conversation' });
+		const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
+		instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
+		instantiationService.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => ({ name: 'Source', connection: { type: RemoteAgentHostEntryType.SSH, address, hostName: 'source' } }) }));
+		instantiationService.stub(IAgentHostConnectionsService, upcastPartial<IAgentHostConnectionsService>({ resolveSessionResourceIdentity: () => ({ connectionAuthority: authority, backendSession: URI.parse('copilotcli:/conversation') }) }));
+		const chats: (string | undefined)[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(_toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> { chats.push(options?.chatSessionToOpen?.toString()); }
+		}());
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('remote', true, [URI.file('/local')], resource));
+		assert.deepStrictEqual({ chats, notifications }, { chats: [undefined], notifications: ['This chat stays in Agents because the selected editor workspace uses a different connection.'] });
 	});
 	for (const source of [undefined, 'ssh-remote+target', 'ssh-remote+other']) {
 		for (const count of [1, 2]) {
