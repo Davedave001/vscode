@@ -73,4 +73,17 @@ export const signalCAppConnections: readonly ISignalCAppConnection[] = [
 	{ id: 'box', name: 'Box', description: localize('apps.box', "Files, folders, content search and Box AI"), url: 'https://mcp.box.com', documentation: 'https://support.box.com/hc/en-us/articles/43847256139923-Managing-Box-MCP-Servers', clientIdRequired: true, setup: localize('apps.box.setup', "Have your Box administrator configure an MCP server integration and its redirect URI in the Admin Console. Use the generated client ID, and provide its client secret through the MCP credential flow. Box does not support automatic client registration.") },
 	{ id: 'dropbox', name: 'Dropbox', description: localize('apps.dropbox', "Files, folders, document content and Dropbox Paper"), url: 'https://mcp.dropbox.com/mcp', documentation: 'https://help.dropbox.com/integrations/connect-dropbox-mcp-server', clientIdRequired: true, setup: localize('apps.dropbox.setup', "Dropbox limits automatic client registration to approved clients. For Signal-C, follow the custom OAuth app setup in Dropbox's guide and register the redirect URLs shown during authentication, then enter your app's public client ID.") },
 	{ id: 'xero', name: 'Xero', description: localize('apps.xero', "Accounting, invoices, contacts and organization data"), url: 'https://api.xero.com/mcp/v1', documentation: 'https://developer.xero.com/documentation/guides/remote-mcp/overview', clientIdRequired: true, setup: localize('apps.xero.setup', "Register a Xero OAuth app with PKCE and the redirect URI shown by Signal-C. Enter its public client ID and authorize the Xero organizations you want to connect. Your existing Xero app permissions and plan requirements apply.") },
+	{
+		id: 'paypal', name: 'PayPal (Production)',
+		description: localize('apps.paypal', "Live invoices, payments and transactions"),
+		url: 'https://mcp.paypal.com/http', documentation: 'https://developer.paypal.com/ai-tools/mcp-server/',
+		setup: localize('apps.paypal.setup', "Sign in to the PayPal account you want to connect. This server uses live account data and transactions. Choose PayPal (Sandbox) to work with a test account."),
+	},
+	{
+		id: 'paypal-sandbox', name: 'PayPal (Sandbox)',
+		description: localize('apps.paypal.sandbox', "Test invoices, payments and transactions"),
+		url: 'https://mcp.sandbox.paypal.com/http', documentation: 'https://developer.paypal.com/ai-tools/mcp-server/',
+		setup: localize('apps.paypal.sandbox.setup', "Sign in with a PayPal sandbox test account to work with test payments and invoices."),
+	},
+	{ id: 'posthog', name: 'PostHog', description: localize('apps.posthog', "Product analytics, feature flags and experiments"), url: 'https://mcp.posthog.com/mcp', documentation: 'https://posthog.com/docs/model-context-protocol/vscode' },
 ];

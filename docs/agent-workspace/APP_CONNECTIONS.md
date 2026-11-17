@@ -8,7 +8,7 @@ Registered-client providers such as Asana, Slack, Canva and HubSpot ask for a pu
 
 ## Available apps
 
-The catalog covers 34 apps. Intercom has separate US and EU endpoints; QuickBooks has a local-server connection and a separate hosted-pilot setup entry.
+The catalog covers 36 apps. Intercom has US and EU endpoints, PayPal has production and sandbox endpoints, and QuickBooks has an official local server and a hosted-pilot setup entry.
 
 | App | Route | Provider setup guide |
 | --- | --- | --- |
@@ -46,6 +46,8 @@ The catalog covers 34 apps. Intercom has separate US and EU endpoints; QuickBook
 | Box | Registered OAuth; administrator integration setup | [Box](https://support.box.com/hc/en-us/articles/43847256139923-Managing-Box-MCP-Servers) |
 | Dropbox | Registered OAuth; automatic registration limited to approved clients | [Dropbox](https://help.dropbox.com/integrations/connect-dropbox-mcp-server) |
 | Xero | Registered OAuth with PKCE | [Xero](https://developer.xero.com/documentation/guides/remote-mcp/overview) |
+| PayPal | Separate production and sandbox remote HTTP OAuth connections | [PayPal](https://developer.paypal.com/ai-tools/mcp-server/) |
+| PostHog | Remote HTTP with OAuth and provider-managed region selection | [PostHog](https://posthog.com/docs/model-context-protocol/vscode) |
 
 For Google Workspace, enable the relevant MCP APIs in a Cloud project, configure consent, and mark the OAuth client for an AI-powered agent. Register Signal-C's redirect URLs. Chat also needs a configured Chat app; follow the Classroom test prerequisites when testing that service. Each entry points to the provider's setup guide before collecting a public client ID.
 

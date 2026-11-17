@@ -239,6 +239,26 @@ suite('MCP configuration entry points', () => {
 		assert.ok(fixture.quickInput.pickOptions[0].placeholder?.includes('review setup'));
 	});
 
+	for (const [name, id, url] of [
+		['PayPal (Production)', 'paypal', 'https://mcp.paypal.com/http'],
+		['PayPal (Sandbox)', 'paypal-sandbox', 'https://mcp.sandbox.paypal.com/http'],
+		['PostHog', 'posthog', 'https://mcp.posthog.com/mcp'],
+	]) {
+		test(`${name} installs its own endpoint using OAuth discovery`, async () => {
+			const fixture = setup(true);
+			fixture.quickInput.selections.push(name, 'Connect with OAuth', 'Global');
+			fixture.quickInput.inputs.push('$suggested');
+			await new ConnectAppAction().run(fixture.instantiation);
+			assert.deepStrictEqual(fixture.errors, []);
+			assert.strictEqual(fixture.installs.length, 1);
+			assert.strictEqual(fixture.installs[0].server.name.replace(/-[0-9a-f]{8}$/, ''), id);
+			assert.deepStrictEqual(fixture.installs[0].server.config, {
+				type: McpServerType.REMOTE, transport: 'http', url,
+			});
+			assert.deepStrictEqual(fixture.started, ['installed:/user/mcp.json']);
+		});
+	}
+
 	test('registered OAuth apps store only a public registered client ID', async () => {
 		const fixture = setup(true);
 		fixture.quickInput.selections.push('Asana', 'Connect with OAuth', 'Global');

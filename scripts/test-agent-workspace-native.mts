@@ -63,7 +63,7 @@ const report = {
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
 	modelRequestCount: 0,
-	appPickerVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
+	appPickerVerified: false, payPalSandboxVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
 	appHeaderVerified: false, googleOAuthSetupVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
@@ -184,13 +184,30 @@ try {
 		const paths = [join(profile, 'User/mcp.json'), join(profile, 'User/profiles/builtin/agents/mcp.json'), join(run, 'copilot/mcp-config.json'), ...folders.flatMap(folder => [join(folder, '.mcp.json'), join(folder, '.vscode/mcp.json')])];
 		const readConfigurations = () => Promise.all(paths.map(file => readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') { return undefined; } throw error; })));
 		const before = await readConfigurations();
-		await page.getByRole('switch', { name: 'IDE mode', exact: true }).focus();
-		await page.keyboard.press('Control+Shift+P');
 		const input = page.locator('.quick-input-widget input').first();
-		await input.fill('>Signal-C: Connect App');
-		await page.getByRole('option').filter({ hasText: 'Signal-C: Connect App' }).waitFor();
-		await input.press('Enter');
-		await page.getByText('Signal-C App Connections', { exact: true }).waitFor();
+		const openAppPicker = async () => {
+			await page.getByRole('switch', { name: 'IDE mode', exact: true }).focus();
+			await page.keyboard.press('Control+Shift+P');
+			await input.fill('>Signal-C: Connect App');
+			await page.getByRole('option').filter({ hasText: 'Signal-C: Connect App' }).waitFor();
+			await input.press('Enter');
+			await page.getByText('Signal-C App Connections', { exact: true }).waitFor();
+		};
+		await openAppPicker();
+		await input.fill('PayPal');
+		const payPalProduction = page.getByRole('option').filter({ has: page.getByText('PayPal (Production)', { exact: true }) });
+		const payPalSandbox = page.getByRole('option').filter({ has: page.getByText('PayPal (Sandbox)', { exact: true }) });
+		await Promise.all([payPalProduction.waitFor(), payPalSandbox.waitFor()]);
+		await payPalSandbox.click();
+		const sandboxReview = page.getByRole('dialog').filter({ hasText: 'Connect PayPal (Sandbox)' });
+		await sandboxReview.waitFor();
+		const sandboxDetails = await sandboxReview.innerText();
+		assert.ok(sandboxDetails.includes('https://mcp.sandbox.paypal.com/http'));
+		assert.ok(sandboxDetails.includes('sandbox test account'));
+		report.payPalSandboxVerified = true;
+		await page.keyboard.press('Escape');
+		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		await openAppPicker();
 		await input.fill('QuickBooks');
 		await page.getByText('QuickBooks Online (Local Server)', { exact: true }).waitFor();
 		const hosted = page.getByRole('option').filter({ has: page.getByText('QuickBooks Online (Hosted Pilot)', { exact: true }) });
