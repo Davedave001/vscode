@@ -295,6 +295,85 @@ suite('Devin Subscription Agent', () => {
 		assert.strictEqual(f.events.filter(event => event.kind === 'action' && event.action.type === ActionType.ChatToolCallContentChanged).length, 1);
 	});
 
+	for (const { label, name, metadata, expected } of [
+		{ label: 'standard field takes precedence', name: 'standard-tool', metadata: { 'cognition.ai/toolName': 'native-tool' }, expected: 'standard-tool' },
+		{ label: 'native MCP identity', name: undefined, metadata: { 'cognition.ai/toolName': 'mcp__probe-server__echo_probe', 'cognition.ai/inferenceToolName': 'mcp_call_tool' }, expected: 'mcp__probe-server__echo_probe' },
+		{ label: 'built-in inference identity', name: undefined, metadata: { 'cognition.ai/inferenceToolName': 'mcp_list_tools' }, expected: 'mcp_list_tools' },
+		{ label: 'missing extension', name: undefined, metadata: undefined, expected: 'devin-tool' },
+		{ label: 'malformed extension', name: undefined, metadata: { 'cognition.ai/toolName': { name: 'invalid' }, 'cognition.ai/inferenceToolName': 42 }, expected: 'devin-tool' },
+		{ label: 'blank names use the next valid field', name: '', metadata: { 'cognition.ai/toolName': '  ', 'cognition.ai/inferenceToolName': 'read_file' }, expected: 'read_file' },
+		{ label: 'unrelated metadata is ignored', name: undefined, metadata: { toolName: 'untrusted-generic-key' }, expected: 'devin-tool' },
+	]) {
+		test(`preserves Devin tool identity in live actions and history: ${label}`, async () => {
+			const f = fixture();
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			f.onPrompt = (transport, request) => {
+				toolUpdate(transport, { sessionUpdate: 'tool_call', toolCallId: 'probe', title: 'Echo probe', name, _meta: metadata, rawInput: { nonce: 'test-only' } });
+				toolUpdate(transport, { sessionUpdate: 'tool_call_update', toolCallId: 'probe', status: 'in_progress' });
+				toolUpdate(transport, { sessionUpdate: 'tool_call_update', toolCallId: 'probe', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'confirmed' } }] });
+				transport.reply(request, { stopReason: 'end_turn' });
+			};
+			await f.agent.chats.sendMessage(chat, 'echo', [cwd], undefined, 'identity-turn');
+			const start = f.events.find(event => event.kind === 'action' && event.action.type === ActionType.ChatToolCallStart);
+			assert.ok(start?.kind === 'action' && start.action.type === ActionType.ChatToolCallStart);
+			assert.strictEqual(start.action.toolName, expected);
+			const part = (await f.agent.chats.getMessages(chat, owner))[0].responseParts[0];
+			assert.ok(part.kind === ResponsePartKind.ToolCall && part.toolCall.status === ToolCallStatus.Completed);
+			assert.strictEqual(part.toolCall.toolName, expected);
+			assert.strictEqual(part.toolCall.displayName, 'Echo probe');
+			assert.deepStrictEqual(part.toolCall.content, [{ type: ToolResultContentType.Text, text: 'confirmed' }]);
+			assert.strictEqual(part.toolCall.contributor, undefined);
+		});
+	}
+
+	test('retains the observed MCP identity, title, and arguments when a native permission request carries only the tool id', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		let promptRequest: Record<string, unknown>;
+		f.onPrompt = (transport, request) => {
+			promptRequest = request;
+			toolUpdate(transport, { sessionUpdate: 'tool_call', toolCallId: 'probe', title: 'Calling echo_probe from probe-server', rawInput: { nonce: 'test-only' }, _meta: { 'cognition.ai/toolName': 'mcp__probe-server__echo_probe' } });
+			transport.receive({ jsonrpc: '2.0', id: 'permission', method: 'session/request_permission', params: { sessionId: 'native', toolCall: { toolCallId: 'probe', _meta: { 'cognition.ai/inferenceToolName': 'mcp__probe-server__echo_probe' } }, options: [{ optionId: 'once', kind: 'allow_once' }] } });
+		};
+		const waiting = Event.toPromise(Event.filter(f.agent.onDidChatProgress, event => event.kind === 'pending_confirmation'));
+		const send = f.agent.chats.sendMessage(chat, 'echo', [cwd], undefined, 'host-turn');
+		const pending = await waiting;
+		assert.ok(pending.kind === 'pending_confirmation');
+		assert.strictEqual(pending.state.toolName, 'mcp__probe-server__echo_probe');
+		assert.strictEqual(pending.state.displayName, 'Calling echo_probe from probe-server');
+		assert.strictEqual(pending.state.toolInput, JSON.stringify({ nonce: 'test-only' }, undefined, 2));
+		const transport = f.transports[0];
+		const replied = Event.toPromise(Event.filter(transport.onSend, message => Object.hasOwn(message, 'result')));
+		f.agent.respondToPermissionRequest('host-turn:probe', true);
+		await replied;
+		assert.deepStrictEqual(transport.sent.find(message => Object.hasOwn(message, 'result'))?.result, { outcome: { outcome: 'selected', optionId: 'once' } });
+		toolUpdate(transport, { sessionUpdate: 'tool_call_update', toolCallId: 'probe', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'confirmed' } }] });
+		transport.reply(promptRequest!, { stopReason: 'end_turn' });
+		await send;
+		const part = (await f.agent.chats.getMessages(chat, owner))[0].responseParts[0];
+		assert.ok(part.kind === ResponsePartKind.ToolCall && part.toolCall.status === ToolCallStatus.Completed);
+		assert.strictEqual(part.toolCall.confirmed, ToolCallConfirmationReason.UserAction);
+	});
+
+	test('restores native Devin MCP tool identity and result from ACP history replay without emitting live tool actions', async () => {
+		const f = fixture();
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.materializeChat(chat, owner, JSON.stringify({ version: 1, sessionId: 'native', cwd: cwd.toString(), createdAt: 1 }));
+		f.onLoad = (transport, request) => {
+			toolUpdate(transport, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'echo' } });
+			toolUpdate(transport, { sessionUpdate: 'tool_call', toolCallId: 'probe', title: 'Calling echo_probe from probe-server', rawInput: { nonce: 'test-only' }, _meta: { 'cognition.ai/toolName': 'mcp__probe-server__echo_probe' } });
+			toolUpdate(transport, { sessionUpdate: 'tool_call_update', toolCallId: 'probe', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'confirmed' } }] });
+			transport.reply(request, {});
+		};
+		const part = (await f.agent.chats.getMessages(chat, owner))[0].responseParts[0];
+		assert.ok(part.kind === ResponsePartKind.ToolCall && part.toolCall.status === ToolCallStatus.Completed);
+		assert.strictEqual(part.toolCall.toolName, 'mcp__probe-server__echo_probe');
+		assert.deepStrictEqual(part.toolCall.content, [{ type: ToolResultContentType.Text, text: 'confirmed' }]);
+		assert.ok(!f.events.some(event => event.kind === 'action' && event.action.type === ActionType.ChatToolCallStart));
+	});
+
 	test('keeps the latest raw output and updates running metadata without losing the result', async () => {
 		const f = fixture();
 		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');

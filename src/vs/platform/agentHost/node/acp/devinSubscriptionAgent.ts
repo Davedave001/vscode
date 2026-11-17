@@ -28,6 +28,20 @@ import { type AcpMcpServer, type IDevinMcpConfiguration, validateAcpMcpCapabilit
 export const DEVIN_SUBSCRIPTION_PROVIDER = DevinSubscriptionProviderId;
 export const DEVIN_SUBSCRIPTION_RESOURCE = DevinSubscriptionResource;
 
+interface IDevinAcpToolMetadata {
+	readonly 'cognition.ai/toolName'?: unknown;
+	readonly 'cognition.ai/inferenceToolName'?: unknown;
+}
+
+/** Prefer the standard field; Devin's optional extension carries names for native MCP and built-in tools. */
+function readDevinToolName(name: unknown, metadata: unknown): string | undefined {
+	const info = isObject(metadata) ? metadata as IDevinAcpToolMetadata : undefined;
+	for (const value of [name, info?.['cognition.ai/toolName'], info?.['cognition.ai/inferenceToolName']]) {
+		if (typeof value === 'string' && value.trim()) { return value; }
+	}
+	return undefined;
+}
+
 interface ITool {
 	readonly id: string;
 	name: string;
@@ -548,7 +562,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		let tool = record.tools.get(nativeId);
 		if (!tool) {
 			const id = `${turn.id}:${nativeId}`;
-			const name = typeof update.name === 'string' ? update.name : 'devin-tool';
+			const name = readDevinToolName(update.name, update._meta) ?? 'devin-tool';
 			const title = typeof update.title === 'string' ? update.title : 'Devin tool';
 			const part: ToolCallResponsePart = { kind: ResponsePartKind.ToolCall, toolCall: { toolCallId: id, toolName: name, displayName: title, status: ToolCallStatus.Streaming } };
 			tool = { id, name, title, ready: false, complete: false, part, content: [], confirmed: ToolCallConfirmationReason.NotNeeded };
@@ -558,7 +572,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		}
 		if (tool.complete) { return tool; }
 		if (typeof update.title === 'string') { tool.title = update.title; }
-		if (typeof update.name === 'string') { tool.name = update.name; }
+		if (typeof update.name === 'string' && update.name.trim()) { tool.name = update.name; }
 		const input = acpToolValue(update.rawInput);
 		if (input !== undefined) { tool.input = input; tool.rawInput = update.rawInput; }
 		const rawOutput = acpToolValue(update.rawOutput);
