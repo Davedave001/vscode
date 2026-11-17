@@ -87,7 +87,7 @@ export async function openSessionInVSCode(accessor: ServicesAccessor, session: I
 	const folders = (chat ?? session?.mainChat.get())?.workspace.get()?.folders;
 	if (!session || !folders?.length) {
 		const remoteAuthority = session && resolveRemoteAuthority(session.providerId, sessionsProvidersService, remoteAgentHostService);
-		return nativeHostService.openWindow(remoteAuthority ? { remoteAuthority } : undefined);
+		return nativeHostService.openWindow({ remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true });
 	}
 
 	const foldersToOpen: IFolderToOpen[] = [];

@@ -19,6 +19,7 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
+const emptyWorkspace = process.argv.includes('--empty-workspace');
 const profile = join(run, 'profile');
 const folders = [join(run, 'one'), join(run, 'two')];
 const agentHomes = ['codex', 'claude', 'copilot', 'state'];
@@ -41,6 +42,7 @@ let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
+	scenario: emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
@@ -95,7 +97,7 @@ try {
 	}
 	stage = 'launching';
 	const executable = createLaunchOptions(root, workspace, true, {}).executable;
-	app = await _electron.launch({ executablePath: executable, args: [root, workspace,
+	app = await _electron.launch({ executablePath: executable, args: [root, ...(emptyWorkspace ? ['--agents'] : [workspace]),
 		'--hidden-window', '--extensionTestsPath', runner, '--enable-smoke-test-driver', ...inspectArgs,
 		'--user-data-dir', profile, '--shared-data-dir', join(run, 'shared'), '--extensions-dir', join(run, 'extensions'),
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
@@ -119,51 +121,94 @@ try {
 		assert.ok(windows.every(window => window.hidden), 'Every fixture window must remain hidden');
 		return windows.map(window => window.id).sort((a, b) => a - b);
 	};
-	const ide = await launched.firstWindow({ timeout: 30000 });
-	stage = 'native IDE';
-	await ide.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
-	await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
-	await checkWindows('IDE ready');
-	const marker = '// Signal-C native unsaved buffer';
-	await ide.locator('body').click({ position: { x: 600, y: 400 } });
-	await ide.keyboard.press('Control+n');
-	await ide.locator('.monaco-editor').first().waitFor({ state: 'visible' });
-	await ide.keyboard.type(marker);
-	await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
-	await ide.locator('.tabs-container .tab.active.dirty').waitFor();
-	console.log('Created a dirty buffer in the hidden native multi-root editor');
-	stage = 'native Agents';
-	const [agents] = await Promise.all([
-		launched.waitForEvent('window', { timeout: 45000 }),
-		ide.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
-	]);
-	await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
-	await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
-	const expectedIds = await checkWindows('Agents ready');
-	assert.equal(expectedIds.length, 2, 'The fixture should contain only its editor and Agents windows');
-	const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
-	const draft = 'Signal-C native draft preserved across mode switches';
-	await input.click(); await agents.keyboard.type(draft);
-	await capture(agents, 'agents-draft.png');
-	for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
-		stage = `return to IDE ${roundTrip}`;
-		await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
-		await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
-		assert.deepEqual(await checkWindows(stage), expectedIds, 'The handoff must not open another editor window');
+	if (emptyWorkspace) {
+		stage = 'empty Agents';
+		const agents = await launched.firstWindow({ timeout: 30000 });
+		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
+		await agents.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor();
+		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
+		const draft = 'Signal-C folderless draft preserved across mode switches';
+		await input.click(); await agents.keyboard.type(draft);
+		assert.equal((await checkWindows(stage)).length, 1);
+		stage = 'first empty IDE';
+		const [ide] = await Promise.all([
+			launched.waitForEvent('window', { timeout: 45000 }),
+			agents.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
+		]);
+		await ide.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 60000 });
+		const expectedIds = await checkWindows(stage);
+		assert.equal(expectedIds.length, 2);
+		const marker = '// Signal-C empty editor unsaved buffer';
+		await ide.locator('body').click({ position: { x: 600, y: 400 } });
+		await ide.keyboard.press('Control+n');
+		await ide.locator('.monaco-editor').first().waitFor({ state: 'visible' });
+		await ide.keyboard.type(marker);
+		await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
+			stage = `empty return to Agents ${roundTrip}`;
+			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			report.agentsDraftRetained = true;
+			stage = `empty return to IDE ${roundTrip}`;
+			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.deepEqual(await checkWindows(stage), expectedIds, 'A folderless handoff must reuse the existing editor');
+			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
+			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+			report.windowReuseVerified = true; report.dirtyBufferRetained = true;
+		}
+		await capture(ide, 'empty-ide-returned.png');
+		await capture(agents, 'empty-agents-retained.png');
+		console.log('Two folderless round trips retained the editor window, dirty buffer, and Agents draft');
+	} else {
+		const ide = await launched.firstWindow({ timeout: 30000 });
+		stage = 'native IDE';
+		await ide.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
+		await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
+		await checkWindows('IDE ready');
+		const marker = '// Signal-C native unsaved buffer';
+		await ide.locator('body').click({ position: { x: 600, y: 400 } });
+		await ide.keyboard.press('Control+n');
+		await ide.locator('.monaco-editor').first().waitFor({ state: 'visible' });
+		await ide.keyboard.type(marker);
 		await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
 		await ide.locator('.tabs-container .tab.active.dirty').waitFor();
-		await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
-		report.windowReuseVerified = true; report.dirtyBufferRetained = true;
-		await capture(ide, `ide-return-${roundTrip}.png`);
-		stage = `return to Agents ${roundTrip}`;
-		await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
-		await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
-		assert.deepEqual(await checkWindows(stage), expectedIds);
-		assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The original Agents draft must remain');
-		report.agentsDraftRetained = true;
-		console.log(`Native round trip ${roundTrip} retained both window IDs, the dirty buffer, and the Agents draft`);
+		console.log('Created a dirty buffer in the hidden native multi-root editor');
+		stage = 'native Agents';
+		const [agents] = await Promise.all([
+			launched.waitForEvent('window', { timeout: 45000 }),
+			ide.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
+		]);
+		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
+		await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
+		const expectedIds = await checkWindows('Agents ready');
+		assert.equal(expectedIds.length, 2, 'The fixture should contain only its editor and Agents windows');
+		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
+		const draft = 'Signal-C native draft preserved across mode switches';
+		await input.click(); await agents.keyboard.type(draft);
+		await capture(agents, 'agents-draft.png');
+		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
+			stage = `return to IDE ${roundTrip}`;
+			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.deepEqual(await checkWindows(stage), expectedIds, 'The handoff must not open another editor window');
+			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
+			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+			await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			report.windowReuseVerified = true; report.dirtyBufferRetained = true;
+			await capture(ide, `ide-return-${roundTrip}.png`);
+			stage = `return to Agents ${roundTrip}`;
+			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The original Agents draft must remain');
+			report.agentsDraftRetained = true;
+			console.log(`Native round trip ${roundTrip} retained both window IDs, the dirty buffer, and the Agents draft`);
+		}
+		await capture(agents, 'agents-returned.png');
 	}
-	await capture(agents, 'agents-returned.png');
 } catch (error) {
 	await Promise.all((app?.windows() ?? []).map((page, i) => page.screenshot({ path: join(run, `failure-${i}.png`), timeout: 5000 }).catch(() => {})));
 	await writeFile(join(run, 'failure.json'), JSON.stringify({ stage, message: error instanceof Error ? error.message : String(error) }, null, 2));

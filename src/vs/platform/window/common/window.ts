@@ -106,7 +106,10 @@ export function isOpenedAuxiliaryWindow(candidate: IOpenedMainWindow | IOpenedAu
 	return typeof (candidate as IOpenedAuxiliaryWindow).parentId === 'number';
 }
 
-export interface IOpenEmptyWindowOptions extends IBaseOpenWindowsOptions { }
+export interface IOpenEmptyWindowOptions extends IBaseOpenWindowsOptions {
+	/** Focus an existing editor on the same host for a folderless mode handoff. */
+	readonly reuseExistingWindow?: boolean;
+}
 
 export interface IAgentsWindowDraft {
 	readonly inputText: string;

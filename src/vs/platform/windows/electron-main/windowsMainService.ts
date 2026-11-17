@@ -40,7 +40,7 @@ import { IStateService } from '../../state/node/state.js';
 import { AgentsWindowOpenSource, IAgentsWindowDraft, IAddRemoveFoldersRequest, INativeOpenFileRequest, INativeWindowConfiguration, IOpenEmptyWindowOptions, IPath, IPathsToWaitFor, isFileToOpen, isFolderToOpen, isWorkspaceToOpen, IWindowFolderLocation, IWindowOpenable, IWindowSettings } from '../../window/common/window.js';
 import { CodeWindow } from './windowImpl.js';
 import { IOpenConfiguration, IOpenEmptyConfiguration, IWindowsCountChangedEvent, IWindowsMainService, OpenContext, getLastFocused } from './windows.js';
-import { findWindowOnExtensionDevelopmentPath, findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, findWindowOnWorkspaceOrFolder, workspaceMatchesFolders } from './windowsFinder.js';
+import { findWindowForEmptyHandoff, findWindowOnExtensionDevelopmentPath, findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, findWindowOnWorkspaceOrFolder, workspaceMatchesFolders } from './windowsFinder.js';
 import { IFolderLocationsMainService, IValidatedFolderLocation } from './folderLocationsMainService.js';
 import { IWindowState, WindowsStateHandler } from './windowsStateHandler.js';
 import { IRecent } from '../../workspaces/common/workspaces.js';
@@ -284,6 +284,14 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		const forceEmpty = true;
 		const forceReuseWindow = options?.forceReuseWindow;
 		const forceNewWindow = !forceReuseWindow;
+
+		if (options?.reuseExistingWindow && !forceReuseWindow && !options.forceProfile && !options.forceTempProfile) {
+			const window = findWindowForEmptyHandoff(this.getWindows(), remoteAuthority);
+			if (window) {
+				this.openExistingWindow(window, { ...openConfig, cli, remoteAuthority });
+				return Promise.resolve([window]);
+			}
+		}
 
 		return this.open({ ...openConfig, cli, forceEmpty, forceNewWindow, forceReuseWindow, remoteAuthority, forceTempProfile: options?.forceTempProfile, forceProfile: options?.forceProfile });
 	}

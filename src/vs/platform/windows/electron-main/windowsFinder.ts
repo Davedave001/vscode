@@ -15,6 +15,12 @@ interface IWorkspaceWindowMatch {
 	readonly workspace: IWorkspaceIdentifier;
 }
 
+/** Finds the most recently focused ordinary editor on the handoff's exact host. */
+export function findWindowForEmptyHandoff(windows: readonly ICodeWindow[], remoteAuthority: string | undefined): ICodeWindow | undefined {
+	return windows.filter(window => window.config && !window.config.isSessionsWindow && !window.isExtensionDevelopmentHost && window.remoteAuthority === remoteAuthority)
+		.sort((a, b) => b.lastFocusTime - a.lastFocusTime)[0];
+}
+
 export async function findWindowOnFile(windows: ICodeWindow[], fileUri: URI, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>): Promise<ICodeWindow | undefined> {
 
 	// First check for windows with workspaces that have a parent folder of the provided path opened

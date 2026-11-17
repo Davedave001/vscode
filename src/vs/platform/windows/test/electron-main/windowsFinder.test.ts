@@ -15,7 +15,7 @@ import { ICommandAction } from '../../../action/common/action.js';
 import { NativeParsedArgs } from '../../../environment/common/argv.js';
 import { INativeWindowConfiguration } from '../../../window/common/window.js';
 import { ICodeWindow, ILoadEvent, IWindowState } from '../../../window/electron-main/window.js';
-import { findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, workspaceMatchesFolders } from '../../electron-main/windowsFinder.js';
+import { findWindowForEmptyHandoff, findWindowOnFile, findWindowOnRequestedPath, findWindowOnWorkspaceFolders, workspaceMatchesFolders } from '../../electron-main/windowsFinder.js';
 import { toWorkspaceFolders } from '../../../workspaces/common/workspaces.js';
 import { IWorkspaceIdentifier } from '../../../workspace/common/workspace.js';
 import { FileAccess } from '../../../../base/common/network.js';
@@ -34,7 +34,7 @@ suite('WindowsFinder', () => {
 	const testWorkspaceFolders = toWorkspaceFolders([{ path: join(fixturesFolder, 'vscode_workspace_1_folder') }, { path: join(fixturesFolder, 'vscode_workspace_2_folder') }], testWorkspace.configPath, extUriBiasedIgnorePathCase);
 	const localWorkspaceResolver = async (workspace: IWorkspaceIdentifier) => { return workspace === testWorkspace ? { id: testWorkspace.id, configPath: workspace.configPath, folders: testWorkspaceFolders } : undefined; };
 
-	function createTestCodeWindow(options: { lastFocusTime: number; openedFolderUri?: URI; openedWorkspace?: IWorkspaceIdentifier; remoteAuthority?: string; isExtensionDevelopmentHost?: boolean }): ICodeWindow {
+	function createTestCodeWindow(options: { lastFocusTime: number; openedFolderUri?: URI; openedWorkspace?: IWorkspaceIdentifier; remoteAuthority?: string; isExtensionDevelopmentHost?: boolean; isSessionsWindow?: boolean }): ICodeWindow {
 		return new class implements ICodeWindow {
 			readonly onWillLoad: Event<ILoadEvent> = Event.None;
 			onDidMaximize = Event.None;
@@ -48,7 +48,7 @@ suite('WindowsFinder', () => {
 			whenClosedOrLoaded: Promise<void> = Promise.resolve();
 			id: number = -1;
 			win: Electron.BrowserWindow = null!;
-			config: INativeWindowConfiguration | undefined;
+			config = options.isSessionsWindow === undefined ? undefined : upcastPartial<INativeWindowConfiguration>({ isSessionsWindow: options.isSessionsWindow });
 			openedWorkspace = options.openedFolderUri ? { id: '', uri: options.openedFolderUri } : options.openedWorkspace;
 			backupPath?: string | undefined;
 			remoteAuthority = options.remoteAuthority;
@@ -84,6 +84,28 @@ suite('WindowsFinder', () => {
 			dispose(): void { }
 		};
 	}
+
+	test('Empty handoff selects the latest ordinary editor on the exact host', () => {
+		const older = createTestCodeWindow({ lastFocusTime: 1, isSessionsWindow: false });
+		const latest = createTestCodeWindow({ lastFocusTime: 2, isSessionsWindow: false, openedWorkspace: testWorkspace });
+		const remote = createTestCodeWindow({ lastFocusTime: 3, isSessionsWindow: false, remoteAuthority: 'ssh-remote+host' });
+		const excluded = [
+			createTestCodeWindow({ lastFocusTime: 4, isSessionsWindow: true }),
+			createTestCodeWindow({ lastFocusTime: 5, isSessionsWindow: false, isExtensionDevelopmentHost: true }),
+			createTestCodeWindow({ lastFocusTime: 6 }),
+		];
+		const windows = [older, latest, remote, ...excluded];
+		assert.strictEqual(findWindowForEmptyHandoff(windows, undefined), latest);
+		assert.strictEqual(findWindowForEmptyHandoff(windows, 'ssh-remote+host'), remote);
+		assert.strictEqual(findWindowForEmptyHandoff(windows, 'ssh-remote+other'), undefined);
+		assert.strictEqual(findWindowForEmptyHandoff(excluded, undefined), undefined);
+		assert.deepStrictEqual(windows, [older, latest, remote, ...excluded]);
+	});
+
+	test('Empty handoff can reuse an editor before its first focus event', () => {
+		const window = createTestCodeWindow({ lastFocusTime: 0, isSessionsWindow: false });
+		assert.strictEqual(findWindowForEmptyHandoff([window], undefined), window);
+	});
 
 	const vscodeFolderWindow: ICodeWindow = createTestCodeWindow({ lastFocusTime: 1, openedFolderUri: URI.file(join(fixturesFolder, 'vscode_folder')) });
 	const lastActiveWindow: ICodeWindow = createTestCodeWindow({ lastFocusTime: 3, openedFolderUri: undefined });

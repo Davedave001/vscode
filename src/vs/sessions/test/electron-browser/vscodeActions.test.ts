@@ -170,7 +170,7 @@ suite('VS Code Actions', () => {
 		assert.deepStrictEqual(calls, [{ folders: ['file:///nested'], chat: undefined }]);
 	});
 
-	test('opens an empty local editor window without a remote session workspace', async () => {
+	test('requests reuse of a local editor without a session workspace', async () => {
 		const calls: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
 		const nativeHostService = new class extends mock<INativeHostService>() {
 			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> {
@@ -183,7 +183,7 @@ suite('VS Code Actions', () => {
 		await instantiationService.invokeFunction(openSessionInVSCode, createSession('no-workspace', true));
 		await instantiationService.invokeFunction(openSessionInVSCode, createSession('empty-workspace', true, []));
 
-		assert.deepStrictEqual(calls, [undefined, undefined, undefined]);
+		assert.deepStrictEqual(calls, Array.from({ length: 3 }, () => ({ remoteAuthority: null, reuseExistingWindow: true })));
 	});
 
 	for (const [connection, remoteAuthority] of [
@@ -212,7 +212,7 @@ suite('VS Code Actions', () => {
 				createSession('nested', true).mainChat.get(),
 			);
 
-			const toOpen = remoteAuthority ? { remoteAuthority } : undefined;
+			const toOpen = { remoteAuthority: remoteAuthority ?? null, reuseExistingWindow: true };
 			assert.deepStrictEqual(calls, [
 				{ toOpen, options: undefined },
 				{ toOpen, options: undefined },
