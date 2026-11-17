@@ -2,6 +2,12 @@
 
 Base: upstream `598b0f1b4e1`. Development branch: `feat/agent-workspace`.
 
+## Session Tools origin-context update
+
+Session Tools now resolves toolbar arguments or the focused command-palette target through the existing host resolver. It evaluates the native tools menu in that host's context-key scope and uses the existing encoded host argument for execution. Acceptance verifies that the same host still shows the original session/chat identities before checking current tool availability. A different focused window does not redirect an unchanged origin, and a changed or missing host cannot fall back to a root-scoped menu.
+
+The 104 focused browser tests for `sessionAttentionQueue`, `sessionWorkspaceActions`, `sessionsPicker`, and `sessionsChatAccessibilityHelp` passed. Fourteen new checks exercise actual `MenuItemAction` argument forwarding, explicit toolbar and default palette targets, focus changes, session/chat changes, host replacement/removal, provider object replacement, draft binding, nested menu entries, policy changes, cancellation, command failure, and disposal. The pre-fix cases reproduced use of the wrong context-key scope. Source type checking, targeted lint, and incremental client compilation passed. The native Session Tools flow has not been visually inspected because desktop automation remains stopped.
+
 ## Chat-specific attention queue update
 
 The queue now reads each session's chat membership and chat statuses, so blocked or failed child chats remain visible even when their parent is completed. It opens the selected chat with its own workspace context, retains session-level alerts when chat metadata has not arrived, and counts working sessions once. Accept-time checks use current resource identities and membership, including providers that replace chat objects or reuse the session URI for a legacy main chat. Showing or cancelling the picker does not clear read state or notify the draft composer of navigation.

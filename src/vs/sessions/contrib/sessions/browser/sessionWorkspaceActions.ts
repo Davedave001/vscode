@@ -8,9 +8,10 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { autorun, observableSignalFromEvent } from '../../../../base/common/observable.js';
+import { isEqual } from '../../../../base/common/resources.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, IMenuService, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { IContextKeyService, ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService, IQuickPickItem, IQuickPickSeparator } from '../../../../platform/quickinput/common/quickInput.js';
@@ -21,6 +22,8 @@ import { INewSessionComposerService } from '../../../../workbench/contrib/sessio
 import { SessionsCategories } from '../../../../workbench/contrib/sessions/common/categories.js';
 import { ChatContextKeys } from '../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
 import { ISessionsManagementService } from '../../../../workbench/contrib/sessions/common/sessionsManagement.js';
+import { resolveSessionCommandTarget } from '../../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
+import { createHostMenuOptions, ISessionHostService } from '../../../../workbench/services/sessions/browser/sessionHost.js';
 import { getSessionAttentionQueue, ISessionAttentionItem } from './sessionAttentionQueue.js';
 
 const mainAgentsWindow = ContextKeyExpr.and(IsSessionsWindowContext, IsAuxiliaryWindowContext.toNegated(), ChatContextKeys.enabled);
@@ -51,13 +54,21 @@ registerAction2(class SessionToolsAction extends Action2 {
 		});
 	}
 
-	override async run(accessor: ServicesAccessor): Promise<void> {
-		const store = new DisposableStore();
-		const menu = store.add(accessor.get(IMenuService).createMenu(Menus.SessionActivityBar, accessor.get(IContextKeyService)));
+	override async run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> {
 		const quickInputService = accessor.get(IQuickInputService);
 		const notificationService = accessor.get(INotificationService);
+		const hostService = accessor.get(ISessionHostService);
+		const host = resolveSessionCommandTarget(accessor, args)?.host;
+		if (!host) {
+			notificationService.info(localize('sessionTools.noHost', "The chat that opened Session Tools is no longer available. Open Session Tools again from the chat you want to use."));
+			return;
+		}
+		const sessionResource = host.session.get()?.resource;
+		const chatResource = host.chat.get()?.resource;
+		const store = new DisposableStore();
 		try {
-			const readActions = () => collectToolActions(menu.getActions().flatMap(([, actions]) => actions));
+			const menu = store.add(accessor.get(IMenuService).createMenu(Menus.SessionActivityBar, host.contextKeyService));
+			const readActions = () => collectToolActions(menu.getActions(createHostMenuOptions(host)).flatMap(([, actions]) => actions));
 			const items = readActions().map(({ action, label }) => ({ id: action.id, label }));
 			if (items.length === 0) {
 				notificationService.info(localize('sessionTools.empty', "No tools are available for the current session. Select a workspace session first."));
@@ -68,6 +79,11 @@ registerAction2(class SessionToolsAction extends Action2 {
 				placeHolder: localize('sessionTools.search', "Search tools and canvases for this session"),
 			});
 			if (selected) {
+				const currentHost = hostService.getHost(host.id);
+				if (currentHost !== host || !isEqual(currentHost.session.get()?.resource, sessionResource) || !isEqual(currentHost.chat.get()?.resource, chatResource)) {
+					notificationService.info(localize('sessionTools.targetChanged', "The chat changed while Session Tools was open. Open Session Tools again from the chat you want to use."));
+					return;
+				}
 				// Session capabilities may have changed while the picker was open.
 				const current = readActions().find(({ action }) => action.id === selected.id);
 				if (current) {

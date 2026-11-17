@@ -11,10 +11,11 @@ import { constObservable, observableValue } from '../../../../../base/common/obs
 import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { IMenu, IMenuService, MenuItemAction } from '../../../../../platform/actions/common/actions.js';
-import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
-import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { IMenu, IMenuService, MenuId, MenuItemAction, SubmenuItemAction } from '../../../../../platform/actions/common/actions.js';
+import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { ContextKeyExpr, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+import { ILogService, NullLogService } from '../../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { IQuickInputHideEvent, IQuickInputService, IQuickPick, IQuickPickDidAcceptEvent, IQuickPickItem, QuickInputHideReason } from '../../../../../platform/quickinput/common/quickInput.js';
 import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
@@ -22,10 +23,23 @@ import { INewSessionComposerService } from '../../../../../workbench/contrib/ses
 import { ISessionsService } from '../../../../../workbench/contrib/sessions/browser/sessionsService.js';
 import { ISessionsChangeEvent, ISessionsManagementService } from '../../../../../workbench/contrib/sessions/common/sessionsManagement.js';
 import { IChat, ISession, ISessionWorkspace, SessionStatus } from '../../../../../workbench/services/sessions/common/session.js';
+import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import '../../browser/sessionWorkspaceActions.js';
 
 suite('Session Workspace Actions', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	function toolsHost(instantiation: TestInstantiationService) {
+		const session = observableValue<ISession | undefined>('toolsTest.session', upcastPartial<ISession>({ resource: URI.parse('test:/session') }));
+		const chat = observableValue<IChat | undefined>('toolsTest.chat', upcastPartial<IChat>({ resource: URI.parse('test:/child') }));
+		const context = upcastPartial<IContextKeyService>({ contextMatchesRules: () => true });
+		const host = upcastPartial<ISessionHost>({ id: 'tools-origin', session, chat, contextKeyService: context, commandContext: { sessionHostId: 'tools-origin' } });
+		const hosts = new Map([[host.id, host]]);
+		let focused = host;
+		instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({ getHost: id => hosts.get(id) }));
+		instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => focused }));
+		return { host, hosts, session, chat, context, focus: (value: ISessionHost) => { focused = value; } };
+	}
 
 	function attentionFixture(status = SessionStatus.Completed, chatStatus = SessionStatus.NeedsInput) {
 		let closePicker = () => { };
@@ -139,6 +153,7 @@ suite('Session Workspace Actions', () => {
 	for (const becomesUnavailable of [false, true]) {
 		test(becomesUnavailable ? 'rechecks tool availability before executing a picked action' : 'offers native enabled tools and runs the selected action', async () => {
 			const instantiation = store.add(new TestInstantiationService());
+			toolsHost(instantiation);
 			let enabled = true;
 			let runs = 0;
 			let disposed = false;
@@ -167,4 +182,76 @@ suite('Session Workspace Actions', () => {
 			}
 		});
 	}
+
+	for (const scenario of ['unchanged', 'chatChanged', 'sessionChanged', 'removedHost', 'hostReplaced', 'objectsReplaced', 'draftBound', 'focusChanged', 'cancelled', 'explicitOrigin', 'nestedCanvas', 'policyChanged', 'failed'] as const) {
+		test(`keeps Session Tools bound to its origin when ${scenario}`, async () => {
+			const instantiation = store.add(new TestInstantiationService());
+			const origin = toolsHost(instantiation);
+			if (scenario === 'draftBound') { origin.session.set(undefined, undefined); origin.chat.set(undefined, undefined); }
+			const execute = sinon.stub().resolves(undefined);
+			const failure = new Error('Tool could not open');
+			if (scenario === 'failed') { execute.rejects(failure); }
+			const commandService = upcastPartial<ICommandService>({ executeCommand: execute });
+			let allowed = true;
+			let disposed = false;
+			const notices: string[] = [];
+			const menuContexts: IContextKeyService[] = [];
+			const scope = upcastPartial<IContextKeyService>({ contextMatchesRules: () => allowed });
+			const menu = upcastPartial<IMenu>({
+				getActions: options => {
+					const action = new MenuItemAction({ id: 'tool', title: 'Files', precondition: ContextKeyExpr.true() }, undefined, options, undefined, undefined, scope, commandService);
+					return [['navigation', scenario === 'nestedCanvas' ? [new SubmenuItemAction({ submenu: MenuId.for('test.sessionTools.canvases'), title: 'Canvases' }, undefined, [action])] : [action]]];
+				},
+				dispose: () => { disposed = true; },
+			});
+			instantiation.stub(IContextKeyService, upcastPartial<IContextKeyService>({}));
+			instantiation.stub(IMenuService, upcastPartial<IMenuService>({ createMenu: (_id, context) => { menuContexts.push(context); return menu; } }));
+			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notices.push(String(message)); } }));
+			const quickInput = new TestQuickInputService();
+			const other = upcastPartial<ISessionHost>({ id: 'other', session: constObservable(upcastPartial<ISession>({ resource: URI.parse('test:/other-session') })), chat: constObservable(upcastPartial<IChat>({ resource: URI.parse('test:/other-chat') })) });
+			if (scenario === 'explicitOrigin') { origin.focus(other); }
+			const pick = sinon.stub(quickInput, 'pick').callsFake(async () => {
+				if (scenario === 'chatChanged') { origin.chat.set(upcastPartial<IChat>({ resource: URI.parse('test:/different-chat') }), undefined); }
+				else if (scenario === 'sessionChanged') { origin.session.set(upcastPartial<ISession>({ resource: URI.parse('test:/different-session') }), undefined); }
+				else if (scenario === 'removedHost') { origin.hosts.delete(origin.host.id); }
+				else if (scenario === 'hostReplaced') { origin.hosts.set(origin.host.id, upcastPartial<ISessionHost>({ ...origin.host })); }
+				else if (scenario === 'objectsReplaced') {
+					origin.session.set(upcastPartial<ISession>({ resource: URI.parse('test:/session') }), undefined);
+					origin.chat.set(upcastPartial<IChat>({ resource: URI.parse('test:/child') }), undefined);
+				}
+				else if (scenario === 'draftBound') { origin.session.set(upcastPartial<ISession>({ resource: URI.parse('test:/draft') }), undefined); }
+				else if (scenario === 'focusChanged') { origin.focus(other); }
+				else if (scenario === 'policyChanged') { allowed = false; }
+				return { id: 'tool', label: 'Files' };
+			});
+			if (scenario === 'cancelled') { pick.resolves(undefined); }
+			instantiation.stub(IQuickInputService, quickInput);
+			try {
+				const opening = instantiation.invokeFunction(async accessor => { await CommandsRegistry.getCommand('sessions.openSessionTools')!.handler(accessor, ...(scenario === 'explicitOrigin' ? [origin.host.commandContext] : [])); });
+				if (scenario === 'failed') { await assert.rejects(opening, error => error === failure); } else { await opening; }
+				const rejected = ['chatChanged', 'sessionChanged', 'removedHost', 'hostReplaced', 'draftBound', 'policyChanged'].includes(scenario);
+				assert.deepStrictEqual(menuContexts, [origin.context]);
+				assert.strictEqual(execute.callCount, rejected || scenario === 'cancelled' ? 0 : 1);
+				if (execute.called) { assert.deepStrictEqual(execute.firstCall.args, ['tool', origin.host.commandContext]); }
+				assert.strictEqual(notices.length, rejected ? 1 : 0);
+				assert.strictEqual(disposed, true);
+				if (scenario === 'nestedCanvas') { assert.deepStrictEqual(pick.firstCall.args[0], [{ id: 'tool', label: 'Canvases / Files' }]); }
+			} finally { pick.restore(); }
+		});
+	}
+
+	test('does not create a root menu when a toolbar names a host that has gone away', async () => {
+		const instantiation = store.add(new TestInstantiationService());
+		const origin = toolsHost(instantiation);
+		origin.hosts.clear();
+		const createMenu = sinon.stub().throws(new Error('A stale host must not create a menu'));
+		const notices: string[] = [];
+		instantiation.stub(IMenuService, upcastPartial<IMenuService>({ createMenu }));
+		instantiation.stub(IQuickInputService, new TestQuickInputService());
+		instantiation.stub(ILogService, new NullLogService());
+		instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notices.push(String(message)); } }));
+		await instantiation.invokeFunction(accessor => CommandsRegistry.getCommand('sessions.openSessionTools')!.handler(accessor, origin.host.commandContext));
+		assert.strictEqual(createMenu.called, false);
+		assert.strictEqual(notices.length, 1);
+	});
 });
