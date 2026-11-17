@@ -28,6 +28,9 @@ import { IAgentConfigurationService, seedMultipleChatProvidersFromEnvironment } 
 import { IAgentHostCompletions } from './agentHostCompletions.js';
 import { IAgentHostClientConnectionService } from './agentHostClientConnectionService.js';
 import { CopilotAgent } from './copilot/copilotAgent.js';
+import { DevinSubscriptionAgent } from './acp/devinSubscriptionAgent.js';
+import { AgentHostDevinExecutableEnvVar } from '../common/devinAgentConfiguration.js';
+import { findExecutable } from '../../../base/node/processes.js';
 import { ClaudeAgent } from './claude/claudeAgent.js';
 import { ClaudeSdkPackage } from './claude/claudeAgentSdkService.js';
 import { CodexAgent } from './codex/codexAgent.js';
@@ -231,6 +234,8 @@ async function startAgentHost(): Promise<void> {
 		}
 		markStartupPhase('providers');
 		providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
+		const devinExecutable = await findExecutable(process.env[AgentHostDevinExecutableEnvVar] || 'devin');
+		if (devinExecutable) { providerService.registerProvider(new DevinSubscriptionAgent(devinExecutable)); }
 		// Claude and Codex providers are gated on two things:
 		//  1. The user-facing enable toggle (`chat.agentHost.<x>Agent.enabled`,
 		//     forwarded as an env var by the starters). Claude defaults to on.

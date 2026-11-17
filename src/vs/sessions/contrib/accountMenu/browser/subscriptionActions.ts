@@ -22,12 +22,13 @@ import { IsSessionsWindowContext } from '../../../../workbench/common/contextkey
 import { resolveSessionCommandTarget } from '../../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
 import { ITerminalService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService, getCodexAccountPlanName } from '../../../../workbench/services/agentHost/browser/codexAccountService.js';
-import { IAuthenticationService } from '../../../../workbench/services/authentication/common/authentication.js';
+import { AgentHostDevinExecutableSettingId, DevinSubscriptionProviderId } from '../../../../platform/agentHost/common/devinAgentConfiguration.js';
+import { IDevinSubscriptionConnection } from './devinSubscriptionConnection.js';
 import { AgentsWindowMenus } from '../../../browser/agentsWindowMenus.js';
 
 export const CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING = 'agents.subscriptions.claudeExecutable';
-export const DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING = 'agents.subscriptions.devinExecutable';
-export const DEVIN_SUBSCRIPTION_AUTH_PROVIDER = 'devin-subscription';
+export const DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING = AgentHostDevinExecutableSettingId;
+export const DEVIN_SUBSCRIPTION_AUTH_PROVIDER = DevinSubscriptionProviderId;
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'agents.subscriptions',
@@ -37,11 +38,6 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			type: 'string', default: 'claude',
 			scope: ConfigurationScope.MACHINE, restricted: true,
 			description: localize('subscriptions.claudeExecutable', "Path to the official Claude Code executable used for your Claude subscription. Sign-in is handled by Claude Code."),
-		},
-		[DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING]: {
-			type: 'string', default: 'devin',
-			scope: ConfigurationScope.MACHINE, restricted: true,
-			description: localize('subscriptions.devinExecutable', "Path to the official Devin CLI executable used for your Devin subscription. Sign-in is handled by Devin CLI."),
 		},
 	},
 });
@@ -107,19 +103,19 @@ export class AgentSubscriptionsAction extends Action2 {
 	override async run(accessor: ServicesAccessor): Promise<void> {
 		const quickInput = accessor.get(IQuickInputService);
 		const instantiation = accessor.get(IInstantiationService);
-		const authentication = accessor.get(IAuthenticationService);
+		const devin = accessor.get(IDevinSubscriptionConnection);
 		const notifications = accessor.get(INotificationService);
 		const codex = accessor.get(ICodexAccountService).account;
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
 			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), description: localize('subscriptions.claudePlan', "Claude subscription"), detail: localize('subscriptions.claudeDetail', "Use the official Claude Code client with your Claude account.") },
-			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: localize('subscriptions.devinBrowser', "Browser account sign-in"), detail: localize('subscriptions.devinSubscriptionDetail', "Connect a Devin account separately. Credentials are saved in this editor's secret storage; native chat integration is still in development.") },
+			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: localize('subscriptions.devinBrowser', "Browser account sign-in"), detail: localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. A saved sign-in is reused.") },
 			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });
 		if (!provider) { return; }
 		if (provider.id === 'devin-subscription') {
-			await authentication.createSession(DEVIN_SUBSCRIPTION_AUTH_PROVIDER, []);
-			notifications.info(localize('subscriptions.devinConnected', "Devin account connected and saved in this editor. Native Devin chat integration is still in development. Devin CLI remains available separately."));
+			await devin.connect();
+			notifications.info(localize('subscriptions.devinConnected', "Devin models loaded. Choose Devin Subscription in the agent picker, then select a model. Devin CLI remains available separately."));
 			return;
 		}
 		if (provider.id === 'codex') {

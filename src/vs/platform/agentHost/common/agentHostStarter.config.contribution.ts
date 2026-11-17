@@ -9,6 +9,7 @@ import { PolicyCategory } from '../../../base/common/policy.js';
 import { AgentHostConfigurationSyncScope, ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationPropertySchema, IConfigurationRegistry } from '../../configuration/common/configurationRegistry.js';
 import { COPILOT_OTEL_CAPTURE_CONTENT_KEY, COPILOT_OTEL_CAPTURE_IDENTITY_KEY, COPILOT_OTEL_ENABLED_KEY, COPILOT_OTEL_ENDPOINT_KEY, COPILOT_OTEL_FILE_PATH_KEY, COPILOT_OTEL_HEADERS_KEY, COPILOT_OTEL_LOCK_CAPTURE_CONTENT_KEY, COPILOT_OTEL_PROTOCOL_KEY, COPILOT_OTEL_RESOURCE_ATTRIBUTES_KEY, COPILOT_OTEL_SERVICE_NAME_KEY, COPILOT_ALLOWED_HARNESSES_KEY, COPILOT_TEMPORARY_ALLOW_LOCAL_HARNESS_KEY, managedSettingValue, thirdPartyAgentEnabledValue } from '../../policy/common/copilotManagedSettings.js';
 import product from '../../product/common/product.js';
+import { AgentHostDevinExecutableSettingId } from './devinAgentConfiguration.js';
 import { Registry } from '../../registry/common/platform.js';
 import {
 	AgentHostAhpJsonlLoggingSettingId,
@@ -401,6 +402,10 @@ configurationRegistry.registerConfiguration({
 			tags: ['experimental', 'advanced'],
 			experiment: { mode: 'startup' },
 			agentHost: { key: AgentHostByokModelsEnabledConfigKey, scope: AgentHostConfigurationSyncScope.Local },
+		},
+		[AgentHostDevinExecutableSettingId]: {
+			type: 'string', default: 'devin', scope: ConfigurationScope.MACHINE, restricted: true,
+			description: nls.localize('devin.executable', "Path to the official Devin client used by Devin Subscription and Devin CLI."),
 		},
 		[AgentHostCodexAgentEnabledSettingId]: {
 			type: 'boolean',

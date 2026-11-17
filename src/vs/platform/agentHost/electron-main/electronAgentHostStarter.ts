@@ -14,6 +14,7 @@ import { validatedIpcMain } from '../../../base/parts/ipc/electron-main/ipcMain.
 import { Client as MessagePortClient } from '../../../base/parts/ipc/electron-main/ipc.mp.js';
 import { ProxyChannel } from '../../../base/parts/ipc/common/ipc.js';
 import { AiAgentEnvValue, AiAgentEnvVar } from '../../chat/common/aiAgentEnv.js';
+import { buildDevinAgentEnvironment } from '../common/devinAgentConfiguration.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { IEnvironmentMainService } from '../../environment/electron-main/environmentMainService.js';
 import { parseAgentHostDebugPort } from '../../environment/node/environmentService.js';
@@ -175,6 +176,7 @@ export class ElectronAgentHostStarter extends Disposable implements IAgentHostSt
 			multipleChatProvidersEnabled: this._configurationService.getValue<boolean>(ChatProvidersSettingId.Enabled) === true,
 			codexAgentEnabled: this._configurationService.getValue<boolean>(AgentHostCodexAgentEnabledSettingId),
 		}, process.env);
+		Object.assign(sdkEnv, buildDevinAgentEnvironment(this._configurationService, process.env));
 
 		// Translate `chat.agentHost.otel.*` settings into the env vars consumed by
 		// the agent host process. Any value already present on `process.env` wins

@@ -10,6 +10,7 @@ import { IProcessEnvironment, isWindows } from '../../../base/common/platform.js
 import { ProxyChannel } from '../../../base/parts/ipc/common/ipc.js';
 import { Client, IIPCOptions } from '../../../base/parts/ipc/node/ipc.cp.js';
 import { AiAgentEnvValue, AiAgentEnvVar } from '../../chat/common/aiAgentEnv.js';
+import { buildDevinAgentEnvironment } from '../common/devinAgentConfiguration.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { IEnvironmentService, INativeEnvironmentService } from '../../environment/common/environment.js';
 import { parseAgentHostDebugPort } from '../../environment/node/environmentService.js';
@@ -113,6 +114,7 @@ export class NodeAgentHostStarter extends Disposable implements IAgentHostStarte
 			multipleChatProvidersEnabled: this._configurationService.getValue<boolean>(ChatProvidersSettingId.Enabled) === true,
 			codexAgentEnabled: this._configurationService.getValue<boolean>(AgentHostCodexAgentEnabledSettingId),
 		}, process.env);
+		Object.assign(sdkEnv, buildDevinAgentEnvironment(this._configurationService, process.env));
 		Object.assign(env, sdkEnv);
 
 		// Translate `chat.agentHost.otel.*` settings into the env vars consumed by

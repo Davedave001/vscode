@@ -19,11 +19,11 @@ import { TerminalLocation } from '../../../../../platform/terminal/common/termin
 import { IWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { ITerminalInstance, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService } from '../../../../../workbench/services/agentHost/browser/codexAccountService.js';
-import { IAuthenticationService } from '../../../../../workbench/services/authentication/common/authentication.js';
+import { IDevinSubscriptionConnection } from '../../browser/devinSubscriptionConnection.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { IChat, ISessionWorkspace } from '../../../../../workbench/services/sessions/common/session.js';
 import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
-import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, DEVIN_SUBSCRIPTION_AUTH_PROVIDER, openSubscriptionClient } from '../../browser/subscriptionActions.js';
+import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, openSubscriptionClient } from '../../browser/subscriptionActions.js';
 
 suite('Agent Subscriptions', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -36,14 +36,14 @@ suite('Agent Subscriptions', () => {
 			const calls: unknown[] = [];
 			instantiation.stub(IQuickInputService, quickInput);
 			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
-			instantiation.stub(IAuthenticationService, upcastPartial<IAuthenticationService>({ createSession: async (provider, scopes) => { calls.push([provider, scopes]); return { id: 'session', accessToken: 'test-token', account: { id: 'account', label: 'Devin account' }, scopes: [] }; } }));
+			instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ connect: async () => { calls.push('connect-provider'); } }));
 			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: () => { calls.push('connected'); } }));
 			try {
 				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
 				const items = picker.firstCall.args[0];
 				assert.ok(Array.isArray(items));
 				assert.deepStrictEqual(items.map(item => item.label), ['Codex', 'Anthropic', 'Devin Subscription', 'Devin CLI']);
-				assert.deepStrictEqual(calls, cancelled ? [] : [[DEVIN_SUBSCRIPTION_AUTH_PROVIDER, []], 'connected']);
+				assert.deepStrictEqual(calls, cancelled ? [] : ['connect-provider', 'connected']);
 			} finally { picker.restore(); }
 		});
 	}
