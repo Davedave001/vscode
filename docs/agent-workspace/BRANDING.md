@@ -14,6 +14,10 @@ Desktop shortcuts, installer graphics, and installed web app icons use the defau
 
 Launch with `node scripts/code-agent-workspace.ts`. The launcher prefers `.build/electron/Signal-C.exe`; it also supports an existing `.build/electron/Code - OSS.exe` runtime until native preparation is repeated. It retains the established isolated `.build/agent-workspace-*` paths so existing development sessions, provider sign-ins, drafts, and preferences remain available. It does not migrate, rename, or delete installed editor profiles. Packaged builds use Signal-C's own product storage defaults.
 
+For a per-user Start menu entry, run `./scripts/install-signal-c-shortcut.ps1` in PowerShell. Search Start for **Signal-C (Development)**. The shortcut uses the blue Signal-C icon and a generated `.build/signal-c-shortcut.vbs` helper to start the existing Node launcher without a console window. It retains all launcher environment isolation and existing development-profile paths. The helper is stored as Unicode so paths with non-ASCII characters are preserved. Repeating the command updates this checkout's shortcut; an unrelated shortcut or helper with the same name is preserved and reported as a conflict. Rerun it if the checkout or Node installation moves. Delete the Start menu entry to remove it; no installed application is replaced.
+
+The shortcut was created in the current user's Programs folder, read back through Windows Script Host to verify its target, working directory, and icon, and used to open the development Agents window. Repeating installation succeeded. PowerShell syntax parsing passed. The `.lnk` and generated helper are local runtime artifacts and are not committed.
+
 Upstream copyright and license notices, extension IDs, `vscode` API imports, compatibility protocols, and the names of third-party providers remain their actual identities. No repository rename, public release, or installed application replacement is performed by this source branding change.
 
 ## Validation
