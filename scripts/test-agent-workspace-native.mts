@@ -178,6 +178,9 @@ try {
 	};
 	const checkAppConnections = async (page: Page) => {
 		stage = 'native app connections';
+		// Initial account and provider UI can take focus while the workbench restores.
+		await page.waitForFunction(() => !!Reflect.get(globalThis, 'driver'));
+		await page.evaluate(async () => { await Reflect.get(globalThis, 'driver').whenWorkbenchRestored(); });
 		const paths = [join(profile, 'User/mcp.json'), join(profile, 'User/profiles/builtin/agents/mcp.json'), join(run, 'copilot/mcp-config.json'), ...folders.flatMap(folder => [join(folder, '.mcp.json'), join(folder, '.vscode/mcp.json')])];
 		const readConfigurations = () => Promise.all(paths.map(file => readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') { return undefined; } throw error; })));
 		const before = await readConfigurations();
