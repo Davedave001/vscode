@@ -21,6 +21,67 @@ function callbackUrl(authorize: URL, changes: Record<string, string | null> = {}
 	return url;
 }
 
+test('manual browser code omits the loopback redirect and exchanges only its PKCE-bound code', async () => {
+	let authorize: URL | undefined;
+	const stages: string[] = [];
+	const token = await signInToDevin({
+		signal: new AbortController().signal,
+		onProgress: stage => stages.push(stage),
+		openExternal: async value => {
+			authorize = new URL(value);
+			assert.strictEqual(authorize.origin + authorize.pathname, DEVIN_AUTHORIZE_URL);
+			assert.strictEqual(authorize.searchParams.has('redirect_uri'), false);
+			assert.strictEqual(authorize.searchParams.get('code_challenge_method'), 'S256');
+			return true;
+		},
+		readAuthorizationCode: async signal => { assert.strictEqual(signal.aborted, false); return 'manual-test-code'; },
+		request: async (url, options) => {
+			assert.strictEqual(url, DEVIN_TOKEN_URL);
+			assert.ok(options && typeof options.body === 'string' && authorize);
+			const body = JSON.parse(options.body);
+			assert.deepStrictEqual(Object.keys(body).sort(), ['code', 'code_verifier']);
+			assert.strictEqual(body.code, 'manual-test-code');
+			assert.strictEqual(createHash('sha256').update(body.code_verifier).digest('base64url'), authorize.searchParams.get('code_challenge'));
+			return Response.json({ session_token: 'manual-test-token' });
+		},
+	});
+	assert.strictEqual(token, 'manual-test-token');
+	assert.deepStrictEqual(stages, ['waitingForCode', 'exchangingCode']);
+});
+
+for (const code of [undefined, '', 'a b', 'x'.repeat(8193)]) {
+	test(`rejects ${code === undefined ? 'cancelled' : 'invalid length ' + code.length} manual input without an exchange`, async () => {
+		await assert.rejects(signInToDevin({
+			signal: new AbortController().signal,
+			openExternal: async () => true,
+			readAuthorizationCode: async () => code,
+			request: async () => assert.fail('must not exchange cancelled or malformed input'),
+		}), code === undefined ? /cancelled/ : /authorization code/);
+	});
+}
+
+for (const mode of ['cancel', 'timeout']) {
+	test(`${mode} releases a stalled manual code input and ignores its late result`, async () => {
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const input = Promise.withResolvers<string>();
+		const result = signInToDevin({
+			signal: controller.signal, timeoutMs: mode === 'timeout' ? 25 : 5000,
+			openExternal: async () => true,
+			readAuthorizationCode: async () => { started.resolve(); return input.promise; },
+			request: async () => assert.fail('must not exchange a late code'),
+		});
+		const rejected = assert.rejects(result, mode === 'timeout' ? /timed out/ : /user cancelled/);
+		try {
+			await started.promise;
+			if (mode === 'cancel') { controller.abort(new Error('user cancelled')); }
+			await rejected;
+			input.resolve('late-test-code');
+			await new Promise(resolve => setImmediate(resolve));
+		} finally { controller.abort(); input.resolve('late-test-code'); }
+	});
+}
+
 test('uses the browser PKCE flow and fixed HTTPS token endpoint without starting a CLI', async () => {
 	let authorize: URL;
 	let redirect: URL | undefined;

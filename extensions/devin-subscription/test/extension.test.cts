@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { AuthenticationSession, Disposable } from 'vscode';
+import type { AuthenticationSession, Disposable, InputBoxOptions } from 'vscode';
 import type { SignInOptions } from '../src/auth.ts';
 
 const assert: typeof import('node:assert/strict') = require('node:assert/strict');
@@ -28,7 +28,12 @@ interface SessionChanges {
 	removed: readonly AuthenticationSession[];
 }
 
-function activateProvider(signIn: (options: SignInOptions) => Promise<string>, storageHooks: StorageHooks = {}) {
+interface SignInUI {
+	chooseMethod?: () => Promise<{ manual: boolean } | undefined>;
+	readCode?: (options: InputBoxOptions, signal: AbortSignal) => Promise<string | undefined>;
+}
+
+function activateProvider(signIn: (options: SignInOptions) => Promise<string>, storageHooks: StorageHooks = {}, ui: SignInUI = {}) {
 	const originalLoad = Module._load;
 	const secrets = new Map<string, string>();
 	const events: SessionChanges[] = [];
@@ -46,8 +51,13 @@ function activateProvider(signIn: (options: SignInOptions) => Promise<string>, s
 	const vscode = {
 		EventEmitter: class { event() { } fire(event: SessionChanges) { events.push(event); } dispose() { } },
 		CancellationError: class extends Error { constructor() { super('Cancelled'); this.name = 'Canceled'; } },
+		CancellationTokenSource: class { private readonly controller = new AbortController(); readonly token = this.controller.signal; cancel() { this.controller.abort(); } dispose() { } },
 		l10n: { t: (value: string) => value }, ProgressLocation: { Notification: 15 },
-		window: { withProgress: async (_options: object, callback: (progress: { report(value: { message: string }): void }, cancellation: { onCancellationRequested(listener: () => void): Disposable }) => Promise<AuthenticationSession>) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }) },
+		window: {
+			showQuickPick: ui.chooseMethod ?? (async () => ({ manual: false })),
+			showInputBox: ui.readCode ?? (async () => assert.fail('No code input was expected')),
+			withProgress: async (_options: object, callback: (progress: { report(value: { message: string }): void }, cancellation: { onCancellationRequested(listener: () => void): Disposable }) => Promise<AuthenticationSession>) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }),
+		},
 		env: { openExternal: async () => true }, Uri: { parse: (value: string) => value },
 		authentication: { registerAuthenticationProvider: (id: string, label: string, instance: TestProvider) => { assert.strictEqual(id, 'devin-subscription'); assert.strictEqual(label, 'Devin Subscription'); provider = instance; return { dispose() { } }; } },
 	};
@@ -103,11 +113,13 @@ test('coalesces concurrent sign-in requests and assigns a new account id on reau
 	try {
 		const first = setup.provider.createSession([]);
 		const second = setup.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
 		release('test-first-token');
 		const [a, b] = await Promise.all([first, second]);
 		assert.strictEqual(calls, 1);
 		assert.strictEqual(a.id, b.id);
 		const again = setup.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
 		release('test-next-token');
 		const replacement = await again;
 		assert.notStrictEqual(replacement.account.id, a.account.id);
@@ -121,6 +133,94 @@ test('coalesces concurrent sign-in requests and assigns a new account id on reau
 function deferred<T = void>() {
 	return Promise.withResolvers<T>();
 }
+
+test('manual code sign-in uses private input and saves through the existing provider', async () => {
+	const setup = activateProvider(options => signInToDevin({
+		...options,
+		request: async (_url, request) => {
+			assert.ok(request && typeof request.body === 'string');
+			assert.strictEqual(JSON.parse(request.body).code, 'test-private-code');
+			return Response.json({ session_token: 'test-private-token' });
+		},
+	}), {}, {
+		chooseMethod: async () => ({ manual: true }),
+		readCode: async (options, signal) => {
+			assert.strictEqual(options.password, true);
+			assert.strictEqual(options.ignoreFocusOut, true);
+			assert.strictEqual(signal.aborted, false);
+			assert.ok(options.validateInput);
+			assert.ok(await options.validateInput('not a code'));
+			assert.strictEqual(await options.validateInput('test-private-code'), undefined);
+			return 'test-private-code';
+		},
+	});
+	try {
+		const session = await setup.provider.createSession([]);
+		assert.deepStrictEqual(await setup.provider.getSessions(), [session]);
+		assert.strictEqual(session.accessToken, 'test-private-token');
+		assert.strictEqual(setup.events.length, 1);
+		assert.ok(setup.progressMessages[0].includes('paste its authorization code'));
+		assert.strictEqual(setup.progressMessages.some(message => /test-private/.test(message)), false);
+	} finally { setup.dispose(); }
+});
+
+test('cancelled manual input preserves a saved account and permits another sign-in', async () => {
+	let manual = false;
+	let code: string | undefined;
+	const setup = activateProvider(async options => {
+		if (options.readAuthorizationCode) { await options.readAuthorizationCode(options.signal); options.signal.throwIfAborted(); }
+		return 'test-account-token';
+	}, {}, { chooseMethod: async () => ({ manual }), readCode: async () => code });
+	try {
+		const original = await setup.provider.createSession([]);
+		manual = true;
+		await assert.rejects(setup.provider.createSession([]), { name: 'Canceled' });
+		assert.deepStrictEqual(await setup.provider.getSessions(), [original]);
+		assert.strictEqual(setup.events.length, 1);
+		code = 'test-retry-code';
+		const replacement = await setup.provider.createSession([]);
+		assert.notStrictEqual(replacement.id, original.id);
+		assert.strictEqual(setup.events.length, 2);
+	} finally { setup.dispose(); }
+});
+
+for (const mode of ['cancel', 'timeout', 'dispose']) {
+	test(`${mode} closes manual input without storing a credential`, async () => {
+		const started = deferred<AbortSignal>();
+		const setup = activateProvider(options => signInToDevin({ ...options, timeoutMs: mode === 'timeout' ? 25 : 5000, request: async () => assert.fail('must not exchange') }), {}, {
+			chooseMethod: async () => ({ manual: true }),
+			readCode: async (_options, signal) => {
+				started.resolve(signal);
+				return new Promise(resolve => signal.addEventListener('abort', () => resolve(undefined), { once: true }));
+			},
+		});
+		try {
+			const result = setup.provider.createSession([]);
+			const rejected = assert.rejects(result, mode === 'timeout' ? /timed out/ : { name: 'Canceled' });
+			const signal = await started.promise;
+			if (mode === 'cancel') { setup.cancel(); }
+			if (mode === 'dispose') { setup.dispose(); }
+			await rejected;
+			assert.strictEqual(signal.aborted, true);
+			assert.strictEqual(setup.secrets.size, 0);
+			assert.strictEqual(setup.events.length, 0);
+		} finally { if (mode !== 'dispose') { setup.dispose(); } }
+	});
+}
+
+test('dismissal or disposal during method selection never launches authentication', async () => {
+	for (const disposed of [false, true]) {
+		const choice = deferred<{ manual: boolean } | undefined>();
+		const setup = activateProvider(async () => assert.fail('must not launch after dismissal or disposal'), {}, { chooseMethod: () => choice.promise });
+		try {
+			const result = setup.provider.createSession([]);
+			if (disposed) { setup.dispose(); }
+			choice.resolve(disposed ? { manual: true } : undefined);
+			await assert.rejects(result, { name: 'Canceled' });
+			assert.strictEqual(setup.secrets.size, 0);
+		} finally { if (!disposed) { setup.dispose(); } }
+	}
+});
 
 test('a cancelled pending browser launch releases the provider for a fresh sign-in', async () => {
 	const started = deferred();
@@ -210,6 +310,7 @@ test('does not persist a session when cancellation wins the token-return race', 
 	const setup = activateProvider(async () => new Promise<string>(resolve => { release = resolve; }));
 	try {
 		const result = setup.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
 		setup.cancel();
 		release('must-not-persist');
 		await assert.rejects(result);

@@ -15,12 +15,14 @@ export const DEVIN_TOKEN_URL = 'https://api.devin.ai/auth/cli/token';
 export interface SignInOptions {
 	readonly openExternal: (url: string) => Promise<boolean>;
 	readonly signal: AbortSignal;
-	readonly onProgress?: (stage: 'waitingForBrowser' | 'exchangingCode') => void;
+	readonly readAuthorizationCode?: (signal: AbortSignal) => Promise<string | undefined>;
+	readonly onProgress?: (stage: 'waitingForBrowser' | 'waitingForCode' | 'exchangingCode') => void;
 	readonly timeoutMs?: number;
 	readonly request?: typeof fetch;
 }
 
 export async function signInToDevin(options: SignInOptions): Promise<string> {
+	const readAuthorizationCode = options.readAuthorizationCode;
 	const verifier = randomBytes(32).toString('base64url');
 	const state = randomBytes(32).toString('base64url');
 	const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -38,54 +40,61 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 	signal.addEventListener('abort', onAbort, { once: true });
 	try {
 		signal.throwIfAborted();
-		await new Promise<void>((resolve, reject) => {
-			server.once('error', reject);
-			server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });
-		});
-		const port = (server.address() as AddressInfo).port;
-		const redirectUri = `http://127.0.0.1:${port}/callback`;
-		const callback = new Promise<string>((resolve, reject) => {
-			rejectCallback = reject;
-			server.once('error', reject);
-			server.on('request', (request, response) => {
-				response.setHeader('Content-Type', 'text/plain; charset=utf-8');
-				response.setHeader('Cache-Control', 'no-store');
-				response.setHeader('X-Content-Type-Options', 'nosniff');
-				response.setHeader('Content-Security-Policy', 'default-src \'none\'; frame-ancestors \'none\'');
-				let url: URL;
-				try { url = new URL(request.url ?? '/', redirectUri); } catch {
-					response.writeHead(400).end('Invalid callback URL.');
-					return;
-				}
-				if (request.method !== 'GET' || request.headers.host !== `127.0.0.1:${port}` || url.pathname !== '/callback') {
-					response.writeHead(404).end('Not found.');
-					return;
-				}
-				if (url.searchParams.getAll('state').length !== 1 || url.searchParams.get('state') !== state) {
-					response.writeHead(400).end('Invalid sign-in state. Return to the original sign-in page.');
-					return;
-				}
-				if (url.searchParams.has('error')) {
-					response.writeHead(400).end('Sign-in was declined. Return to Agent Workspace.');
-					reject(new Error('Devin sign-in was declined.'));
-					return;
-				}
-				const code = url.searchParams.get('code');
-				if (!code || code.length > 8192 || url.searchParams.getAll('code').length !== 1) {
-					response.writeHead(400).end('No valid authorization code was received.');
-					return;
-				}
-				response.writeHead(200).end('Authorization received. Return to Agent Workspace to check the sign-in result.');
-				resolve(code);
+		let redirectUri: string | undefined;
+		let callback: Promise<string> | undefined;
+		if (!readAuthorizationCode) {
+			await new Promise<void>((resolve, reject) => {
+				server.once('error', reject);
+				server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });
 			});
-		});
-		// Browser failures/cancellation can win before we start awaiting the code.
-		void callback.catch(() => { });
+			const port = (server.address() as AddressInfo).port;
+			redirectUri = `http://127.0.0.1:${port}/callback`;
+			const callbackBase = redirectUri;
+			callback = new Promise<string>((resolve, reject) => {
+				rejectCallback = reject;
+				server.once('error', reject);
+				server.on('request', (request, response) => {
+					response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+					response.setHeader('Cache-Control', 'no-store');
+					response.setHeader('X-Content-Type-Options', 'nosniff');
+					response.setHeader('Content-Security-Policy', 'default-src \'none\'; frame-ancestors \'none\'');
+					let url: URL;
+					try { url = new URL(request.url ?? '/', callbackBase); } catch {
+						response.writeHead(400).end('Invalid callback URL.');
+						return;
+					}
+					if (request.method !== 'GET' || request.headers.host !== `127.0.0.1:${port}` || url.pathname !== '/callback') {
+						response.writeHead(404).end('Not found.');
+						return;
+					}
+					if (url.searchParams.getAll('state').length !== 1 || url.searchParams.get('state') !== state) {
+						response.writeHead(400).end('Invalid sign-in state. Return to the original sign-in page.');
+						return;
+					}
+					if (url.searchParams.has('error')) {
+						response.writeHead(400).end('Sign-in was declined. Return to Agent Workspace.');
+						reject(new Error('Devin sign-in was declined.'));
+						return;
+					}
+					const code = url.searchParams.get('code');
+					if (!code || code.length > 8192 || url.searchParams.getAll('code').length !== 1) {
+						response.writeHead(400).end('No valid authorization code was received.');
+						return;
+					}
+					response.writeHead(200).end('Authorization received. Return to Agent Workspace to check the sign-in result.');
+					resolve(code);
+				});
+			});
+			// Browser failures/cancellation can win before we start awaiting the code.
+			void callback.catch(() => { });
+		}
 		signal.throwIfAborted();
 		const authorize = new URL(DEVIN_AUTHORIZE_URL);
-		for (const [key, value] of Object.entries({ response_type: 'code', redirect_uri: redirectUri, state, prompt: 'select_account', code_challenge: challenge, code_challenge_method: 'S256', cli_pkce_marker: '1' })) {
+		for (const [key, value] of Object.entries({ response_type: 'code', state, prompt: 'select_account', code_challenge: challenge, code_challenge_method: 'S256', cli_pkce_marker: '1' })) {
 			authorize.searchParams.set(key, value);
 		}
+		// Devin displays a copyable code when redirect_uri is omitted.
+		if (redirectUri) { authorize.searchParams.set('redirect_uri', redirectUri); }
 		// A stalled opener must not hold the listener or block a fresh sign-in after cancellation.
 		const browserOpened = await new Promise<boolean>((resolve, reject) => {
 			rejectBrowserLaunch = reject;
@@ -95,8 +104,15 @@ export async function signInToDevin(options: SignInOptions): Promise<string> {
 		if (!browserOpened) {
 			throw new Error('The Devin sign-in page could not be opened.');
 		}
-		options.onProgress?.('waitingForBrowser');
-		const code = await callback;
+		signal.throwIfAborted();
+		options.onProgress?.(readAuthorizationCode ? 'waitingForCode' : 'waitingForBrowser');
+		const code = readAuthorizationCode ? await new Promise<string | undefined>((resolve, reject) => {
+			rejectCallback = reject;
+			readAuthorizationCode(signal).then(resolve, reject);
+		}) : await callback;
+		signal.throwIfAborted();
+		if (code === undefined) { throw new Error('Devin sign-in cancelled.'); }
+		if (!code || code.length > 8192 || (readAuthorizationCode && /\s/.test(code))) { throw new Error('Enter the authorization code shown by the Devin sign-in page.'); }
 		options.onProgress?.('exchangingCode');
 		const response = await (options.request ?? fetch)(DEVIN_TOKEN_URL, {
 			method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'error',

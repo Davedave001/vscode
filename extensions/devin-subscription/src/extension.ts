@@ -16,6 +16,7 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	private pending: Promise<vscode.AuthenticationSession> | undefined;
 	private readonly controllers = new Set<AbortController>();
 	private storageMutation: Promise<void> = Promise.resolve();
+	private disposed = false;
 
 	constructor(private readonly secrets: vscode.SecretStorage) { }
 
@@ -30,6 +31,7 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	}
 
 	async createSession(scopes: readonly string[]): Promise<vscode.AuthenticationSession> {
+		if (this.disposed) { throw new vscode.CancellationError(); }
 		if (scopes.length) { throw new Error(vscode.l10n.t('Devin subscription sign-in does not support custom scopes.')); }
 		if (this.pending) { return this.pending; }
 		this.pending = this.signIn();
@@ -42,13 +44,40 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 			this.controllers.add(controller);
 			const disposable = cancellation.onCancellationRequested(() => controller.abort());
 			try {
+				const method = await vscode.window.showQuickPick([
+					{ label: vscode.l10n.t('Browser Sign-In'), description: vscode.l10n.t('Return automatically to Signal-C'), manual: false },
+					{ label: vscode.l10n.t('Browser Code'), description: vscode.l10n.t('Use if the browser opens but sign-in does not finish'), manual: true },
+				], { title: vscode.l10n.t('Devin Subscription'), placeHolder: vscode.l10n.t('Choose how to complete browser sign-in') }, cancellation);
+				if (!method || this.disposed) { throw new vscode.CancellationError(); }
+				controller.signal.throwIfAborted();
 				const token = await signInToDevin({
 					openExternal: url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
 					signal: controller.signal,
+					readAuthorizationCode: method.manual ? async signal => {
+						const inputCancellation = new vscode.CancellationTokenSource();
+						const cancel = () => inputCancellation.cancel();
+						signal.addEventListener('abort', cancel, { once: true });
+						if (signal.aborted) { inputCancellation.cancel(); }
+						try {
+							const code = await vscode.window.showInputBox({
+								title: vscode.l10n.t('Devin Subscription — Browser Code'),
+								prompt: vscode.l10n.t('Finish sign-in in the Devin browser page, then paste the authorization code shown there.'),
+								password: true, ignoreFocusOut: true,
+								validateInput: value => !value || value.length > 8192 || /\s/.test(value) ? vscode.l10n.t('Paste only the authorization code shown by Devin.') : undefined,
+							}, inputCancellation.token);
+							if (code === undefined && !signal.aborted) { controller.abort(); }
+							return code;
+						} finally {
+							signal.removeEventListener('abort', cancel);
+							inputCancellation.dispose();
+						}
+					} : undefined,
 					onProgress: stage => {
 						const message = stage === 'waitingForBrowser'
 							? vscode.l10n.t('Waiting for approval in the Devin browser page. Keep this window open.')
-							: vscode.l10n.t('Browser approval received. Connecting to Devin…');
+							: stage === 'waitingForCode'
+								? vscode.l10n.t('Complete browser sign-in, then paste its authorization code into Signal-C.')
+								: vscode.l10n.t('Browser approval received. Connecting to Devin…');
 						progress.report({ message });
 						// Record phases only; callback URLs, authorization codes and tokens are private.
 						console.info(`[Devin Subscription] ${stage}`);
@@ -100,6 +129,7 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		for (const controller of this.controllers) { controller.abort(); }
 		this.changeEmitter.dispose();
 	}
