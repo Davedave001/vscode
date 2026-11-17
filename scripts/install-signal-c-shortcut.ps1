@@ -1,18 +1,18 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License. See License.txt in the project root for license information.
 
-# A per-user development shortcut; it reuses the launcher rather than duplicating its profile and environment logic.
+# Per-user shortcuts reuse the launcher rather than duplicating profile and environment logic.
 [CmdletBinding()]
-param()
+param([switch]$Optimized)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $launcher = Join-Path $PSScriptRoot 'code-agent-workspace.ts'
 $icon = Join-Path $repoRoot 'resources/win32/code.ico'
-$helper = Join-Path $repoRoot '.build/signal-c-shortcut.vbs'
+$helper = Join-Path $repoRoot $(if ($Optimized) { '.build/signal-c-optimized-shortcut.vbs' } else { '.build/signal-c-shortcut.vbs' })
 $nodeCommand = Get-Command node -CommandType Application -ErrorAction Stop
 $scriptHost = Join-Path ([Environment]::GetFolderPath('System')) 'wscript.exe'
-$description = "Signal-C development checkout: $repoRoot"
+$description = "Signal-C $(if ($Optimized) { 'optimized desktop' } else { 'development checkout' }): $repoRoot"
 $helperHeader = "' $description"
 
 foreach ($requiredFile in @($launcher, $icon, $scriptHost)) {
@@ -27,7 +27,8 @@ if ((Test-Path -LiteralPath $helper) -and (Get-Content -LiteralPath $helper -Tot
 $shell = New-Object -ComObject WScript.Shell
 try {
 	$programs = $shell.SpecialFolders.Item('Programs')
-	$shortcutPath = Join-Path $programs 'Signal-C (Development).lnk'
+	$shortcutName = if ($Optimized) { 'Signal-C' } else { 'Signal-C (Development)' }
+	$shortcutPath = Join-Path $programs "$shortcutName.lnk"
 	$shortcut = $shell.CreateShortcut($shortcutPath)
 	try {
 		if ((Test-Path -LiteralPath $shortcutPath) -and $shortcut.Description -ne $description) {
@@ -35,6 +36,7 @@ try {
 		}
 		# WScript hides only Node's console. The existing launcher opens the normal Agents window.
 		$command = '"' + $nodeCommand.Source + '" "' + $launcher + '"'
+		if ($Optimized) { $command += ' --optimized' }
 		$escapedCommand = $command.Replace('"', '""')
 		$helperSource = @"
 $helperHeader
@@ -51,7 +53,7 @@ shell.Run "$escapedCommand", 0, False
 		$shortcut.IconLocation = "$icon,0"
 		$shortcut.Description = $description
 		$shortcut.Save()
-		Write-Output "Created Start menu entry: Signal-C (Development)"
+		Write-Output "Created Start menu entry: $shortcutName"
 		Write-Output $shortcutPath
 	} finally {
 		[Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null

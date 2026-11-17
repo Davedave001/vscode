@@ -51,6 +51,9 @@ test('makes the installed official Claude CLI a fallback without replacing PATH 
 		assert.strictEqual(launch.environment.Path, `existing-client-directory${path.delimiter}${native}`);
 		assert.strictEqual(launch.environment.PATH, undefined);
 		assert.strictEqual(launch.environment.CLAUDE_CONFIG_DIR, path.join(root, '.build', 'agent-workspace-claude'));
+		const optimized = createLaunchOptions(root, root, false, inherited, true);
+		assert.strictEqual(optimized.environment.VSCODE_AGENT_HOST_CLAUDE_SDK_ROOT, root);
+		assert.strictEqual(optimized.environment.VSCODE_AGENT_HOST_CODEX_SDK_ROOT, undefined);
 		assert.deepStrictEqual(inherited, { Path: 'existing-client-directory', CLAUDE_CONFIG_DIR: 'another-client-home' });
 		const alreadyAvailable = createLaunchOptions(root, root, false, { Path: native });
 		assert.strictEqual(alreadyAvailable.environment.Path, native);
@@ -75,6 +78,25 @@ test('keeps workspace arguments separate from the three isolated editor storage 
 			assert.strictEqual(launch.args[launch.args.indexOf(flag) + 1], path.join(root, '.build', directory));
 		}
 	}
+});
+
+test('optimized desktop uses bundled code while preserving the existing workspace and isolated profile destinations', () => {
+	const root = path.resolve('fork with spaces');
+	const workspace = path.resolve('project with spaces');
+	const inherited = { VSCODE_DEV: '1', VSCODE_IPC_HOOK_CLI: 'another-editor', NODE_ENV: 'development', Path: 'keep' };
+	for (const ide of [false, true]) {
+		const development = createLaunchOptions(root, workspace, ide, inherited);
+		const optimized = createLaunchOptions(root, workspace, ide, inherited, true);
+		assert.strictEqual(optimized.executable, path.join(path.dirname(root), `VSCode-win32-${process.arch}`, 'Signal-C.exe'));
+		assert.deepStrictEqual(optimized.args, development.args.slice(1));
+		assert.strictEqual(optimized.environment.VSCODE_DEV, undefined);
+		assert.strictEqual(optimized.environment.NODE_ENV, 'production');
+		assert.strictEqual(optimized.environment.VSCODE_IPC_HOOK_CLI, undefined);
+		assert.strictEqual(optimized.environment.VSCODE_AGENT_HOST_CODEX_SDK_ROOT, undefined);
+		assert.strictEqual(optimized.profile, development.profile);
+		assert.deepStrictEqual(optimized.agentHomes, development.agentHomes);
+	}
+	assert.deepStrictEqual(inherited, { VSCODE_DEV: '1', VSCODE_IPC_HOOK_CLI: 'another-editor', NODE_ENV: 'development', Path: 'keep' });
 });
 
 test('prefers the Signal-C runtime and supports an existing development runtime', () => {

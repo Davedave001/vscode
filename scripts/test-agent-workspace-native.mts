@@ -17,10 +17,11 @@ assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Wind
 const require = createRequire(import.meta.url);
 const { startServer, registerScenario } = require('./chat-simulation/common/mock-llm-server.ts') as typeof import('./chat-simulation/common/mock-llm-server.ts');
 const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(server: { url: string }): Record<string, string> };
-const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv): { executable: string; args: string[] } };
+const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv, optimized?: boolean): { executable: string; args: string[]; environment: NodeJS.ProcessEnv } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, or --app-connections');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections', '--optimized'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, --app-connections, or --optimized');
+const optimized = process.argv.includes('--optimized');
 const keyboard = process.argv.includes('--keyboard');
 const appConnections = process.argv.includes('--app-connections');
 const workspaceProtocol = process.argv.includes('--workspace-protocol');
@@ -54,6 +55,7 @@ let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
+	optimized,
 	scenario: workspaceProtocol ? 'workspace-protocol-conversation' : protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
@@ -112,8 +114,16 @@ try {
 	assert.equal(execFileSync(process.execPath, ['-p', 'require("node:os").homedir()'], { env, windowsHide: true, encoding: 'utf8' }).trim(), fixtureHome);
 	const inspectArgs = await allocateInspectorArgs();
 	stage = 'launching';
-	const launch = createLaunchOptions(root, workspace, true, {});
+	const launch = createLaunchOptions(root, workspace, true, {}, optimized);
 	const executable = launch.executable;
+	if (optimized) {
+		delete env.VSCODE_DEV;
+		env.NODE_ENV = 'production';
+		for (const key of ['VSCODE_AGENT_HOST_CODEX_SDK_ROOT', 'VSCODE_AGENT_HOST_CLAUDE_SDK_ROOT']) {
+			if (launch.environment[key]) { env[key] = launch.environment[key]; }
+		}
+	}
+	const applicationArgs = optimized ? [] : [root];
 	const fallbackIndex = launch.args.indexOf('--agent-cli-fallback-dir');
 	assert.ok(fallbackIndex >= 0, 'The native fixture requires the installed official Claude CLI fallback');
 	const cliFallback = launch.args[fallbackIndex + 1];
@@ -127,7 +137,7 @@ try {
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
 		...(protocol || keyboard ? ['--log', 'trace'] : [])];
-	app = await _electron.launch({ executablePath: executable, args: [root, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
+	app = await _electron.launch({ executablePath: executable, args: [...applicationArgs, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
 	const launched = app;
 	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
 	assert.deepEqual(await launched.evaluate(({ app }) => ({ portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') })), { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
@@ -389,7 +399,7 @@ try {
 			await launched.close();
 			const coldEnv = { ...env };
 			delete coldEnv.CODEX_HOME; delete coldEnv.CLAUDE_CONFIG_DIR;
-			app = await _electron.launch({ executablePath: executable, args: [root, '--open-url', ...commonArgs, ...await allocateInspectorArgs(), '--', protocolUri], env: coldEnv, timeout: 60000 });
+			app = await _electron.launch({ executablePath: executable, args: [...applicationArgs, '--open-url', ...commonArgs, ...await allocateInspectorArgs(), '--', protocolUri], env: coldEnv, timeout: 60000 });
 			const coldApp = app;
 			await coldApp.firstWindow({ timeout: 45000 });
 			assert.deepEqual(await coldApp.evaluate(() => ({ codex: process.env.CODEX_HOME, claude: process.env.CLAUDE_CONFIG_DIR })), { codex: join(run, 'codex'), claude: join(run, 'claude') }, 'Cold URL startup must restore explicit agent homes without launcher environment variables');

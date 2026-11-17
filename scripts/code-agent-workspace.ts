@@ -25,7 +25,7 @@ function bundledClaudeDirectory(repoRoot: string): string | undefined {
 	} catch { return undefined; }
 }
 
-function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv) {
+function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv, optimized = false) {
 	const buildRoot = path.join(repoRoot, '.build');
 	const profile = path.join(buildRoot, 'agent-workspace-profile');
 	const codexHome = path.join(buildRoot, 'agent-workspace-codex');
@@ -41,10 +41,17 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 		}
 	}
 	Object.assign(environment, {
-		NODE_ENV: 'development', VSCODE_DEV: '1', VSCODE_CLI: '1',
+		NODE_ENV: optimized ? 'production' : 'development', ...(!optimized ? { VSCODE_DEV: '1' } : {}), VSCODE_CLI: '1',
 		CODEX_HOME: codexHome,
 		CLAUDE_CONFIG_DIR: claudeHome,
 	});
+	if (optimized) {
+		// Locally packaged builds have no published SDK catalog. Reuse this
+		// checkout's installed SDKs through the existing explicit root overrides.
+		for (const [name, variable] of [['@openai/codex', 'VSCODE_AGENT_HOST_CODEX_SDK_ROOT'], ['@anthropic-ai/claude-agent-sdk', 'VSCODE_AGENT_HOST_CLAUDE_SDK_ROOT']]) {
+			if (fs.existsSync(path.join(repoRoot, 'node_modules', name, 'package.json'))) { environment[variable] = repoRoot; }
+		}
+	}
 	const claudeDirectory = bundledClaudeDirectory(repoRoot);
 	if (claudeDirectory) {
 		const pathKey = Object.keys(environment).find(key => key.toLowerCase() === 'path') ?? 'PATH';
@@ -56,8 +63,8 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 	}
 	return {
 		// Existing development runtimes remain usable until native assets are rebuilt.
-		executable: fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
-		args: [repoRoot, ...(ide ? [] : ['--agents']), workspace,
+		executable: optimized ? path.join(path.dirname(repoRoot), `VSCode-win32-${process.arch}`, `${product.nameShort}.exe`) : fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
+		args: [...(!optimized ? [repoRoot] : []), ...(ide ? [] : ['--agents']), workspace,
 			'--user-data-dir', profile,
 			'--shared-data-dir', path.join(buildRoot, 'agent-workspace-shared'),
 			'--extensions-dir', path.join(buildRoot, 'agent-workspace-extensions'),
@@ -71,15 +78,15 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 }
 
 function main() {
-	const args = minimist(process.argv.slice(2), { boolean: ['help', 'ide', 'dry-run'], string: ['workspace'] });
+	const args = minimist(process.argv.slice(2), { boolean: ['help', 'ide', 'optimized', 'dry-run'], string: ['workspace'] });
 	if (args.help) {
-		console.log('node scripts/code-agent-workspace.ts [--ide] [--workspace <folder>] [--dry-run]\nLaunch Signal-C (Signal-Connections) with separate editor, shared-storage, extension, and agent profiles.');
+		console.log('node scripts/code-agent-workspace.ts [--ide] [--optimized] [--workspace <folder>] [--dry-run]\nLaunch Signal-C (Signal-Connections) with separate editor, shared-storage, extension, and agent profiles. --optimized uses the packaged desktop build.');
 		return;
 	}
 	if (process.platform !== 'win32') {
 		throw new Error('This development launcher currently supports Windows.');
 	}
-	const unknown = Object.keys(args).filter(key => !['_', 'help', 'ide', 'dry-run', 'workspace'].includes(key));
+	const unknown = Object.keys(args).filter(key => !['_', 'help', 'ide', 'optimized', 'dry-run', 'workspace'].includes(key));
 	if (unknown.length || args._.length) {
 		throw new Error('Use --workspace <folder> to select a workspace; additional editor arguments are not forwarded.');
 	}
@@ -88,13 +95,13 @@ function main() {
 	if (!fs.statSync(workspace).isDirectory()) {
 		throw new Error('The workspace must be an existing directory.');
 	}
-	const options = createLaunchOptions(repoRoot, workspace, args.ide, process.env);
+	const options = createLaunchOptions(repoRoot, workspace, args.ide, process.env, args.optimized);
 	if (args['dry-run']) {
 		console.log(JSON.stringify({ executable: options.executable, args: options.args }, null, 2));
 		return;
 	}
 	if (!fs.existsSync(options.executable)) {
-		throw new Error('The development Electron runtime is missing. Prepare the native build before launching.');
+		throw new Error(args.optimized ? 'The optimized desktop build is missing. Run the vscode-win32 build task for this architecture before launching with --optimized.' : 'The development Electron runtime is missing. Prepare the native build before launching.');
 	}
 	for (const directory of [options.profile, ...options.agentHomes]) {
 		fs.mkdirSync(directory, { recursive: true });
@@ -112,7 +119,7 @@ function main() {
 	}
 	const child = spawn(options.executable, options.args, { cwd: repoRoot, env: options.environment, detached: true, stdio: 'ignore' });
 	child.on('error', error => { console.error(error.message); process.exitCode = 1; });
-	child.on('spawn', () => { console.log(`Opened Signal-C ${args.ide ? 'IDE' : 'Agents'} development window (PID ${child.pid}).`); child.unref(); });
+	child.on('spawn', () => { console.log(`Opened Signal-C ${args.ide ? 'IDE' : 'Agents'} ${args.optimized ? 'optimized desktop' : 'development'} window (PID ${child.pid}).`); child.unref(); });
 }
 
 module.exports = { createLaunchOptions };

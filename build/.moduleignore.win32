@@ -1,2 +1,6 @@
 @anthropic-ai/claude-agent-sdk/vendor/audio-capture/*-darwin/**
 @anthropic-ai/claude-agent-sdk/vendor/audio-capture/*-linux/**
+
+# Other platforms' node-pty addons are not Windows PE files and cannot be patched by rcedit.
+node-pty/prebuilds/darwin-*/**
+node-pty/prebuilds/linux-*/**
