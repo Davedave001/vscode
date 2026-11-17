@@ -13,6 +13,7 @@ import { AgentHostMcpServersConfigKey, platformRootSchema } from '../../common/a
 import { IAgentConfigurationService } from '../agentConfigurationService.js';
 import { IAgentHostCustomizationEnablementService, targetForUnownedMcpServer } from '../agentHostCustomizationEnablementService.js';
 import { isAcpRecord } from './acpClient.js';
+import type { ClientPluginCustomization } from '../../common/state/sessionState.js';
 
 export type AcpMcpServer = {
 	readonly name: string;
@@ -30,7 +31,12 @@ export type AcpMcpServer = {
 export interface IDevinMcpConfiguration {
 	/** Undefined means host configuration changed; otherwise only the listed owner scopes changed. */
 	readonly onDidChange: Event<readonly string[] | undefined>;
-	getServers(owner: URI): Promise<readonly AcpMcpServer[]>;
+	getServers(owner: URI, clients?: readonly IDevinMcpClient[], workingDirectory?: URI): Promise<readonly AcpMcpServer[]>;
+}
+
+export interface IDevinMcpClient {
+	readonly clientId: string;
+	readonly customizations: readonly ClientPluginCustomization[];
 }
 
 /** Map explicit host configuration only; never copy another application's private configuration. */

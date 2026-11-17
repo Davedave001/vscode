@@ -9,7 +9,7 @@ import { Disposable, DisposableStore, type IDisposable } from '../../../../base/
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { CancellationError } from '../../../../base/common/errors.js';
 import { observableValue } from '../../../../base/common/observable.js';
-import { equals } from '../../../../base/common/objects.js';
+import { deepClone, equals } from '../../../../base/common/objects.js';
 import { URI } from '../../../../base/common/uri.js';
 import { isEqual, basename } from '../../../../base/common/resources.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -68,6 +68,7 @@ interface IChat {
 	context?: IAgentChatContext;
 	ownerListener?: IDisposable;
 	mcpServers?: readonly AcpMcpServer[];
+	clientRevision: number;
 	cwd: URI;
 	model?: ModelSelection;
 	nativeId?: string;
@@ -120,6 +121,19 @@ export interface IDevinClientAdapter {
 	createClient(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv): AcpClient;
 }
 
+class DevinActiveClient implements IActiveClient {
+	tools: IActiveClient['tools'] = [];
+	private value: IActiveClient['customizations'] = [];
+	constructor(readonly clientId: string, readonly displayName: string | undefined, private readonly changed: () => void) { }
+	get customizations(): IActiveClient['customizations'] { return deepClone(this.value); }
+	set customizations(value: IActiveClient['customizations']) {
+		if (!equals(this.value, value)) {
+			this.value = deepClone(value);
+			this.changed();
+		}
+	}
+}
+
 /** The official client understands this prefix as a Devin account, not a Windsurf API key. */
 export function devinSubscriptionEnvironment(token: string, inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const env = { ...inherited };
@@ -166,6 +180,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	private token: string | undefined;
 	private authRevision = 0;
 	private catalogIds: ReadonlySet<string> = new Set();
+	private readonly clients = new Map<string, Map<string, DevinActiveClient>>();
 
 	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter, private readonly mcpConfiguration?: IDevinMcpConfiguration) {
 		super();
@@ -222,7 +237,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			this.setRecordContext(this.createRecord(chat, directories[0], options?.model), resolveAgentChatContext(context, chat));
 			return { provisional: true, resolvedWorkingDirectory: directories[0] };
 		},
-		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); this.records.delete(chat.toString()); } },
+		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); this.records.delete(chat.toString()); } this.clients.delete(chat.toString()); },
 		releaseChat: async chat => { this.cancelSendAndRelease(this.record(chat)); },
 		sendMessage: async (chat, prompt, directories, attachments, turnId, _sender, clientTypeOrContext, context) => {
 			if (!turnId) { throw new Error('A host turn id is required.'); }
@@ -332,7 +347,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 
 	private createRecord(chat: URI, cwd: URI, model?: ModelSelection, createdAt = Date.now(), modifiedAt = createdAt): IChat {
 		if (this.records.has(chat.toString())) { throw new Error('Devin chat already exists.'); }
-		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, configOptions: [], createdAt, modifiedAt };
+		const record: IChat = { chat, cwd, model, history: [], store: new DisposableStore(), tools: new Map(), replaying: false, legacyModels: false, configOptions: [], createdAt, modifiedAt, clientRevision: 0 };
 		this.records.set(chat.toString(), record);
 		return record;
 	}
@@ -384,21 +399,36 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	private async readMcpConfiguration(record: IChat): Promise<readonly AcpMcpServer[]> {
 		if (!this.mcpConfiguration) { return []; }
 		if (!record.context) { throw new Error('Devin MCP configuration requires a host-provided chat context.'); }
-		const owner = record.context.owner.get();
-		const servers = await this.mcpConfiguration.getServers(owner);
-		if (!isEqual(owner, record.context.owner.get())) { throw new CancellationError(); }
-		return servers;
+		for (;;) {
+			if (this._store.isDisposed || record.store.isDisposed || record.aborting || record.send?.cancelled) { throw new CancellationError(); }
+			const owner = record.context.owner.get();
+			const revision = record.clientRevision;
+			const clients = [...this.clients.get(record.chat.toString())?.values() ?? []].map(client => ({ clientId: client.clientId, customizations: client.customizations }));
+			let servers: readonly AcpMcpServer[];
+			try { servers = await this.mcpConfiguration.getServers(owner, clients, record.cwd); }
+			catch (error) {
+				if (record.aborting || record.send?.cancelled || !isEqual(owner, record.context.owner.get())) { throw new CancellationError(); }
+				if (revision !== record.clientRevision) { continue; }
+				throw error;
+			}
+			if (!isEqual(owner, record.context.owner.get())) { throw new CancellationError(); }
+			if (revision !== record.clientRevision) { continue; }
+			return servers;
+		}
 	}
 
 	private async refreshMcpConfiguration(record: IChat): Promise<void> {
+		const revision = record.clientRevision;
+		const owner = record.context?.owner.get();
 		try {
 			const servers = await this.readMcpConfiguration(record);
 			if (this._store.isDisposed || record.store.isDisposed || this.records.get(record.chat.toString()) !== record) { return; }
 			if (!equals(record.mcpServers ?? [], servers)) {
-				if (record.client || record.initializing) { this.cancelSendAndRelease(record); }
+				if (record.client || record.initializing && record.mcpServers !== undefined) { this.cancelSendAndRelease(record); }
 				else { record.mcpServers = servers; }
 			}
 		} catch {
+			if (revision !== record.clientRevision || !isEqual(owner, record.context?.owner.get())) { return; }
 			// A removed/disabled/invalid definition must not leave the previous tool connection usable.
 			if (!this._store.isDisposed && !record.store.isDisposed && (record.client || record.initializing)) { this.cancelSendAndRelease(record); }
 		}
@@ -649,9 +679,24 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	getOrCreateActiveClient(chat: URI, context: Parameters<IAgent['getOrCreateActiveClient']>[1], client: { clientId: string; displayName?: string }): IActiveClient {
 		const record = this.records.get(chat.toString());
 		if (record) { this.setRecordContext(record, resolveAgentChatContext(context, chat)); }
-		return { clientId: client.clientId, displayName: client.displayName, tools: [], customizations: [] };
+		let clients = this.clients.get(chat.toString());
+		if (!clients) { clients = new Map(); this.clients.set(chat.toString(), clients); }
+		const existing = clients.get(client.clientId);
+		if (existing) { return existing; }
+		const handle = new DevinActiveClient(client.clientId, client.displayName, () => {
+			if (this.clients.get(chat.toString())?.get(client.clientId) !== handle) { return; }
+			const current = this.records.get(chat.toString());
+			if (current) { current.clientRevision++; void this.refreshMcpConfiguration(current); }
+		});
+		clients.set(client.clientId, handle);
+		return handle;
 	}
-	removeActiveClient(): void { }
+	removeActiveClient(chat: URI, context: Parameters<IAgent['removeActiveClient']>[1], clientId: string): void {
+		if (!this.clients.get(chat.toString())?.delete(clientId)) { return; }
+		if (this.clients.get(chat.toString())?.size === 0) { this.clients.delete(chat.toString()); }
+		const record = this.records.get(chat.toString());
+		if (record) { this.setRecordContext(record, resolveAgentChatContext(context, chat)); record.clientRevision++; void this.refreshMcpConfiguration(record); }
+	}
 	onClientToolCallComplete(): void { throw new Error('Devin does not advertise client-side tools.'); }
 	respondToUserInputRequest(): void { }
 	async resolveChatConfig(params: Parameters<IAgent['resolveChatConfig']>[0]) { return { schema: { type: 'object' as const, properties: {} }, values: params.config ?? {} }; }
@@ -664,5 +709,5 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, model: record.model, workingDirectories: [record.cwd], project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined;
 	}
 	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.cancelSendAndRelease(record); } }
-	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
+	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); } this.records.clear(); this.clients.clear(); this.token = undefined; super.dispose(); }
 }

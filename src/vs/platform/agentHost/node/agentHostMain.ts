@@ -30,6 +30,7 @@ import { IAgentHostClientConnectionService } from './agentHostClientConnectionSe
 import { CopilotAgent } from './copilot/copilotAgent.js';
 import { DevinSubscriptionAgent } from './acp/devinSubscriptionAgent.js';
 import { DevinMcpConfiguration } from './acp/devinMcpConfiguration.js';
+import { DevinClientMcpConfiguration } from './acp/devinClientMcpConfiguration.js';
 import { AgentHostDevinExecutableEnvVar } from '../common/devinAgentConfiguration.js';
 import { findExecutable } from '../../../base/node/processes.js';
 import { ClaudeAgent } from './claude/claudeAgent.js';
@@ -238,7 +239,8 @@ async function startAgentHost(): Promise<void> {
 		const devinExecutable = await findExecutable(process.env[AgentHostDevinExecutableEnvVar] || 'devin');
 		if (devinExecutable) {
 			const mcpConfiguration = disposables.add(instantiationService.createInstance(DevinMcpConfiguration));
-			providerService.registerProvider(new DevinSubscriptionAgent(devinExecutable, undefined, mcpConfiguration));
+			const clientMcpConfiguration = instantiationService.createInstance(DevinClientMcpConfiguration, mcpConfiguration);
+			providerService.registerProvider(new DevinSubscriptionAgent(devinExecutable, undefined, clientMcpConfiguration));
 		}
 		// Claude and Codex providers are gated on two things:
 		//  1. The user-facing enable toggle (`chat.agentHost.<x>Agent.enabled`,

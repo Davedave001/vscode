@@ -15,7 +15,8 @@ import { ActionType, isChatAction } from '../../common/state/sessionActions.js';
 import { type AgentSignal, type IAgentChatOwnerChange, fixedChatOwnerRef, resolveAgentChatContext } from '../../common/agent.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { TestAcpTransport } from './acpTestUtils.js';
-import { MessageAttachmentKind, type MessageAttachment, type ChatState, MessageKind, ResponsePartKind, SessionStatus, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType, TurnState } from '../../common/state/sessionState.js';
+import { CustomizationType, type ClientPluginCustomization, MessageAttachmentKind, type MessageAttachment, type ChatState, MessageKind, ResponsePartKind, SessionStatus, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType, TurnState } from '../../common/state/sessionState.js';
+import { CustomizationEnablementKind } from '../../common/state/protocol/state.js';
 import { chatReducer } from '../../common/state/protocol/reducers.js';
 import { resolveAcpPrompt } from '../../node/acp/acpPromptResolver.js';
 import { type AcpMcpServer, type IDevinMcpConfiguration } from '../../node/acp/devinMcpConfiguration.js';
@@ -69,6 +70,99 @@ suite('Devin Subscription Agent', () => {
 		}, mcpConfiguration));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
 		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; }, set onInitialize(value: typeof onInitialize) { onInitialize = value; } };
+	}
+
+	function clientBundle(name: string, nonce = 'revision'): ClientPluginCustomization {
+		return { type: CustomizationType.Plugin, id: name, name, uri: `client-files://window/${name}`, nonce, childEnablement: { tools: [{ kind: CustomizationEnablementKind.Global, enabled: true }] } };
+	}
+
+	test('keeps an active client handle and forwards its immutable customization snapshot on the first send', async () => {
+		const seen: string[] = [];
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (resource, clients = [], workingDirectory) => {
+			assert.strictEqual(resource.toString(), owner.toString());
+			assert.strictEqual(workingDirectory?.toString(), cwd.toString());
+			return clients.flatMap(client => client.customizations.map(ref => { seen.push(`${client.clientId}:${ref.nonce}`); return { name: ref.name, command: 'test-mcp', args: [ref.nonce!], env: [] }; }));
+		} });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const handle = f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor', displayName: 'Editor' });
+		assert.strictEqual(f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor' }), handle);
+		const refs = [clientBundle('client-tools')];
+		handle.customizations = refs;
+		refs[0].nonce = 'mutated-after-assignment';
+		handle.customizations[0].nonce = 'mutated-through-getter';
+		await f.agent.chats.sendMessage(chat, 'hello', [cwd], undefined, 'client-first');
+		const request = f.transports[0].sent.find(item => item.method === 'session/new')!;
+		assert.ok(isAcpRecord(request.params));
+		assert.deepStrictEqual(request.params.mcpServers, [{ name: 'client-tools', command: 'test-mcp', args: ['revision'], env: [] }]);
+		assert.ok(seen.length > 0 && seen.every(value => value === 'editor:revision'));
+	});
+
+	test('retains client contributions before materialization and isolates exact chats', async () => {
+		const secondChat = URI.parse('different-chat:/opaque-chat');
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (_owner, clients = []) => clients.flatMap(client => client.customizations.map(ref => ({ name: ref.name, command: 'test-mcp', args: [], env: [] }))) });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor' }).customizations = [clientBundle('first-tools')];
+		f.agent.getOrCreateActiveClient(secondChat, owner, { clientId: 'editor' }).customizations = [clientBundle('second-tools')];
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		await f.agent.chats.createChat(secondChat, owner, { workingDirectories: [cwd] });
+		await f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'first-client-chat');
+		await f.agent.chats.sendMessage(secondChat, 'second', [cwd], undefined, 'second-client-chat');
+		for (const [index, name] of ['first-tools', 'second-tools'].entries()) {
+			const request = f.transports[index].sent.find(item => item.method === 'session/new')!;
+			assert.ok(isAcpRecord(request.params));
+			assert.deepStrictEqual(request.params.mcpServers, [{ name, command: 'test-mcp', args: [], env: [] }]);
+		}
+	});
+
+	test('revokes a removed client during a turn and ignores later updates from its detached handle', async () => {
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (_owner, clients = []) => clients.flatMap(client => client.customizations.map(ref => ({ name: ref.name, command: 'test-mcp', args: [], env: [] }))) });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const handle = f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor' });
+		handle.customizations = [clientBundle('old-tools')];
+		const started = new DeferredPromise<void>();
+		f.onPrompt = () => { void started.complete(); };
+		const firstSettled = f.agent.chats.sendMessage(chat, 'waiting', [cwd], undefined, 'client-before-remove').catch(error => error);
+		await started.p;
+		f.agent.removeActiveClient(chat, owner, 'editor');
+		handle.customizations = [clientBundle('must-not-return')];
+		await firstSettled;
+		f.onPrompt = (transport, request) => transport.reply(request, { stopReason: 'end_turn' });
+		await f.agent.chats.sendMessage(chat, 'follow-up', [cwd], undefined, 'client-after-remove');
+		const restored = f.transports[1].sent.find(item => item.method === 'session/load')!;
+		assert.ok(isAcpRecord(restored.params));
+		assert.deepStrictEqual(restored.params.mcpServers, []);
+		assert.strictEqual(restored.params.sessionId, 'native');
+	});
+
+	for (const failPrevious of [false, true]) {
+		test(`refreshes a stale client snapshot before opening the native session without dropping the first send (old read fails=${failPrevious})`, async () => {
+			const loading = new DeferredPromise<void>();
+			const previous = new DeferredPromise<readonly AcpMcpServer[]>();
+			const f = fixture(catalog, { onDidChange: Event.None, getServers: async (_owner, clients = []) => {
+				if (clients.some(client => client.customizations.some(ref => ref.nonce === 'old'))) {
+					void loading.complete();
+					const result = await previous.p;
+					if (failPrevious) { throw new Error('Old bundle is unavailable'); }
+					return result;
+				}
+				return [{ name: 'current-tools', command: 'test-mcp', args: [], env: [] }];
+			} });
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			const handle = f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor' });
+			handle.customizations = [clientBundle('tools', 'old')];
+			const send = f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'client-stale');
+			await loading.p;
+			handle.customizations = [clientBundle('tools', 'new')];
+			void previous.complete([]);
+			await send;
+			assert.strictEqual(f.launches.length, 1);
+			const created = f.transports[0].sent.find(item => item.method === 'session/new')!;
+			assert.ok(isAcpRecord(created.params));
+			assert.deepStrictEqual(created.params.mcpServers, [{ name: 'current-tools', command: 'test-mcp', args: [], env: [] }]);
+		});
 	}
 
 	test('forwards enabled host MCP definitions to both new and restored native sessions', async () => {
