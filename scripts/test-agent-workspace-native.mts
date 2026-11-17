@@ -8,10 +8,10 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { createServer } from 'node:net';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { _electron, type ElectronApplication, type Locator, type Page } from 'playwright';
+import { allocateInspectorArgs } from './agent-workspace-test-utils.mts';
 
 assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Windows development runtime');
 const require = createRequire(import.meta.url);
@@ -62,23 +62,6 @@ const report = {
 	modelRequestCount: 0,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 };
-// Reserve separate ports so the dev runtime never needs the running editor's default inspectors.
-async function allocateInspectorArgs(): Promise<string[]> {
-	const reservations: { server: ReturnType<typeof createServer>; port: number }[] = [];
-	try {
-		for (let i = 0; i < 4; i++) {
-			const server = createServer();
-			await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-			const address = server.address();
-			assert.ok(address && typeof address !== 'string');
-			reservations.push({ server, port: address.port });
-		}
-		return ['agenthost', 'ptyhost', 'sharedprocess', 'extensions'].map((name, i) => `--inspect-${name}=${reservations[i].port}`);
-	} finally {
-		await Promise.all(reservations.map(({ server }) => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))));
-	}
-}
-
 try {
 	const settings = {
 		'workbench.startupEditor': 'none', 'workbench.editor.showTabs': 'multiple',
