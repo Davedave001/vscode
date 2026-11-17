@@ -43,8 +43,10 @@ import { getCustomizationMigrationGroupIgnoreKey, storeIgnoredCustomizationMigra
 import { IAgentHostToolSetEnablementService } from '../../../../../workbench/contrib/chat/browser/agentSessions/agentHost/agentHostToolSetEnablementService.js';
 import { getCopilotCliBuiltinToolSet } from '../../../../../workbench/contrib/chat/browser/agentSessions/agentHost/copilotCliBuiltinToolSet.js';
 import { AICustomizationManagementSection, IAICustomizationWorkspaceService } from '../../../../../workbench/contrib/chat/common/aiCustomizationWorkspaceService.js';
-import { ICustomizationHarnessService, IHarnessDescriptor } from '../../../../../workbench/contrib/chat/common/customizationHarnessService.js';
+import { ICustomizationHarnessService, ICustomizationItemProvider, IHarnessDescriptor } from '../../../../../workbench/contrib/chat/common/customizationHarnessService.js';
 import { ChatContextKeys } from '../../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
+import { IsSessionsWindowContext } from '../../../../../workbench/common/contextkeys.js';
+import { ChatConfiguration } from '../../../../../workbench/contrib/chat/common/constants.js';
 import { CustomizationMigrationType, ICustomizationMigrationHint, ICustomizationMigrationIgnoredGroup, ICustomizationMigrationService } from '../../../../../workbench/contrib/chat/common/promptSyntax/service/customizationMigrationService.js';
 import { PromptsStorage } from '../../../../../workbench/contrib/chat/common/promptSyntax/service/promptsService.js';
 import { ILanguageModelToolsService, IToolData, IToolSet } from '../../../../../workbench/contrib/chat/common/tools/languageModelToolsService.js';
@@ -80,6 +82,56 @@ suite('Customizations toolbar', () => {
 
 	test('does not include standalone Remotes management in Customizations', () => {
 		assert.ok(CUSTOMIZATION_ITEMS.every(item => item.id !== 'sessions.customization.remotes'));
+	});
+
+	test('offers Customizations for a registered native provider without a default chat participant and respects Hide AI Features', () => {
+		const configurationService = new TestConfigurationService({ [ChatConfiguration.ChatCustomizationsLocation]: 'sidebar' });
+		const contextKeyService = disposables.add(new ContextKeyService(configurationService));
+		ChatContextKeys.enabled.bindTo(contextKeyService).set(false);
+		const sessionsWindow = IsSessionsWindowContext.bindTo(contextKeyService);
+		sessionsWindow.set(true);
+		const hidden = ChatContextKeys.Setup.hidden.bindTo(contextKeyService);
+		const descriptor = upcastPartial<IHarnessDescriptor>({ id: 'native-provider', itemProvider: upcastPartial<ICustomizationItemProvider>({}), hiddenSections: [AICustomizationManagementSection.Tools] });
+		const harnesses = observableValue<readonly IHarnessDescriptor[]>(disposables, []);
+		const activeHarness = observableValue(disposables, descriptor.id);
+		disposables.add(new CustomizationsToolbarContribution(
+			new class extends mock<IActionViewItemService>() {
+				override register() { return toDisposable(() => { }); }
+			},
+			new class extends mock<IInstantiationService>() { },
+			new class extends mock<ICustomizationHarnessService>() {
+				override readonly activeHarness = activeHarness;
+				override readonly availableHarnesses = harnesses;
+				override getActiveDescriptor() { return descriptor; }
+			},
+			contextKeyService,
+			configurationService,
+			disposables.add(new InMemoryStorageService()),
+		));
+		const offered = (menu: MenuId, command: string) => MenuRegistry.getMenuItems(menu).filter(isIMenuItem)
+			.some(item => item.command.id === command && contextKeyService.contextMatchesRules(item.when) && contextKeyService.contextMatchesRules(item.command.precondition));
+		const entry = 'sessions.openCustomizationsAtLocation';
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), false);
+		harnesses.set([descriptor], undefined);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), true);
+		assert.strictEqual(offered(Menus.SidebarCustomizationsEntryPoint, entry), true);
+		assert.strictEqual(offered(Menus.SidebarCustomizations, OPEN_AI_CUSTOMIZATIONS_COMMAND_ID), true);
+		const tools = CUSTOMIZATION_ITEMS.find(item => item.section === AICustomizationManagementSection.Tools)!;
+		assert.strictEqual(offered(Menus.SidebarCustomizations, tools.id), false);
+		hidden.set(true);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), false);
+		assert.strictEqual(offered(Menus.SidebarCustomizationsEntryPoint, entry), false);
+		hidden.set(false);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), true);
+		sessionsWindow.set(false);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), false);
+		sessionsWindow.set(true);
+		activeHarness.set('other-provider', undefined);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), false);
+		activeHarness.set(descriptor.id, undefined);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), true);
+		harnesses.set([], undefined);
+		assert.strictEqual(offered(MenuId.CommandPalette, entry), false);
 	});
 
 	test('opens the modal with complete new-session target labels', async () => {

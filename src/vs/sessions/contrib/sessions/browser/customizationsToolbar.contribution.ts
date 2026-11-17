@@ -6,8 +6,8 @@
 import '../../../../workbench/contrib/sessions/browser/media/sidebarActionButton.css';
 import '../../../../workbench/contrib/sessions/browser/media/customizationsToolbar.css';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
-import { localize } from '../../../../nls.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, MenuItemAction, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { ContextKeyExpr, ContextKeyExpression, IContextKey, IContextKeyService, RawContextKey } from '../../../../platform/contextkey/common/contextkey.js';
@@ -35,7 +35,7 @@ import { IFocusedSessionHostService } from '../../../../workbench/services/sessi
 import { SessionType } from '../../../../workbench/contrib/chat/common/chatSessionsService.js';
 import { AICustomizationMcpServerCountService, IAICustomizationMcpServerCountService } from '../../../../workbench/contrib/sessions/browser/customizationMcpServerCount.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
-import { IOpenAICustomizationsCommandOptions, OPEN_AI_CUSTOMIZATIONS_COMMAND_ID } from '../../../../workbench/contrib/sessions/browser/customizationsConstants.js';
+import { CustomizationsEnabledContext, IOpenAICustomizationsCommandOptions, OPEN_AI_CUSTOMIZATIONS_COMMAND_ID, SessionsCustomizationsAvailableContext } from '../../../../workbench/contrib/sessions/browser/customizationsConstants.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { ICustomizationItemConfig, readCustomizationCount, CUSTOMIZATION_ITEMS } from '../../../../workbench/contrib/sessions/browser/customizationItems.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -70,8 +70,8 @@ function customizationSectionVisibleKey(section: string): string {
 function customizationItemWhen(config: ICustomizationItemConfig, section: string): ContextKeyExpression | undefined {
 	const sectionVisibleWhen = ContextKeyExpr.has(customizationSectionVisibleKey(section));
 	return config.when
-		? ContextKeyExpr.and(ChatContextKeys.enabled, sectionVisibleWhen, config.when)
-		: ContextKeyExpr.and(ChatContextKeys.enabled, sectionVisibleWhen);
+		? ContextKeyExpr.and(CustomizationsEnabledContext, sectionVisibleWhen, config.when)
+		: ContextKeyExpr.and(CustomizationsEnabledContext, sectionVisibleWhen);
 }
 
 const CUSTOMIZATION_OVERVIEW_ITEM: ICustomizationItemConfig = {
@@ -377,8 +377,9 @@ export class CustomizationsToolbarContribution extends Disposable implements IWo
 			constructor() {
 				super({
 					id: openCustomizations,
-					title: localize('customizationsEntryPoint', "Customizations"),
-					precondition: ChatContextKeys.enabled,
+					title: localize2('customizationsEntryPoint', "Customizations"),
+					precondition: CustomizationsEnabledContext,
+					f1: true,
 				});
 			}
 			async run(accessor: ServicesAccessor, context?: unknown): Promise<void> {
@@ -399,7 +400,7 @@ export class CustomizationsToolbarContribution extends Disposable implements IWo
 		for (const menu of [Menus.SessionBarToolbar, Menus.NewSessionGlobalToolbar, Menus.SidebarCustomizationsEntryPoint, MenuId.ChatExecute]) {
 			const sidebar = menu === Menus.SidebarCustomizationsEntryPoint;
 			const input = menu === MenuId.ChatExecute;
-			const when = ContextKeyExpr.and(ChatContextKeys.enabled, ChatCustomizationsLocationContext.isEqualTo(input ? 'chatInput' : sidebar ? 'sidebar' : 'chatToolbar'));
+			const when = ContextKeyExpr.and(CustomizationsEnabledContext, ChatCustomizationsLocationContext.isEqualTo(input ? 'chatInput' : sidebar ? 'sidebar' : 'chatToolbar'));
 			this._register(MenuRegistry.appendMenuItem(menu, {
 				command: {
 					id: openCustomizations,
@@ -429,9 +430,12 @@ export class CustomizationsToolbarContribution extends Disposable implements IWo
 			const key = new RawContextKey<boolean>(customizationSectionVisibleKey(config.section), true).bindTo(contextKeyService);
 			visibilityKeys.set(config.section, key);
 		}
+		const providerCustomizations = SessionsCustomizationsAvailableContext.bindTo(contextKeyService);
+		this._register(toDisposable(() => providerCustomizations.reset()));
 		this._register(autorun(reader => {
 			const activeHarness = harnessService.activeHarness.read(reader);
-			harnessService.availableHarnesses.read(reader);
+			const harnesses = harnessService.availableHarnesses.read(reader);
+			providerCustomizations.set(harnesses.some(harness => harness.id === activeHarness && !!harness.itemProvider));
 			const descriptor = harnessService.getActiveDescriptor();
 			const hidden = new Set(descriptor.hiddenSections ?? []);
 			for (const config of CUSTOMIZATION_ITEMS) {
@@ -496,12 +500,12 @@ export class CustomizationsToolbarContribution extends Disposable implements IWo
 					super({
 						id,
 						title: expanded ? localize('lessCustomizations', "Less") : localize('moreCustomizations', "More"),
-						precondition: ChatContextKeys.enabled,
+						precondition: CustomizationsEnabledContext,
 						menu: {
 							id: Menus.SidebarCustomizations,
 							group: 'navigation',
 							order: SHOW_MORE_OR_LESS_ORDER,
-							when: ContextKeyExpr.and(ChatContextKeys.enabled, CUSTOMIZATIONS_REDUCED, CustomizationsMoreAvailableContext, expanded ? CustomizationsShowMoreContext : CustomizationsShowMoreContext.negate()),
+							when: ContextKeyExpr.and(CustomizationsEnabledContext, CUSTOMIZATIONS_REDUCED, CustomizationsMoreAvailableContext, expanded ? CustomizationsShowMoreContext : CustomizationsShowMoreContext.negate()),
 						},
 					});
 				}
@@ -516,12 +520,12 @@ export class CustomizationsToolbarContribution extends Disposable implements IWo
 				super({
 					id: CUSTOMIZATION_OVERVIEW_ITEM.id,
 					title: CUSTOMIZATION_OVERVIEW_ITEM.label,
-					precondition: ChatContextKeys.enabled,
+					precondition: CustomizationsEnabledContext,
 					menu: {
 						id: Menus.SidebarCustomizations,
 						group: 'navigation',
 						order: 0,
-						when: ChatContextKeys.enabled,
+						when: CustomizationsEnabledContext,
 					}
 				});
 			}

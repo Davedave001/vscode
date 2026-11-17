@@ -66,6 +66,7 @@ import { ISessionsListPresentation } from '../sessionsListPresentation.js';
 import { logSessionsListCompactViewState } from '../../common/sessionsTelemetry.js';
 import { SESSIONS_LIST_INBOX_ENABLED_SETTING, SESSIONS_SEND_LATER_ENABLED_SETTING, SESSIONS_SIDEBAR_CUSTOMIZATIONS_AT_BOTTOM_SETTING, SESSIONS_SIDEBAR_SEPARATE_NAVIGATION_SETTING } from '../../common/sessionConfig.js';
 import { ChatContextKeys } from '../../../chat/common/actions/chatContextKeys.js';
+import { CustomizationsEnabledContext } from '../customizationsConstants.js';
 import { IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
 import { CustomizationsNavigationState } from '../customizationsNavigationState.js';
 import { createSessionsListNotices, ISessionsListNoticeHost } from './sessionsListNotice.js';
@@ -756,7 +757,7 @@ export class SessionsView extends ViewPane {
 
 	private refreshCustomizationsPresentation(reader?: IReader): void {
 		const phone = isPhoneLayout(this.layoutService);
-		const enabled = this.scopedContextKeyService.contextMatchesRules(ChatContextKeys.enabled);
+		const enabled = this.scopedContextKeyService.contextMatchesRules(CustomizationsEnabledContext);
 		const hidden = this.chatEntitlementService.sentimentObs.read(reader).hidden === true;
 		const navigation = this.separateNavigation.read(reader);
 		const navigationIncludesCustomizations = navigation && !this.customizationsAtBottom.read(reader);

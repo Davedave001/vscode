@@ -35,6 +35,9 @@ import { Menus } from '../../../../../workbench/contrib/sessions/browser/menus.j
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { ChatCustomizationsLocation } from '../../../../../workbench/contrib/chat/common/customizationsLocation.js';
+import { ChatContextKeys } from '../../../../../workbench/contrib/chat/common/actions/chatContextKeys.js';
+import { SessionsCustomizationsAvailableContext } from '../../../../../workbench/contrib/sessions/browser/customizationsConstants.js';
+import { IsSessionsWindowContext } from '../../../../../workbench/common/contextkeys.js';
 import '../../../../../workbench/contrib/sessions/browser/media/sessionsViewPane.css';
 
 const registerEditorTabHeightClass = Reflect.get(Workbench.prototype, 'registerEditorTabHeightClass') as (this: {
@@ -102,6 +105,34 @@ suite('Sessions - SessionsViewPane', () => {
 		assert.deepStrictEqual({ calls, unbound, bound, unboundAgain: visibleButtons().length }, {
 			calls: ['test.globalCustomization', 'test.globalCustomization'], unbound: 1, bound: 1, unboundAgain: 1,
 		});
+	});
+
+	test('shows the Customizations sidebar for a native provider without a default chat participant', () => {
+		const contextKeyService = disposables.add(new ContextKeyService(new TestConfigurationService()));
+		ChatContextKeys.enabled.bindTo(contextKeyService).set(false);
+		const available = SessionsCustomizationsAvailableContext.bindTo(contextKeyService);
+		IsSessionsWindowContext.bindTo(contextKeyService).set(true);
+		const hidden = ChatContextKeys.Setup.hidden.bindTo(contextKeyService);
+		const calls: string[] = [];
+		const host = {
+			layoutService: { mainContainer: mainWindow.document.createElement('div') },
+			scopedContextKeyService: contextKeyService,
+			chatEntitlementService: { sentimentObs: constObservable({ hidden: false }) },
+			separateNavigation: constObservable(false),
+			customizationsAtBottom: constObservable(false),
+			customizationsLocation: constObservable<ChatCustomizationsLocation>('sidebar'),
+			updateCustomizationsPresentation: (presentation: string) => calls.push(presentation),
+		};
+		const refresh = Reflect.get(SessionsView.prototype, 'refreshCustomizationsPresentation') as (this: typeof host) => void;
+		refresh.call(host);
+		available.set(true);
+		refresh.call(host);
+		hidden.set(true);
+		refresh.call(host);
+		hidden.set(false);
+		available.set(false);
+		refresh.call(host);
+		assert.deepStrictEqual(calls, ['hidden', 'control', 'hidden', 'hidden']);
 	});
 
 	test('layout refresh keeps the chosen placement independent of navigation and phone transitions', () => {
