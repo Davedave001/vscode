@@ -9,15 +9,16 @@ import { DeferredPromise } from '../../../../base/common/async.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { AcpClient } from '../../node/acp/acpClient.js';
+import { AcpClient, isAcpRecord } from '../../node/acp/acpClient.js';
 import { DevinSubscriptionAgent, DEVIN_SUBSCRIPTION_RESOURCE, devinSubscriptionEnvironment, parseDevinModels } from '../../node/acp/devinSubscriptionAgent.js';
 import { ActionType, isChatAction } from '../../common/state/sessionActions.js';
-import { type AgentSignal } from '../../common/agent.js';
-import { Event } from '../../../../base/common/event.js';
+import { type AgentSignal, type IAgentChatOwnerChange, fixedChatOwnerRef, resolveAgentChatContext } from '../../common/agent.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { TestAcpTransport } from './acpTestUtils.js';
 import { MessageAttachmentKind, type MessageAttachment, type ChatState, MessageKind, ResponsePartKind, SessionStatus, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType, TurnState } from '../../common/state/sessionState.js';
 import { chatReducer } from '../../common/state/protocol/reducers.js';
 import { resolveAcpPrompt } from '../../node/acp/acpPromptResolver.js';
+import { type AcpMcpServer, type IDevinMcpConfiguration } from '../../node/acp/devinMcpConfiguration.js';
 
 const catalog = { families: [{ variants: [{ model_uid: 'swe-2-high', label: 'SWE-2 High', max_context_tokens: 262000 }] }] };
 const chat = URI.parse('agent-host-chat://devin-subscription/chat');
@@ -31,7 +32,7 @@ function toolUpdate(transport: TestAcpTransport, update: Record<string, unknown>
 suite('Devin Subscription Agent', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function fixture(modelCatalog = catalog) {
+	function fixture(modelCatalog = catalog, mcpConfiguration?: IDevinMcpConfiguration) {
 		const transports: TestAcpTransport[] = [];
 		const launches: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
 		const events: AgentSignal[] = [];
@@ -65,10 +66,144 @@ suite('Devin Subscription Agent', () => {
 				};
 				return new AcpClient(transport);
 			},
-		}));
+		}, mcpConfiguration));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
 		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; }, set onInitialize(value: typeof onInitialize) { onInitialize = value; } };
 	}
+
+	test('forwards enabled host MCP definitions to both new and restored native sessions', async () => {
+		const server: AcpMcpServer = { name: 'editor-tools', type: 'http', url: 'http://127.0.0.1:43123/mcp', headers: [{ name: 'Authorization', value: 'test-only-header' }] };
+		const owners: string[] = [];
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async resource => { owners.push(resource.toString()); return [server]; } });
+		f.onInitialize = (transport, request) => transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true } } });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		await f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'mcp-first');
+		await f.agent.chats.releaseChat(chat, owner);
+		await f.agent.chats.sendMessage(chat, 'second', [cwd], undefined, 'mcp-second');
+		for (const [index, method] of ['session/new', 'session/load'].entries()) {
+			const request = f.transports[index].sent.find(item => item.method === method)!;
+			assert.ok(isAcpRecord(request.params));
+			assert.deepStrictEqual(request.params.mcpServers, [server]);
+		}
+		assert.ok(owners.every(resource => resource === owner.toString()));
+		assert.ok(!f.launches.some(launch => launch.args.some(argument => argument.includes('test-only-header'))));
+	});
+
+	test('refuses an unadvertised MCP transport before creating or prompting a native session', async () => {
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async () => [{ name: 'tools', type: 'http', url: 'https://tools.example/mcp', headers: [] }] });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		await assert.rejects(f.agent.chats.sendMessage(chat, 'message', [cwd], undefined, 'mcp-unavailable'), /did not advertise/);
+		assert.ok(!f.transports[0].sent.some(item => item.method === 'session/new' || item.method === 'session/prompt'));
+	});
+
+	test('removes changed MCP access from the active chat and reconnects its native session for a follow-up', async () => {
+		const changed = store.add(new Emitter<readonly string[] | undefined>());
+		let servers: readonly AcpMcpServer[] = [{ name: 'tools', command: 'test-mcp', args: [], env: [] }];
+		const f = fixture(catalog, { onDidChange: changed.event, getServers: async () => servers });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const started = new DeferredPromise<void>();
+		f.onPrompt = () => { void started.complete(); };
+		const first = f.agent.chats.sendMessage(chat, 'waiting', [cwd], undefined, 'mcp-old');
+		const firstSettled = first.catch(error => error);
+		await started.p;
+		servers = [];
+		changed.fire([owner.toString()]);
+		await firstSettled;
+		f.onPrompt = (transport, request) => transport.reply(request, { stopReason: 'end_turn' });
+		await f.agent.chats.sendMessage(chat, 'follow-up', [cwd], undefined, 'mcp-new');
+		const restored = f.transports[1].sent.find(item => item.method === 'session/load')!;
+		assert.ok(isAcpRecord(restored.params));
+		assert.deepStrictEqual(restored.params.mcpServers, []);
+		assert.strictEqual(restored.params.sessionId, 'native');
+	});
+
+	test('does not disturb an active turn for an unchanged MCP list or a different owner', async () => {
+		const changed = store.add(new Emitter<readonly string[] | undefined>());
+		const f = fixture(catalog, { onDidChange: changed.event, getServers: async () => [] });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const started = new DeferredPromise<void>();
+		let pending: Record<string, unknown> | undefined;
+		f.onPrompt = (_transport, request) => { pending = request; void started.complete(); };
+		const send = f.agent.chats.sendMessage(chat, 'waiting', [cwd], undefined, 'mcp-unchanged');
+		await started.p;
+		changed.fire(['other-host:/different-owner']);
+		changed.fire([owner.toString()]);
+		await Promise.resolve();
+		await Promise.resolve();
+		f.transports[0].reply(pending!, { stopReason: 'end_turn' });
+		await send;
+		assert.strictEqual(f.launches.length, 1);
+	});
+
+	test('rechecks MCP definitions after initialization rather than sending a stale startup snapshot', async () => {
+		let servers: readonly AcpMcpServer[] = [{ name: 'tools', command: 'test-mcp', args: [], env: [] }];
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async () => servers });
+		f.onInitialize = (transport, request) => { servers = []; transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); };
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		await assert.rejects(f.agent.chats.sendMessage(chat, 'message', [cwd], undefined, 'mcp-stale'), isCancellationError);
+		assert.ok(!f.transports[0].sent.some(item => item.method === 'session/new' || item.method === 'session/prompt'));
+		await f.agent.chats.sendMessage(chat, 'retry', [cwd], undefined, 'mcp-fresh');
+		const request = f.transports[1].sent.find(item => item.method === 'session/new')!;
+		assert.ok(isAcpRecord(request.params));
+		assert.deepStrictEqual(request.params.mcpServers, []);
+	});
+
+	test('reconciles MCP access when a live owner reference changes without a configuration event', async () => {
+		const ownerChanged = store.add(new Emitter<IAgentChatOwnerChange>());
+		let currentOwner = owner;
+		const movedOwner = URI.parse('different-host:/opaque-owner');
+		const context = { ...resolveAgentChatContext(owner, chat), owner: { ...fixedChatOwnerRef(owner), get: () => currentOwner, onDidChange: ownerChanged.event } };
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async resource => resource.toString() === owner.toString() ? [{ name: 'tools', command: 'test-mcp', args: [], env: [] }] : [] });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, context, { workingDirectories: [cwd] });
+		const started = new DeferredPromise<void>();
+		f.onPrompt = () => { void started.complete(); };
+		const firstSettled = f.agent.chats.sendMessage(chat, 'waiting', [cwd], undefined, 'mcp-before-move').catch(error => error);
+		await started.p;
+		currentOwner = movedOwner;
+		ownerChanged.fire({ previous: owner, current: movedOwner });
+		await firstSettled;
+		f.onPrompt = (transport, request) => transport.reply(request, { stopReason: 'end_turn' });
+		await f.agent.chats.sendMessage(chat, 'after move', [cwd], undefined, 'mcp-after-move');
+		const restored = f.transports[1].sent.find(item => item.method === 'session/load')!;
+		assert.ok(isAcpRecord(restored.params));
+		assert.deepStrictEqual(restored.params.mcpServers, []);
+	});
+
+	test('does not spawn a native client after its owner changes while MCP decisions load', async () => {
+		let currentOwner = owner;
+		const context = { ...resolveAgentChatContext(owner, chat), owner: { ...fixedChatOwnerRef(owner), get: () => currentOwner } };
+		const loading = new DeferredPromise<void>();
+		const decisions = new DeferredPromise<readonly AcpMcpServer[]>();
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async () => { void loading.complete(); return decisions.p; } });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, context, { workingDirectories: [cwd] });
+		const rejected = assert.rejects(f.agent.chats.sendMessage(chat, 'message', [cwd], undefined, 'mcp-loading'), isCancellationError);
+		await loading.p;
+		currentOwner = URI.parse('different-host:/opaque-owner');
+		void decisions.complete([]);
+		await rejected;
+		assert.strictEqual(f.launches.length, 0);
+	});
+
+	test('Stop cancels MCP preparation before spawning a native client', async () => {
+		const loading = new DeferredPromise<void>();
+		const decisions = new DeferredPromise<readonly AcpMcpServer[]>();
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async () => { void loading.complete(); return decisions.p; } });
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const rejected = assert.rejects(f.agent.chats.sendMessage(chat, 'message', [cwd], undefined, 'mcp-stopped'), isCancellationError);
+		await loading.p;
+		await f.agent.chats.abort(chat, owner);
+		void decisions.complete([]);
+		await rejected;
+		assert.strictEqual(f.launches.length, 0);
+	});
 
 	test('keeps subscription credentials separate from inherited CLI credentials and parses a live catalog shape', () => {
 		const inherited = { WINDSURF_API_KEY: 'other-account', windsurf_api_key: 'case-variant', PATH: 'keep' };

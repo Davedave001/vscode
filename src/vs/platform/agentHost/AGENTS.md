@@ -144,6 +144,8 @@ SDK-discovered plugin agents retain their SDK selection `id`, which can differ f
 
 ### Customization installation (Skills, MCP servers, catalog plugins)
 
+The local Devin Subscription provider maps explicit root `mcpServers` through the shared customization enablement service using the chat context's live owner reference. It sends the enabled list through standard ACP session creation/restoration fields, validates advertised remote transports, rejects launch restrictions it cannot enforce, and closes outdated connections when definitions, enablement, or owner scopes change. It does not import editor configuration, manufacture runtime MCP status, or expose plugin installation through this path. The injected `DevinMcpConfiguration` service owns configuration mapping; provider-specific logic stays outside the orchestrator.
+
 Installation is local-only: the workbench calls `IAgentHostService`, which routes through Management IPC to `CopilotCustomizationInstallations`. Remote Agent Hosts expose no installation methods.
 
 Prepare returns a review, or a configuration request when values or secrets are needed. Records are bound to a host generation, an expiry and a random ownership token; a mismatch behaves like an unknown ID. The client sends any `answers` once on `apply`, which is one-shot and never resent. There is no client cancel; unused records expire.

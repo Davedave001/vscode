@@ -5,7 +5,7 @@
 
 import { execFile, spawn } from 'child_process';
 import { DeferredPromise } from '../../../../base/common/async.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, type IDisposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { CancellationError } from '../../../../base/common/errors.js';
 import { observableValue } from '../../../../base/common/observable.js';
@@ -15,7 +15,7 @@ import { isEqual, basename } from '../../../../base/common/resources.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
 import { DevinSubscriptionProviderId, DevinSubscriptionResource } from '../../common/devinAgentConfiguration.js';
-import { type IAgent, type IAgentChats, type AgentSignal, type IAgentChatMetadata, type IAgentMaterializeChatEvent, type IActiveClient, type IAgentModelInfo, resolveAgentChatContext } from '../../common/agent.js';
+import { type IAgent, type IAgentChats, type AgentSignal, type IAgentChatContext, type IAgentChatMetadata, type IAgentMaterializeChatEvent, type IActiveClient, type IAgentModelInfo, resolveAgentChatContext } from '../../common/agent.js';
 import { ActionType, type ChatAction } from '../../common/state/sessionActions.js';
 import { type ModelSelection, type Turn, type MarkdownResponsePart, type ToolCallResponsePart, type ToolCallPendingConfirmationState, type ToolResultContent, TurnState, MessageKind, ResponsePartKind, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType } from '../../common/state/sessionState.js';
 import { AcpClient, initializeAcp, isAcpRecord as isObject } from './acpClient.js';
@@ -23,6 +23,7 @@ import { AcpStdioTransport } from './acpStdioTransport.js';
 import { resolveAcpPrompt, type IAcpPromptCapabilities } from './acpPromptResolver.js';
 import { applyDevinModelConfiguration, DevinModelConfigurationError, readDevinConfigOptions, type IDevinSelectConfig } from './devinModelConfiguration.js';
 import { acpToolContent, acpToolValue } from './acpToolContent.js';
+import { type AcpMcpServer, type IDevinMcpConfiguration, validateAcpMcpCapabilities } from './devinMcpConfiguration.js';
 
 export const DEVIN_SUBSCRIPTION_PROVIDER = DevinSubscriptionProviderId;
 export const DEVIN_SUBSCRIPTION_RESOURCE = DevinSubscriptionResource;
@@ -50,6 +51,9 @@ interface ISendOperation {
 
 interface IChat {
 	readonly chat: URI;
+	context?: IAgentChatContext;
+	ownerListener?: IDisposable;
+	mcpServers?: readonly AcpMcpServer[];
 	cwd: URI;
 	model?: ModelSelection;
 	nativeId?: string;
@@ -149,7 +153,18 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	private authRevision = 0;
 	private catalogIds: ReadonlySet<string> = new Set();
 
-	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter) { super(); }
+	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter, private readonly mcpConfiguration?: IDevinMcpConfiguration) {
+		super();
+		if (mcpConfiguration) {
+			this._register(mcpConfiguration.onDidChange(owners => {
+				for (const record of this.records.values()) {
+					if (record.context && (!owners || owners.includes(record.context.owner.get().toString()))) {
+						void this.refreshMcpConfiguration(record);
+					}
+				}
+			}));
+		}
+	}
 
 	getDescriptor() {
 		return { provider: this.id, displayName: 'Devin Subscription', description: localize('devin.subscriptionDescription', "Uses your connected Devin subscription") };
@@ -190,16 +205,18 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			if (options?.fork || options?.importConversation) { throw new Error('Devin conversation import and forks are not supported yet.'); }
 			const directories = options?.workingDirectories ?? resolveAgentChatContext(context, chat).launchWorkingDirectories;
 			if (directories?.length !== 1 || directories[0].scheme !== 'file') { throw new Error('Devin Subscription requires one local workspace folder.'); }
-			this.createRecord(chat, directories[0], options?.model);
+			this.setRecordContext(this.createRecord(chat, directories[0], options?.model), resolveAgentChatContext(context, chat));
 			return { provisional: true, resolvedWorkingDirectory: directories[0] };
 		},
-		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.store.dispose(); this.records.delete(chat.toString()); } },
+		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); this.records.delete(chat.toString()); } },
 		releaseChat: async chat => { this.cancelSendAndRelease(this.record(chat)); },
 		sendMessage: async (chat, prompt, directories, attachments, turnId, _sender, clientTypeOrContext, context) => {
 			if (!turnId) { throw new Error('A host turn id is required.'); }
 			const record = this.record(chat);
 			return this.runSend(record, async () => {
 				if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
+				const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
+				if (operation) { this.setRecordContext(record, resolveAgentChatContext(operation, chat)); }
 				record.preparing = true;
 				record.aborting = false;
 				try {
@@ -211,7 +228,6 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 					if (record.aborting) { throw new CancellationError(); }
 					if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
 				} finally { record.preparing = false; }
-				const operation = context ?? (typeof clientTypeOrContext === 'object' ? clientTypeOrContext : undefined);
 				const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
 				const text = instructions?.length ? `${instructions.join('\n\n')}\n\n${prompt}` : prompt;
 				const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
@@ -313,11 +329,25 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		return record;
 	}
 
-	async materializeChat(chat: URI, _context: Parameters<IAgent['materializeChat']>[1], data: string | undefined): Promise<void> {
-		if (this.records.has(chat.toString())) { return; }
+	private setRecordContext(record: IChat, context: IAgentChatContext): void {
+		const previousOwner = record.context?.owner.get();
+		if (record.context?.owner !== context.owner) {
+			record.ownerListener?.dispose();
+			record.ownerListener = this.mcpConfiguration ? context.owner.onDidChange(() => { void this.refreshMcpConfiguration(record); }) : undefined;
+		}
+		record.context = context;
+		if (this.mcpConfiguration && !isEqual(previousOwner, context.owner.get()) && (record.client || record.initializing)) {
+			void this.refreshMcpConfiguration(record);
+		}
+	}
+
+	async materializeChat(chat: URI, context: Parameters<IAgent['materializeChat']>[1], data: string | undefined): Promise<void> {
+		const existing = this.records.get(chat.toString());
+		if (existing) { this.setRecordContext(existing, resolveAgentChatContext(context, chat)); return; }
 		const value = readPersistedChat(data);
 		if (!value) { throw new Error('Invalid persisted Devin chat.'); }
 		const record = this.createRecord(chat, value.cwd, value.model, value.createdAt, value.modifiedAt);
+		this.setRecordContext(record, resolveAgentChatContext(context, chat));
 		record.nativeId = value.sessionId;
 		record.modelNeedsReconciliation = value.modelNeedsReconciliation;
 	}
@@ -332,12 +362,45 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 
 	private async ensureSession(record: IChat, reconcileModel = true): Promise<void> {
 		if (record.initializing) { return record.initializing; }
-		if (record.client) { return; }
-		record.initializing = this.start(record, reconcileModel);
+		if (record.client && !this.mcpConfiguration) { return; }
+		record.initializing = this.prepareSession(record, reconcileModel);
 		try { await record.initializing; } finally { record.initializing = undefined; }
 	}
 
-	private async start(record: IChat, reconcileModel: boolean): Promise<void> {
+	private async readMcpConfiguration(record: IChat): Promise<readonly AcpMcpServer[]> {
+		if (!this.mcpConfiguration) { return []; }
+		if (!record.context) { throw new Error('Devin MCP configuration requires a host-provided chat context.'); }
+		const owner = record.context.owner.get();
+		const servers = await this.mcpConfiguration.getServers(owner);
+		if (!isEqual(owner, record.context.owner.get())) { throw new CancellationError(); }
+		return servers;
+	}
+
+	private async refreshMcpConfiguration(record: IChat): Promise<void> {
+		try {
+			const servers = await this.readMcpConfiguration(record);
+			if (this._store.isDisposed || record.store.isDisposed || this.records.get(record.chat.toString()) !== record) { return; }
+			if (!equals(record.mcpServers ?? [], servers)) {
+				if (record.client || record.initializing) { this.cancelSendAndRelease(record); }
+				else { record.mcpServers = servers; }
+			}
+		} catch {
+			// A removed/disabled/invalid definition must not leave the previous tool connection usable.
+			if (!this._store.isDisposed && !record.store.isDisposed && (record.client || record.initializing)) { this.cancelSendAndRelease(record); }
+		}
+	}
+
+	private async prepareSession(record: IChat, reconcileModel: boolean): Promise<void> {
+		const servers = this.mcpConfiguration ? await this.readMcpConfiguration(record) : [];
+		if (this._store.isDisposed || record.store.isDisposed || record.aborting || record.send?.cancelled) { throw new CancellationError(); }
+		if (record.client && equals(record.mcpServers ?? [], servers)) { return; }
+		if (record.client) { this.release(record); }
+		record.mcpServers = servers;
+		await this.start(record, reconcileModel, servers);
+	}
+
+	private async start(record: IChat, reconcileModel: boolean, mcpServers: readonly AcpMcpServer[]): Promise<void> {
+		const mcpOwner = record.context?.owner.get();
 		const token = this.token;
 		if (!token) { throw new Error(localize('devin.signInRequired', "Connect Devin Subscription from Agent Subscriptions before starting a session.")); }
 		const args = ['acp', ...(record.model ? ['--model', record.model.id] : [])];
@@ -356,13 +419,18 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const previousHistory = [...record.history];
 		try {
 			const initialized = await initializeAcp(client, { name: 'agent-workspace', version: '0.1.0' });
+			validateAcpMcpCapabilities(mcpServers, isObject(initialized.agentCapabilities) ? initialized.agentCapabilities.mcpCapabilities : undefined);
+			if (this.mcpConfiguration) {
+				const currentServers = await this.readMcpConfiguration(record);
+				if (!isEqual(mcpOwner, record.context?.owner.get()) || !equals(mcpServers, currentServers) || record.client !== client || record.aborting || record.send?.cancelled) { throw new CancellationError(); }
+			}
 			const capabilities = isObject(initialized.agentCapabilities) ? initialized.agentCapabilities.promptCapabilities : undefined;
 			record.promptCapabilities = isObject(capabilities) ? { image: capabilities.image === true, embeddedContext: capabilities.embeddedContext === true } : {};
 			const loading = !!record.nativeId;
 			if (loading && (!isObject(initialized.agentCapabilities) || initialized.agentCapabilities.loadSession !== true)) { throw new Error('Devin does not support restoring this session.'); }
 			record.replaying = loading;
 			if (loading) { record.history.length = 0; record.lastReplayUserId = undefined; record.textPart = undefined; record.tools.clear(); }
-			const result = await client.request(loading ? 'session/load' : 'session/new', { ...(loading ? { sessionId: record.nativeId } : {}), cwd: record.cwd.fsPath, mcpServers: [] });
+			const result = await client.request(loading ? 'session/load' : 'session/new', { ...(loading ? { sessionId: record.nativeId } : {}), cwd: record.cwd.fsPath, mcpServers });
 			record.replaying = false;
 			if (!isObject(result)) { throw new Error('Invalid Devin session response.'); }
 			if (!loading) {
@@ -564,7 +632,11 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		this.release(record);
 	}
 	private release(record: IChat): void { this.cancelPermissions(record); clearTimeout(record.forceStop); record.forceStop = undefined; record.store.clear(); record.client = undefined; record.replaying = false; }
-	getOrCreateActiveClient(_chat: URI, _context: Parameters<IAgent['getOrCreateActiveClient']>[1], client: { clientId: string; displayName?: string }): IActiveClient { return { clientId: client.clientId, displayName: client.displayName, tools: [], customizations: [] }; }
+	getOrCreateActiveClient(chat: URI, context: Parameters<IAgent['getOrCreateActiveClient']>[1], client: { clientId: string; displayName?: string }): IActiveClient {
+		const record = this.records.get(chat.toString());
+		if (record) { this.setRecordContext(record, resolveAgentChatContext(context, chat)); }
+		return { clientId: client.clientId, displayName: client.displayName, tools: [], customizations: [] };
+	}
 	removeActiveClient(): void { }
 	onClientToolCallComplete(): void { throw new Error('Devin does not advertise client-side tools.'); }
 	respondToUserInputRequest(): void { }
@@ -578,5 +650,5 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, model: record.model, workingDirectories: [record.cwd], project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined;
 	}
 	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.cancelSendAndRelease(record); } }
-	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
+	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); } this.records.clear(); this.token = undefined; super.dispose(); }
 }
