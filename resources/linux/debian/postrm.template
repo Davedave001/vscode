@@ -32,7 +32,7 @@ if [ -e '/usr/share/debconf/confmodule' ]; then
 	. /usr/share/debconf/confmodule
 	db_get @@NAME@@/add-microsoft-repo || true
 fi
-if [ "$RET" = "true" ]; then
+if { [ "@@NAME@@" = "code" ] || [ "@@NAME@@" = "code-insiders" ]; } && [ "$RET" = "true" ]; then
 	eval $(apt-config shell APT_SOURCE_PARTS Dir::Etc::sourceparts/d)
 	CODE_SOURCE_PART=${APT_SOURCE_PARTS}vscode.sources
 	rm -f $CODE_SOURCE_PART

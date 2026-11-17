@@ -141,6 +141,9 @@
 .monaco-workbench .part.editor > .content .editor-group-container > .editor-group-watermark-wrapper .editor-group-watermark .letterpress,
 .monaco-workbench .part-grid-slot-watermark {
 	background-image: url('./letterpress-light.svg');
+	background-color: var(--vscode-focusBorder, #007acc);
+	border-radius: var(--vscode-cornerRadius-large);
+	opacity: 0.2;
 }
 
 .monaco-workbench.vs-dark .part.editor > .content .editor-group-container .editor-group-watermark .letterpress,

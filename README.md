@@ -1,10 +1,14 @@
-# Visual Studio Code - Open Source ("Code - OSS")
-[![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-[![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)
+# Signal-C
+
+**Signal-Connections** — an agent workspace and code editor built on Code - OSS.
+
+Signal-C brings the Agents workspace, IDE switching, session navigation, and provider subscription integrations together in this fork. Its identity uses the SimpleRAG icon on a blue background; in-app logo backgrounds follow the active theme's `focusBorder` accent. Aquarium sprites use the same artwork with a transparent background.
+
+See [branding and development launch notes](docs/agent-workspace/BRANDING.md) and [workspace direction](docs/agent-workspace/REFERENCE.md). Report fork issues in [this repository](https://github.com/falabellamichael/vscode/issues).
 
 ## The Repository
 
-This repository ("`Code - OSS`") is where we (Microsoft) develop the [Visual Studio Code](https://code.visualstudio.com) product together with the community. Not only do we work on code and issues here, but we also publish our [roadmap](https://github.com/microsoft/vscode/wiki/Roadmap), [monthly iteration plans](https://github.com/microsoft/vscode/wiki/Iteration-Plans), and our [endgame plans](https://github.com/microsoft/vscode/wiki/Running-the-Endgame). This source code is available to everyone under the standard [MIT license](https://github.com/microsoft/vscode/blob/main/LICENSE.txt).
+This repository is the Signal-C fork of Microsoft's [Code - OSS](https://github.com/microsoft/vscode). The source retains its [MIT license](LICENSE.txt), upstream copyright notices, extension API identifiers, and provider identities. The upstream product information and contribution references below describe Visual Studio Code.
 
 ## Visual Studio Code
 

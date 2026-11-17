@@ -4,26 +4,19 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { $ } from '../../../../base/browser/dom.js';
-import { VSCODE_LOGO_PATH } from './vscodeLogoPath.js';
+import { FileAccess } from '../../../../base/common/network.js';
 
 /**
- * VS Code logo "fish" used by the Agents window aquarium. Each fish is a small
- * SVG element styled with `color:` so the silhouette inherits via `currentColor`,
- * with animated body strips providing the swimming motion.
+ * Transparent Signal-C logo "fish" used by the Agents window aquarium.
+ * Animated body strips provide the swimming motion without adding a logo tile.
  */
 
-/** The three VS Code release channel colors used as fish "species". */
+/** Retained species identities for the aquarium's population distribution. */
 export const enum FishSpecies {
 	Stable = 'stable',
 	Insiders = 'insiders',
 	Exploration = 'exploration',
 }
-
-const SPECIES_COLOR: Record<FishSpecies, string> = {
-	[FishSpecies.Stable]: '#007ACC',
-	[FishSpecies.Insiders]: '#24bfa5',
-	[FishSpecies.Exploration]: '#E04F00',
-};
 
 /** Pick a random species, weighted Stable > Insiders > Exploration. */
 export function pickRandomSpecies(): FishSpecies {
@@ -102,7 +95,6 @@ export class Fish {
 		this.element = $<HTMLDivElement>('.agents-aquarium-fish');
 		this.element.style.width = `${opts.size}px`;
 		this.element.style.height = `${opts.size}px`;
-		this.element.style.color = SPECIES_COLOR[opts.species];
 
 		// Inner element receives the directional flip so the body strip animations
 		// (driven by --agents-aquarium-strip-index) are unaffected by direction changes.
@@ -177,12 +169,12 @@ export class Fish {
 const NUM_BODY_STRIPS = 8;
 
 /** The body's bounding range in the original logo's user units. */
-const BODY_X_START = 5;
-const BODY_X_END = 90;
+const BODY_X_START = 0;
+const BODY_X_END = 96;
 
 /**
  * Lazily-built shared SVG element holding both the strip clipPath defs AND
- * a single `<symbol>` containing the VS Code logo path. All fish reference
+ * a single `<symbol>` containing the transparent Signal-C artwork. All fish reference
  * these via `clip-path: url(#…)` and `<use href="#…">` instead of duplicating
  * the path data per strip per fish (which previously caused 50 fish * 10
  * strips = 500 path parses on every aquarium activation).
@@ -213,8 +205,8 @@ function ensureSharedDefs(targetDocument: Document): void {
 	container.style.pointerEvents = 'none';
 
 	// All strips reference this symbol via `<use href="#agents-aquarium-fish-logo">`,
-	// so the path data is parsed exactly ONCE per session instead of FISH_COUNT * NUM_STRIPS.
-	container.appendChild(createVSCodeLogoSymbol());
+	// so the image is shared instead of duplicated FISH_COUNT * NUM_STRIPS times.
+	container.appendChild(createSignalCLogoSymbol());
 
 	const defs = $.SVG<SVGDefsElement>('defs');
 	for (let i = 0; i < NUM_BODY_STRIPS; i++) {
@@ -236,28 +228,27 @@ function ensureSharedDefs(targetDocument: Document): void {
 	sharedDefsByDocument.set(targetDocument, container);
 }
 
-function createVSCodeLogoSymbol(): SVGSymbolElement {
+function createSignalCLogoSymbol(): SVGSymbolElement {
 	const symbol = $.SVG<SVGSymbolElement>('symbol');
 	symbol.setAttribute('id', SHARED_LOGO_SYMBOL_ID);
 	symbol.setAttribute('viewBox', '0 0 96 96');
 	symbol.setAttribute('overflow', 'visible');
 
-	const logoPath = $.SVG<SVGPathElement>('path');
-	logoPath.setAttribute('d', VSCODE_LOGO_PATH);
-	logoPath.setAttribute('fill', 'currentColor');
-	logoPath.setAttribute('fill-rule', 'evenodd');
-	symbol.appendChild(logoPath);
+	const logo = $.SVG<SVGImageElement>('image');
+	logo.setAttribute('href', FileAccess.asBrowserUri('vs/workbench/browser/media/signal-c-mark.png').toString(true));
+	logo.setAttribute('width', '96');
+	logo.setAttribute('height', '96');
+	symbol.appendChild(logo);
 
 	return symbol;
 }
 
 /**
  * Build the inline SVG element tree for a fish:
- *   - VS Code logo body, sliced into N vertical strips that each oscillate in
+ *   - Signal-C logo body, sliced into N vertical strips that each oscillate in
  *     Y with a phase-offset CSS animation (the "swimming" sine wave)
  *
- * Colors come from `currentColor` on the parent element. Built without
- * `innerHTML` to satisfy Trusted Types.
+ * Preserves the artwork's colors and alpha. Built without `innerHTML` to satisfy Trusted Types.
  *
  * The strip clipPath defs and the logo symbol are shared across all fish via
  * {@link ensureSharedDefs}.
@@ -268,12 +259,9 @@ function buildFishSvg(targetDocument: Document): SVGSVGElement {
 	const svg = $.SVG<SVGSVGElement>('svg');
 	svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 	svg.setAttribute('focusable', 'false');
-	// viewBox 0..96 matches the original VS Code icon.
+	// Keep the existing square body coordinates for swimming and growth.
 	svg.setAttribute('viewBox', '0 0 96 96');
 	svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-	// Tell the rasterizer to optimize for visual quality, not speed: smoother
-	// edges on the (potentially upscaled) logo paths.
-	svg.setAttribute('shape-rendering', 'geometricPrecision');
 
 	// Body: NUM_BODY_STRIPS overlapping references to the shared logo symbol,
 	// each clipped to its vertical band via shared clipPath defs. Each strip

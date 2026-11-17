@@ -41,6 +41,27 @@ test('keeps workspace arguments separate from the three isolated editor storage 
 	}
 });
 
+test('prefers the Signal-C runtime and supports an existing development runtime', () => {
+	const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'signal-c-runtime-'));
+	const build = path.join(temporary, '.build');
+	const runtime = path.join(build, 'electron');
+	fs.mkdirSync(runtime, { recursive: true });
+	const branded = path.join(runtime, 'Signal-C.exe');
+	const previous = path.join(runtime, 'Code - OSS.exe');
+	try {
+		assert.strictEqual(createLaunchOptions(temporary, temporary, false, {}).executable, branded);
+		fs.writeFileSync(previous, '');
+		assert.strictEqual(createLaunchOptions(temporary, temporary, false, {}).executable, previous);
+		fs.writeFileSync(branded, '');
+		assert.strictEqual(createLaunchOptions(temporary, temporary, false, {}).executable, branded);
+	} finally {
+		for (const file of [branded, previous]) { if (fs.existsSync(file)) { fs.unlinkSync(file); } }
+		fs.rmdirSync(runtime);
+		fs.rmdirSync(build);
+		fs.rmdirSync(temporary);
+	}
+});
+
 test('dry-run accepts a workspace with spaces without launching an editor or creating a profile', { skip: process.platform !== 'win32' }, () => {
 	const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workspace-launch-'));
 	const workspace = path.join(temporary, 'Project with spaces');

@@ -69,6 +69,8 @@
 	width: 64px;
 	height: 64px;
 	background-image: url('../../../../browser/media/sessions-logo-light.svg');
+	background-color: var(--vscode-focusBorder, #007acc);
+	border-radius: var(--vscode-cornerRadius-large);
 	background-size: contain;
 	background-repeat: no-repeat;
 	background-position: center;

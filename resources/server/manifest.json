@@ -1,6 +1,9 @@
 {
-	"name": "Code - OSS",
-	"short_name": "Code- OSS",
+	"name": "Signal-C — Signal-Connections",
+	"short_name": "Signal-C",
+	"description": "Signal-Connections agent workspace and code editor",
+	"theme_color": "#007acc",
+	"background_color": "#181818",
 	"start_url": "/",
 	"lang": "en-US",
 	"display": "standalone",

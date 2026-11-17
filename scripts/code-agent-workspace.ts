@@ -7,6 +7,7 @@ const fs = require('fs') as typeof import('fs');
 const path = require('path') as typeof import('path');
 const { spawn } = require('child_process') as typeof import('child_process');
 const minimist = require('minimist') as typeof import('minimist');
+const product = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'product.json'), 'utf8')) as { nameShort: string };
 
 function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv) {
 	const buildRoot = path.join(repoRoot, '.build');
@@ -14,6 +15,8 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 	const codexHome = path.join(buildRoot, 'agent-workspace-codex');
 	const claudeHome = path.join(buildRoot, 'agent-workspace-claude');
 	const environment = { ...inheritedEnvironment };
+	const executable = path.join(buildRoot, 'electron', `${product.nameShort}.exe`);
+	const previousExecutable = path.join(buildRoot, 'electron', 'Code - OSS.exe');
 	// Editor-injected IPC and SDK overrides belong to the launching editor. Keep
 	// this development fork on its own runtime, storage, and agent configuration.
 	for (const name of Object.keys(environment)) {
@@ -27,7 +30,8 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 		CLAUDE_CONFIG_DIR: claudeHome,
 	});
 	return {
-		executable: path.join(buildRoot, 'electron', 'Code - OSS.exe'),
+		// Existing development runtimes remain usable until native assets are rebuilt.
+		executable: fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
 		args: [repoRoot, ...(ide ? [] : ['--agents']), workspace,
 			'--user-data-dir', profile,
 			'--shared-data-dir', path.join(buildRoot, 'agent-workspace-shared'),
@@ -42,7 +46,7 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 function main() {
 	const args = minimist(process.argv.slice(2), { boolean: ['help', 'ide', 'dry-run'], string: ['workspace'] });
 	if (args.help) {
-		console.log('node scripts/code-agent-workspace.ts [--ide] [--workspace <folder>] [--dry-run]\nLaunch the Windows development fork with separate editor, shared-storage, extension, and agent profiles.');
+		console.log('node scripts/code-agent-workspace.ts [--ide] [--workspace <folder>] [--dry-run]\nLaunch Signal-C (Signal-Connections) with separate editor, shared-storage, extension, and agent profiles.');
 		return;
 	}
 	if (process.platform !== 'win32') {
@@ -81,7 +85,7 @@ function main() {
 	}
 	const child = spawn(options.executable, options.args, { cwd: repoRoot, env: options.environment, detached: true, stdio: 'ignore' });
 	child.on('error', error => { console.error(error.message); process.exitCode = 1; });
-	child.on('spawn', () => { console.log(`Opened ${args.ide ? 'IDE' : 'Agents'} development window (PID ${child.pid}).`); child.unref(); });
+	child.on('spawn', () => { console.log(`Opened Signal-C ${args.ide ? 'IDE' : 'Agents'} development window (PID ${child.pid}).`); child.unref(); });
 }
 
 module.exports = { createLaunchOptions };

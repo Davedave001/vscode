@@ -329,10 +329,10 @@
 }
 
 .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-left > .window-appicon:not(.codicon) {
-	background-image: url('../../../media/code-icon.svg');
+	background-image: url('../../../media/code-icon.svg'), linear-gradient(var(--vscode-focusBorder, #007acc), var(--vscode-focusBorder, #007acc));
 	background-repeat: no-repeat;
 	background-position: center center;
-	background-size: 16px;
+	background-size: 20px;
 }
 
 .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-left > .window-appicon.codicon {

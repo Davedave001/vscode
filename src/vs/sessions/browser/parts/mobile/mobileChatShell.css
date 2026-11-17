@@ -386,6 +386,8 @@
 	height: 64px;
 	margin-bottom: 16px;
 	background-image: url('../../media/sessions-logo-light.svg');
+	background-color: var(--vscode-focusBorder, #007acc);
+	border-radius: var(--vscode-cornerRadius-large);
 	background-size: contain;
 	background-repeat: no-repeat;
 	background-position: center;
