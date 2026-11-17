@@ -20,6 +20,20 @@ interface TestProvider extends Disposable {
 interface StorageHooks {
 	beforeGet?: () => Promise<void>;
 	afterStore?: (value: string) => Promise<void>;
+	shared?: SharedSecrets;
+}
+
+class SharedSecrets {
+	readonly values = new Map<string, string>();
+	private readonly listeners = new Set<(event: { key: string }) => void>();
+	readonly onDidChange = (listener: (event: { key: string }) => void): Disposable => {
+		this.listeners.add(listener);
+		return { dispose: () => { this.listeners.delete(listener); } };
+	};
+	async get(key: string): Promise<string | undefined> { return this.values.get(key); }
+	async store(key: string, value: string): Promise<void> { this.values.set(key, value); this.fire(key); }
+	async delete(key: string): Promise<void> { this.values.delete(key); this.fire(key); }
+	private fire(key: string): void { for (const listener of this.listeners) { listener({ key }); } }
 }
 
 interface SessionChanges {
@@ -29,13 +43,14 @@ interface SessionChanges {
 }
 
 interface SignInUI {
-	chooseMethod?: () => Promise<{ manual: boolean } | undefined>;
+	chooseMethod?: (signal: AbortSignal) => Promise<{ manual: boolean } | undefined>;
 	readCode?: (options: InputBoxOptions, signal: AbortSignal) => Promise<string | undefined>;
 }
 
 function activateProvider(signIn: (options: SignInOptions) => Promise<string>, storageHooks: StorageHooks = {}, ui: SignInUI = {}) {
 	const originalLoad = Module._load;
-	const secrets = new Map<string, string>();
+	const shared = storageHooks.shared ?? new SharedSecrets();
+	const secrets = shared.values;
 	const events: SessionChanges[] = [];
 	const progressMessages: string[] = [];
 	let provider: TestProvider | undefined;
@@ -43,9 +58,10 @@ function activateProvider(signIn: (options: SignInOptions) => Promise<string>, s
 	const context = {
 		subscriptions: [] as Disposable[],
 		secrets: {
-			get: async (key: string) => { await storageHooks.beforeGet?.(); return secrets.get(key); },
-			store: async (key: string, value: string) => { secrets.set(key, value); await storageHooks.afterStore?.(value); },
-			delete: async (key: string) => { secrets.delete(key); },
+			get: async (key: string) => { await storageHooks.beforeGet?.(); return shared.get(key); },
+			store: async (key: string, value: string) => { await shared.store(key, value); await storageHooks.afterStore?.(value); },
+			delete: async (key: string) => { await shared.delete(key); },
+			onDidChange: shared.onDidChange,
 		},
 	};
 	const vscode = {
@@ -54,7 +70,7 @@ function activateProvider(signIn: (options: SignInOptions) => Promise<string>, s
 		CancellationTokenSource: class { private readonly controller = new AbortController(); readonly token = this.controller.signal; cancel() { this.controller.abort(); } dispose() { } },
 		l10n: { t: (value: string) => value }, ProgressLocation: { Notification: 15 },
 		window: {
-			showQuickPick: ui.chooseMethod ?? (async () => ({ manual: false })),
+			showQuickPick: async (_items: object[], _options: object, signal: AbortSignal) => ui.chooseMethod ? ui.chooseMethod(signal) : { manual: false },
 			showInputBox: ui.readCode ?? (async () => assert.fail('No code input was expected')),
 			withProgress: async (_options: object, callback: (progress: { report(value: { message: string }): void }, cancellation: { onCancellationRequested(listener: () => void): Disposable }) => Promise<AuthenticationSession>) => callback({ report: value => progressMessages.push(value.message) }, { onCancellationRequested: listener => { cancellation = listener; return { dispose() { } }; } }),
 		},
@@ -104,6 +120,130 @@ test('stores a browser session in SecretStorage and removes only the requested a
 		assert.strictEqual(setup.events[0].added[0].id, session.id);
 		assert.strictEqual(setup.events[1].removed[0].id, session.id);
 	} finally { setup.dispose(); }
+});
+
+test('two windows observe shared sign-in and sign-out exactly once', async () => {
+	const shared = new SharedSecrets();
+	const agents = activateProvider(async () => 'test-agents-token', { shared });
+	const ide = activateProvider(async () => assert.fail('the other window must not launch sign-in'), { shared });
+	try {
+		const session = await agents.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(await ide.provider.getSessions(), [session]);
+		assert.deepStrictEqual(agents.events, [{ added: [session], changed: [], removed: [] }]);
+		assert.deepStrictEqual(ide.events, agents.events);
+		await ide.provider.removeSession(session.id);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(await agents.provider.getSessions(), []);
+		assert.deepStrictEqual(agents.events, [
+			{ added: [session], changed: [], removed: [] },
+			{ added: [], changed: [], removed: [session] },
+		]);
+		assert.deepStrictEqual(ide.events, agents.events);
+	} finally { agents.dispose(); ide.dispose(); }
+});
+
+test('a window opened with an account observes its replacement without a startup event', async () => {
+	const shared = new SharedSecrets();
+	let calls = 0;
+	const agents = activateProvider(async () => `test-token-${++calls}`, { shared });
+	let ide: ReturnType<typeof activateProvider> | undefined;
+	try {
+		const first = await agents.provider.createSession([]);
+		ide = activateProvider(async () => assert.fail('must reuse shared state'), { shared });
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(await ide.provider.getSessions(), [first]);
+		assert.deepStrictEqual(ide.events, []);
+		const next = await agents.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(ide.events, [{ added: [next], changed: [], removed: [first] }]);
+		ide.dispose();
+		await agents.provider.removeSession(next.id);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.strictEqual(ide.events.length, 1);
+	} finally { agents.dispose(); ide?.dispose(); }
+});
+
+test('shared storage changes distinguish updates, invalidation and unrelated secrets', async () => {
+	const shared = new SharedSecrets();
+	const setup = activateProvider(async () => 'test-first-token', { shared });
+	try {
+		const first = await setup.provider.createSession([]);
+		await new Promise(resolve => setImmediate(resolve));
+		const next = { ...first, accessToken: 'test-updated-token' };
+		await shared.store('devin.subscription.session.v1', JSON.stringify(next));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(setup.events[1], { added: [], removed: [], changed: [next] });
+		await shared.store('unrelated-test-secret', 'unrelated-test-value');
+		await shared.store('devin.subscription.session.v1', JSON.stringify(next));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.strictEqual(setup.events.length, 2);
+		await shared.store('devin.subscription.session.v1', '{invalid data');
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepStrictEqual(setup.events[2], { added: [], removed: [next], changed: [] });
+		assert.deepStrictEqual(await setup.provider.getSessions(), []);
+	} finally { setup.dispose(); }
+});
+
+for (const stage of ['method', 'code']) {
+	test(`sign-out in another window cancels pending ${stage} input and permits a fresh sign-in`, async () => {
+		const shared = new SharedSecrets();
+		const agents = activateProvider(async () => 'test-agents-token', { shared });
+		const first = await agents.provider.createSession([]);
+		const started = deferred<AbortSignal>();
+		let waiting = true;
+		const waitForCancellation = async (signal: AbortSignal) => {
+			started.resolve(signal);
+			return new Promise<undefined>(resolve => signal.addEventListener('abort', () => resolve(undefined), { once: true }));
+		};
+		const ide = activateProvider(options => signInToDevin({ ...options, request: async () => Response.json({ session_token: 'test-ide-token' }) }), { shared }, {
+			chooseMethod: async signal => waiting && stage === 'method' ? waitForCancellation(signal) : { manual: true },
+			readCode: async (_options, signal) => waiting ? waitForCancellation(signal) : 'test-ide-code',
+		});
+		try {
+			await new Promise(resolve => setImmediate(resolve));
+			const attempt = ide.provider.createSession([]);
+			const rejected = assert.rejects(attempt, { name: 'Canceled' });
+			const signal = await started.promise;
+			await agents.provider.removeSession(first.id);
+			await rejected;
+			assert.strictEqual(signal.aborted, true);
+			assert.deepStrictEqual(await ide.provider.getSessions(), []);
+			assert.deepStrictEqual(ide.events, [{ added: [], changed: [], removed: [first] }]);
+			waiting = false;
+			const replacement = await ide.provider.createSession([]);
+			await new Promise(resolve => setImmediate(resolve));
+			assert.strictEqual(replacement.accessToken, 'test-ide-token');
+			assert.deepStrictEqual(await agents.provider.getSessions(), [replacement]);
+			assert.deepStrictEqual(agents.events.at(-1), { added: [replacement], changed: [], removed: [] });
+		} finally { agents.dispose(); ide.dispose(); }
+	});
+}
+
+test('sign-out in another window wins while the replacement reads the current account', async () => {
+	const shared = new SharedSecrets();
+	const agents = activateProvider(async () => 'test-original-token', { shared });
+	const first = await agents.provider.createSession([]);
+	const reading = deferred();
+	const release = deferred();
+	let hold = false;
+	const ide = activateProvider(async () => { hold = true; return 'test-replacement-token'; }, {
+		shared,
+		beforeGet: async () => { if (hold) { reading.resolve(); await release.promise; } },
+	});
+	try {
+		await new Promise(resolve => setImmediate(resolve));
+		const replacing = ide.provider.createSession([]);
+		const rejected = assert.rejects(replacing, { name: 'Canceled' });
+		await reading.promise;
+		await agents.provider.removeSession(first.id);
+		release.resolve();
+		await rejected;
+		hold = false;
+		assert.deepStrictEqual(await ide.provider.getSessions(), []);
+		assert.deepStrictEqual(await agents.provider.getSessions(), []);
+		assert.strictEqual(ide.events.some(event => event.added.length > 0), false);
+	} finally { release.resolve(); agents.dispose(); ide.dispose(); }
 });
 
 test('coalesces concurrent sign-in requests and assigns a new account id on reauthentication', async () => {

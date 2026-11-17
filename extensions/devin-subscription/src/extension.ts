@@ -10,6 +10,10 @@ import { signInToDevin } from './auth';
 const PROVIDER_ID = 'devin-subscription';
 const SESSION_KEY = 'devin.subscription.session.v1';
 
+function sameSession(first: vscode.AuthenticationSession, second: vscode.AuthenticationSession): boolean {
+	return first.id === second.id && first.accessToken === second.accessToken && first.account.id === second.account.id && first.account.label === second.account.label;
+}
+
 class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, vscode.Disposable {
 	private readonly changeEmitter = new vscode.EventEmitter<vscode.AuthenticationProviderAuthenticationSessionsChangeEvent>();
 	readonly onDidChangeSessions = this.changeEmitter.event;
@@ -17,8 +21,20 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 	private readonly controllers = new Set<AbortController>();
 	private storageMutation: Promise<void> = Promise.resolve();
 	private disposed = false;
+	private sessionsSnapshot: readonly vscode.AuthenticationSession[] = [];
+	private readonly secretListener: vscode.Disposable;
 
-	constructor(private readonly secrets: vscode.SecretStorage) { }
+	constructor(private readonly secrets: vscode.SecretStorage) {
+		this.storageMutation = this.getSessions().then(sessions => { this.sessionsSnapshot = sessions; }, () => { });
+		this.secretListener = secrets.onDidChange(event => {
+			if (event.key !== SESSION_KEY) { return; }
+			void this.mutateStorage(async () => {
+				if (this.disposed) { return; }
+				const sessions = await this.getSessions();
+				this.publishSessions(sessions, true);
+			}).catch(() => console.warn('[Devin Subscription] Shared sign-in state could not be refreshed.'));
+		});
+	}
 
 	async getSessions(scopes?: readonly string[]): Promise<vscode.AuthenticationSession[]> {
 		if (scopes?.length) { return []; }
@@ -43,12 +59,16 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 			const controller = new AbortController();
 			this.controllers.add(controller);
 			const disposable = cancellation.onCancellationRequested(() => controller.abort());
+			const selectionCancellation = new vscode.CancellationTokenSource();
+			const cancelSelection = () => selectionCancellation.cancel();
+			controller.signal.addEventListener('abort', cancelSelection, { once: true });
 			try {
 				const method = await vscode.window.showQuickPick([
 					{ label: vscode.l10n.t('Browser Sign-In'), description: vscode.l10n.t('Return automatically to Signal-C'), manual: false },
 					{ label: vscode.l10n.t('Browser Code'), description: vscode.l10n.t('Use if the browser opens but sign-in does not finish'), manual: true },
-				], { title: vscode.l10n.t('Devin Subscription'), placeHolder: vscode.l10n.t('Choose how to complete browser sign-in') }, cancellation);
+				], { title: vscode.l10n.t('Devin Subscription'), placeHolder: vscode.l10n.t('Choose how to complete browser sign-in') }, selectionCancellation.token);
 				if (!method || this.disposed) { throw new vscode.CancellationError(); }
+				const initialSessions = await this.getSessions();
 				controller.signal.throwIfAborted();
 				const token = await signInToDevin({
 					openExternal: url => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))),
@@ -87,6 +107,9 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 				return await this.mutateStorage(async () => {
 					controller.signal.throwIfAborted();
 					const previous = await this.getSessions();
+					// Storage notifications can be queued behind this mutation. Re-read the account
+					// before writing so a sign-out/replacement already visible in storage wins.
+					if (previous.length !== initialSessions.length || previous.some((session, index) => !sameSession(session, initialSessions[index]))) { controller.abort(); }
 					controller.signal.throwIfAborted();
 					// The response does not identify the account. A new login may be
 					// another person, so never inherit the previous account's grants.
@@ -97,13 +120,15 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 						if (previous.length) { await this.secrets.store(SESSION_KEY, JSON.stringify(previous[0])); } else { await this.secrets.delete(SESSION_KEY); }
 						controller.signal.throwIfAborted();
 					}
-					this.changeEmitter.fire({ added: [session], changed: [], removed: previous });
+					this.publishSessions([session]);
 					return session;
 				});
 			} catch (error) {
 				if (controller.signal.aborted) { throw new vscode.CancellationError(); }
 				throw error;
 			} finally {
+				controller.signal.removeEventListener('abort', cancelSelection);
+				selectionCancellation.dispose();
 				disposable.dispose();
 				this.controllers.delete(controller);
 			}
@@ -117,7 +142,7 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 			const removed = sessions.filter(session => session.id === id);
 			if (removed.length) {
 				await this.secrets.delete(SESSION_KEY);
-				this.changeEmitter.fire({ added: [], changed: [], removed });
+				this.publishSessions(sessions.filter(session => session.id !== id));
 			}
 		});
 	}
@@ -128,8 +153,24 @@ class DevinSubscriptionAuthentication implements vscode.AuthenticationProvider, 
 		return result;
 	}
 
+	private publishSessions(sessions: readonly vscode.AuthenticationSession[], cancelPending = false): void {
+		if (this.disposed) { return; }
+		const previous = this.sessionsSnapshot;
+		const added = sessions.filter(session => !previous.some(old => old.id === session.id));
+		const removed = previous.filter(session => !sessions.some(next => next.id === session.id));
+		const changed = sessions.filter(session => previous.some(old => old.id === session.id && !sameSession(old, session)));
+		this.sessionsSnapshot = sessions;
+		if (!added.length && !removed.length && !changed.length) { return; }
+		if (cancelPending) {
+			// An account change in another window supersedes this window's pending attempt.
+			for (const controller of this.controllers) { controller.abort(); }
+		}
+		this.changeEmitter.fire({ added, changed, removed });
+	}
+
 	dispose(): void {
 		this.disposed = true;
+		this.secretListener.dispose();
 		for (const controller of this.controllers) { controller.abort(); }
 		this.changeEmitter.dispose();
 	}
