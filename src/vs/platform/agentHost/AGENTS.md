@@ -670,6 +670,8 @@ Initial tool enablement validates the invoking folder's current Git branch befor
 
 ### Claude (`node/claude/claudeAgent.ts`)
 
+Claude publishes model-catalog `pending`, `ready`, or `error` through the shared transient root configuration status. Only the latest refresh may publish the merged catalog, native account setup, or completion status; a newer native setup reload supersedes older checks even when the GitHub token is unchanged. Disposed providers publish no late results. A failed refresh can retain the last known-good catalog while reporting `error`; a completed empty native catalog does not establish an authenticated account.
+
 Claude deliberately has no AH-session container and no membership/role concept of its own:
 - `_chatEntriesBySdkId: DisposableMap<string, ClaudeChatEntry>` is the single disposable owner of every live SDK conversation and provides direct SDK-callback routing.
 - `_chatBackings: Map<string, IClaudeChatBacking>` maps each exact host-supplied chat URI to only its provider-owned `{ sdkSessionId, model?, sideChat? }` backing data. It deliberately does **not** retain the owning AH session or a storage URI: AH supplies the owning session and persistence/config resource transiently on every operation (`IAgentChatContext`).

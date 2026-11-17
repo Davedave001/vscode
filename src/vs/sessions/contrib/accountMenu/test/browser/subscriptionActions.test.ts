@@ -11,6 +11,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
+import { agentModelCatalogStatusKey } from '../../../../../platform/agentHost/common/agentModelCatalogStatus.js';
 import { RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
@@ -142,6 +143,35 @@ suite('Agent Subscriptions', () => {
 		} finally { picker.restore(); }
 	});
 
+	test('reopening subscriptions reads current Claude catalog state without counting Copilot models or changing setup', async () => {
+		const f = nativeClaudeFixture();
+		await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, true);
+		const quickInput = new TestQuickInputService();
+		const picker = sinon.stub(quickInput, 'pick').resolves(undefined);
+		f.instantiation.stub(IQuickInputService, quickInput);
+		f.instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+		f.instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable({ kind: 'signedOut' }) }));
+		try {
+			const descriptions: (string | undefined)[] = [];
+			for (const catalog of ['ready', 'pending', 'error'] as const) {
+				const root = upcastPartial<RootState>({
+					agents: [{ provider: 'claude', displayName: 'Claude', description: 'Test', models: [
+						{ id: 'anthropic/test', name: 'Native', provider: 'anthropic' }, { id: 'copilot/test', name: 'Copilot', provider: 'copilot' },
+					] }],
+					config: { schema: { type: 'object', properties: {} }, values: { [agentModelCatalogStatusKey('claude')]: catalog } },
+				});
+				f.instantiation.stub(IAgentHostService, upcastPartial<IAgentHostService>({ rootState: upcastPartial<IAgentHostService['rootState']>({ value: root }) }));
+				await f.instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+				const items = picker.lastCall.args[0];
+				assert.ok(Array.isArray(items));
+				descriptions.push(items.find(item => item.label === 'Anthropic')?.description);
+			}
+			assert.deepStrictEqual({ descriptions, writes: f.updates.callCount, reloads: f.reloads, restarts: f.restarts }, {
+				descriptions: ['1 Anthropic model available', 'Checking account and models', 'Model refresh needs attention'], writes: 0, reloads: [], restarts: 0,
+			});
+		} finally { picker.restore(); }
+	});
+
 	for (const outcome of ['success', 'failure', 'unknownExit', 'launchError', 'closed', 'alreadyExited', 'alreadyDisposed', 'notRegistered', 'disabledDuringLogin', 'policyDuringLogin'] as const) {
 		test(`refreshes Claude models only after a successful official sign-in (${outcome})`, async () => {
 			const f = nativeClaudeFixture(outcome === 'notRegistered' ? 'missing' : 'registered');
@@ -168,7 +198,7 @@ suite('Agent Subscriptions', () => {
 
 	for (const cancelled of [false, true]) {
 		test(cancelled ? 'cancels the provider picker without opening sign-in' : 'offers Devin Subscription separately from Devin CLI and starts browser authentication', async () => {
-			const instantiation = store.add(new TestInstantiationService());
+			const { instantiation } = nativeClaudeFixture();
 			const quickInput = new TestQuickInputService();
 			const picker = sinon.stub(quickInput, 'pick').resolves(cancelled ? undefined : { id: 'devin-subscription', label: 'Devin Subscription' });
 			const calls: unknown[] = [];
@@ -197,7 +227,7 @@ suite('Agent Subscriptions', () => {
 	];
 	for (const { status, description } of devinStatuses) {
 		test(`reports ${status.kind} in the picker without announcing models before readiness`, async () => {
-			const instantiation = store.add(new TestInstantiationService());
+			const { instantiation } = nativeClaudeFixture();
 			const quickInput = new TestQuickInputService();
 			const picker = sinon.stub(quickInput, 'pick').resolves({ id: 'devin-subscription', label: 'Devin Subscription' });
 			const notices: string[] = [];

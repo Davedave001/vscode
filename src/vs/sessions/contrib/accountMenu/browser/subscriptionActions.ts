@@ -28,6 +28,7 @@ import { IAgentSdkSetupService } from '../../../../workbench/services/agentHost/
 import { IWorkbenchEnvironmentService } from '../../../../workbench/services/environment/common/environmentService.js';
 import { AgentHostDevinExecutableSettingId, DevinSubscriptionProviderId } from '../../../../platform/agentHost/common/devinAgentConfiguration.js';
 import { IDevinSubscriptionConnection } from './devinSubscriptionConnection.js';
+import { getClaudeSubscriptionPresentation } from './claudeSubscriptionPresentation.js';
 import { AgentsWindowMenus } from '../../../browser/agentsWindowMenus.js';
 
 export const CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING = 'agents.subscriptions.claudeExecutable';
@@ -170,6 +171,13 @@ export class AgentSubscriptionsAction extends Action2 {
 		const devin = accessor.get(IDevinSubscriptionConnection);
 		const notifications = accessor.get(INotificationService);
 		const codex = accessor.get(ICodexAccountService).account;
+		const configuration = accessor.get(IConfigurationService);
+		const claude = getClaudeSubscriptionPresentation({
+			root: accessor.get(IAgentHostService).rootState.value,
+			enabled: configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) !== false,
+			policyDisabled: configuration.inspect<boolean>(AgentHostClaudeAgentEnabledSettingId)?.policyValue === false,
+			remote: !!accessor.get(IWorkbenchEnvironmentService).remoteAuthority,
+		});
 		const devinStatus = devin.status.get();
 		const devinDescriptions = {
 			checking: localize('subscriptions.devinChecking', "Checking connection"),
@@ -182,7 +190,7 @@ export class AgentSubscriptionsAction extends Action2 {
 		};
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
-			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), description: localize('subscriptions.claudePlan', "Claude subscription"), detail: localize('subscriptions.claudeDetail', "Sign in with official Claude Code, or enable the native Claude agent using its configured account.") },
+			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), ...claude },
 			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: devinDescriptions[devinStatus.kind], detail: devinStatus.kind === 'unavailable' ? localize('subscriptions.devinUnavailableDetail', "Check the Devin executable setting and restart the local agent host. Your saved sign-in will be reused.") : localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. Select again to retry; a saved sign-in is reused.") },
 			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });

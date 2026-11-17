@@ -53,6 +53,7 @@ import { AgentPermissionKind, AgentChatMigrationDeferred, IActiveClient, IAgent,
 import { subagentChatUri } from '../../common/agentHostChatMinting.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, AgentHostGitHubMcpServerEnabledConfigKey } from '../../common/agentHostSchema.js';
 import { AgentHostConfigKey } from '../../common/agentHostCustomizationConfig.js';
+import { readAgentModelCatalogStatus } from '../../common/agentModelCatalogStatus.js';
 import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
 import { AgentFeedbackAttachmentDisplayKind } from '../../common/meta/agentFeedbackAttachments.js';
 import { ChatInputRequestPurpose, readChatInputRequestPurpose } from '../../common/meta/agentChatInputRequestMeta.js';
@@ -1609,6 +1610,130 @@ suite('ClaudeAgent', () => {
 			modelsCalls: 1,
 			hasModels: true,
 		});
+	});
+
+	test('constructor bootstrap coalesces with an immediate explicit refresh', async () => {
+		const { agent, sdk } = createTestContext(disposables, { nativeAccount: NATIVE_ACCOUNT });
+		sdk.supportedModelsResult = [{ value: 'claude-sonnet-test', displayName: 'Native Claude', description: '' }];
+		await agent.refreshModels();
+		assert.deepStrictEqual({
+			models: agent.models.get().map(model => model.name),
+			accountSetUp: agent['_nativeAccountSetUp'], queries: sdk.enumerationQueries.length,
+		}, { models: ['Native Claude'], accountSetUp: true, queries: 1 });
+	});
+
+	test('a setup reload supersedes an older native account check with the same GitHub token', async () => {
+		const { agent, sdk, configService } = createTestContext(disposables);
+		const gate = new DeferredPromise<void>();
+		sdk.supportedModelsGate = gate.p;
+		await sdk.waitForCalls(() => sdk.supportedModelsCallCount === 1);
+		const older = agent['_modelRefreshInFlight'];
+		try {
+			sdk.supportedModelsGate = undefined;
+			sdk.accountInfoResult = NATIVE_ACCOUNT;
+			sdk.supportedModelsResult = [{ value: 'claude-sonnet-test', displayName: 'Native Claude', description: '' }];
+			configService.updateRootConfig({ [AGENT_SDK_SETUP_RELOAD_REQUEST_KEY]: { agent: 'claude', request: 'after-sign-in' } });
+			await sdk.waitForCalls(() => sdk.supportedModelsCallCount === 2);
+			await agent.refreshModels();
+			await gate.complete();
+			await older;
+			assert.deepStrictEqual({
+				models: agent.models.get().map(model => model.name),
+				accountSetUp: agent['_nativeAccountSetUp'],
+				closedQueries: sdk.enumerationQueries.map(query => query.closeCount),
+			}, { models: ['Native Claude'], accountSetUp: true, closedQueries: [1, 1] });
+		} finally {
+			await gate.complete();
+			await older;
+		}
+	});
+
+	test('publishes pending, ready and error model catalog status without treating an empty account as failure', async () => {
+		const { agent, sdk, stateManager } = createTestContext(disposables, { nativeAccount: NATIVE_ACCOUNT });
+		sdk.supportedModelsResult = [{ value: 'claude-sonnet-test', displayName: 'Native Claude', description: '' }];
+		await bootstrapModelRefresh(agent, sdk);
+		const ready = readAgentModelCatalogStatus(stateManager.rootState, 'claude');
+		const gate = new DeferredPromise<void>();
+		sdk.supportedModelsGate = gate.p;
+		const refresh = agent.refreshModels();
+		const pending = readAgentModelCatalogStatus(stateManager.rootState, 'claude');
+		await gate.complete();
+		await refresh;
+		sdk.supportedModelsRejection = new Error('subprocess unavailable');
+		await agent.refreshModels();
+		const failed = { status: readAgentModelCatalogStatus(stateManager.rootState, 'claude'), models: agent.models.get().map(model => model.name) };
+		sdk.supportedModelsRejection = undefined;
+		sdk.accountInfoResult = { tokenSource: 'none', apiProvider: 'firstParty' };
+		await agent.refreshModels();
+		assert.deepStrictEqual({ ready, pending, failed, empty: { status: readAgentModelCatalogStatus(stateManager.rootState, 'claude'), models: agent.models.get() } }, {
+			ready: 'ready', pending: 'pending', failed: { status: 'error', models: ['Native Claude'] }, empty: { status: 'ready', models: [] },
+		});
+	});
+
+	test('a superseded native account result cannot change a newer pending catalog', async () => {
+		const { agent, sdk, stateManager } = createTestContext(disposables, { nativeAccount: NATIVE_ACCOUNT });
+		const oldGate = new DeferredPromise<void>();
+		const newGate = new DeferredPromise<void>();
+		sdk.supportedModelsGate = oldGate.p;
+		await sdk.waitForCalls(() => sdk.supportedModelsCallCount === 1);
+		const older = agent['_modelRefreshInFlight'];
+		sdk.accountInfoResult = { tokenSource: 'none', apiProvider: 'firstParty' };
+		sdk.supportedModelsGate = newGate.p;
+		const newer = agent['_startModelRefresh']();
+		try {
+			await sdk.waitForCalls(() => sdk.supportedModelsCallCount === 2);
+			await oldGate.complete();
+			await older;
+			assert.deepStrictEqual({
+				status: readAgentModelCatalogStatus(stateManager.rootState, 'claude'),
+				accountSetUp: agent['_nativeAccountSetUp'],
+				coalescingTarget: agent.refreshModels() === newer,
+			}, { status: 'pending', accountSetUp: false, coalescingTarget: true });
+		} finally {
+			await oldGate.complete();
+			await newGate.complete();
+			await Promise.all([older, newer]);
+		}
+	});
+
+	test('a disposed Claude provider does not publish an in-flight native account result', async () => {
+		const { agent, sdk, stateManager } = createTestContext(disposables, { nativeAccount: NATIVE_ACCOUNT });
+		const gate = new DeferredPromise<void>();
+		sdk.supportedModelsGate = gate.p;
+		sdk.supportedModelsResult = [{ value: 'claude-sonnet-test', displayName: 'Native Claude', description: '' }];
+		await sdk.waitForCalls(() => sdk.supportedModelsCallCount === 1);
+		const refresh = agent['_modelRefreshInFlight'];
+		agent.dispose();
+		const config = stateManager.rootState.config;
+		await gate.complete();
+		await refresh;
+		await agent.refreshModels();
+		assert.deepStrictEqual({
+			models: agent.models.get(), accountSetUp: agent['_nativeAccountSetUp'],
+			configUnchanged: stateManager.rootState.config === config,
+			queries: sdk.enumerationQueries.length, closed: sdk.enumerationQueries[0].closeCount,
+		}, { models: [], accountSetUp: false, configUnchanged: true, queries: 1, closed: 1 });
+	});
+
+	test('an SDK availability failure settles refreshModels and publishes error status', async () => {
+		const { agent, sdk, stateManager } = createTestContext(disposables);
+		await bootstrapModelRefresh(agent, sdk);
+		sdk.canLoadWithoutDownload = async () => { throw new Error('availability failed'); };
+		await agent.refreshModels();
+		assert.strictEqual(readAgentModelCatalogStatus(stateManager.rootState, 'claude'), 'error');
+	});
+
+	test('a missing SDK completes an empty catalog without downloading or claiming an account', async () => {
+		const { agent, sdk, stateManager } = createTestContext(disposables);
+		sdk.canLoadWithoutDownloadResult = false;
+		await tick();
+		await agent.refreshModels();
+		assert.deepStrictEqual({
+			status: readAgentModelCatalogStatus(stateManager.rootState, 'claude'),
+			models: agent.models.get(), accountSetUp: agent['_nativeAccountSetUp'],
+			queries: sdk.enumerationQueries.length, downloads: sdk.ensureAvailableCalls,
+			setup: readAgentSdkSetupInfos(stateManager.rootState).find(setup => setup.agent === 'claude')?.download,
+		}, { status: 'ready', models: [], accountSetUp: false, queries: 0, downloads: 0, setup: 'notDownloaded' });
 	});
 
 	test('keeps the last known-good models only when every attempted source fails', async () => {

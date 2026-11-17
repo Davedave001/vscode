@@ -25,6 +25,7 @@ import { IProductService } from '../../../product/common/productService.js';
 import { IAgentPluginManager, ISyncedCustomization } from '../../common/agentPluginManager.js';
 import { IAgentSdkDownloader } from '../agentSdkDownloader.js';
 import { AgentSdkSetupChannel } from '../agentSdkSetupChannel.js';
+import { agentModelCatalogStatusKey, type AgentModelCatalogStatus } from '../../common/agentModelCatalogStatus.js';
 import { decodeProviderData, encodeProviderData, type IPersistedChat } from '../agentChatBackings.js';
 import { AgentHostAutoApprovePolicyRestrictedConfigKey, createSchema, platformRootSchema, platformSessionSchema, schemaProperty } from '../../common/agentHostSchema.js';
 import { ClaudePermissionMode, ClaudeSessionConfigKey, narrowClaudePermissionMode } from '../../common/claudeSessionConfigKeys.js';
@@ -388,6 +389,7 @@ export class ClaudeAgent extends Disposable implements IAgent {
 	 * racing each other's writes to {@link _models}.
 	 */
 	private _modelRefreshInFlight: Promise<void> | undefined;
+	private _modelRefreshRevision = 0;
 
 	private _githubToken: string | undefined;
 	private _gitHubEndpointGeneration = 0;
@@ -690,7 +692,7 @@ export class ClaudeAgent extends Disposable implements IAgent {
 		// ctor stack. The per-session transport is derived on demand at materialize
 		// (see {@link _defaultTransportMode}), so a sign-in state change needs no
 		// reactive re-resolve — the next session simply reads it live.
-		queueMicrotask(() => { void this._startModelRefresh(); });
+		queueMicrotask(() => { void this.refreshModels(); });
 
 		this._sdkSetupChannel = this._register(new AgentSdkSetupChannel({
 			id: this.id,
@@ -901,16 +903,30 @@ export class ClaudeAgent extends Disposable implements IAgent {
 	/**
 	 * Unconditionally begins a refresh, superseding any in-flight one as the
 	 * coalescing target. The superseded request stays harmless: its own
-	 * stale-write guard drops the result if the token or transport moved on.
+	 * stale-write guard drops the result if a newer refresh or token superseded it.
 	 */
 	private _startModelRefresh(): Promise<void> {
-		const refresh = this._refreshModels().finally(() => {
+		if (this._store.isDisposed) {
+			return Promise.resolve();
+		}
+		const revision = ++this._modelRefreshRevision;
+		this._publishModelCatalogStatus('pending');
+		const refresh = this._refreshModels(revision).catch(error => {
+			if (revision === this._modelRefreshRevision && !this._store.isDisposed) {
+				this._logService.error(error, '[Claude] Failed to refresh model catalog');
+				this._publishModelCatalogStatus('error');
+			}
+		}).finally(() => {
 			if (this._modelRefreshInFlight === refresh) {
 				this._modelRefreshInFlight = undefined;
 			}
 		});
 		this._modelRefreshInFlight = refresh;
 		return refresh;
+	}
+
+	private _publishModelCatalogStatus(status: AgentModelCatalogStatus): void {
+		this._configurationService.publishRootTransientValues?.({ [agentModelCatalogStatusKey(this.id)]: status });
 	}
 
 	/**
@@ -939,23 +955,24 @@ export class ClaudeAgent extends Disposable implements IAgent {
 	 * costs a multi-hundred-megabyte download, and that download is the user's
 	 * explicit choice to make.
 	 */
-	private async _refreshModels(): Promise<void> {
+	private async _refreshModels(revision: number): Promise<void> {
 		const tokenAtStart = this._githubToken;
 		// True only for a dev override, a dev bare import, or an already-cached SDK.
 		const canAttemptNative = await this._sdkService.canLoadWithoutDownload();
-		if (!canAttemptNative) {
-			// No SDK, so no evidence of an account — say so rather than retaining a stale `true`.
-			this._nativeAccountSetUp = false;
+		if (revision !== this._modelRefreshRevision || this._githubToken !== tokenAtStart || this._store.isDisposed) {
+			return;
 		}
 		const [proxyOutcome, nativeOutcome] = await Promise.allSettled([
 			tokenAtStart ? this._fetchProxyModels(tokenAtStart) : Promise.resolve<readonly IAgentModelInfo[]>([]),
-			canAttemptNative ? this._fetchNativeModels() : Promise.resolve<readonly IAgentModelInfo[]>([]),
+			canAttemptNative ? this._fetchNativeModels() : Promise.resolve({ models: [] as readonly IAgentModelInfo[], accountSetUp: false }),
 		]);
 		// Stale-write guard: a newer refresh superseded this one while we were
-		// awaiting — the proxy token rotated (sign-in / sign-out). A merged write
-		// here would clobber the catalog that newer refresh published.
-		if (this._githubToken !== tokenAtStart) {
+		// awaiting, including a native sign-in reload with an unchanged GitHub token.
+		if (revision !== this._modelRefreshRevision || this._githubToken !== tokenAtStart || this._store.isDisposed) {
 			return;
+		}
+		if (nativeOutcome.status === 'fulfilled') {
+			this._nativeAccountSetUp = nativeOutcome.value.accountSetUp;
 		}
 		const attempted = (tokenAtStart ? 1 : 0) + (canAttemptNative ? 1 : 0);
 		const failed = (proxyOutcome.status === 'rejected' ? 1 : 0) + (nativeOutcome.status === 'rejected' ? 1 : 0);
@@ -975,11 +992,12 @@ export class ClaudeAgent extends Disposable implements IAgent {
 				return [];
 			};
 			const proxyModels = settledCatalog(proxyOutcome, 'proxy');
-			const nativeModels = settledCatalog(nativeOutcome, 'native');
+			const nativeModels = nativeOutcome.status === 'fulfilled' ? nativeOutcome.value.models : settledCatalog(nativeOutcome, 'native');
 			const merged = mergeClaudeModelCatalogs(proxyModels, nativeModels);
 			this._logService.info(`[Claude] Models refreshed (merged). Count: ${merged.length}, ${merged.map(m => m.name).join(', ')}`);
 			this._models.set(merged, undefined);
 		}
+		this._publishModelCatalogStatus(failed > 0 ? 'error' : 'ready');
 		// Last, never first: announcing `ready` before the catalog lands is exactly
 		// how the window renders "no account found".
 		this._sdkSetupChannel.refresh();
@@ -999,7 +1017,7 @@ export class ClaudeAgent extends Disposable implements IAgent {
 	 * `claude login` credential lives in the login keychain, where nothing on the
 	 * filesystem can see it. When it says no, the catalog is published empty.
 	 */
-	private async _fetchNativeModels(): Promise<readonly IAgentModelInfo[]> {
+	private async _fetchNativeModels(): Promise<{ readonly models: readonly IAgentModelInfo[]; readonly accountSetUp: boolean }> {
 		// A prompt iterable that never yields: enumeration only needs the
 		// control-request channel (`Query.supportedModels()`), not a real turn.
 		const neverYieldingPrompt: AsyncIterable<SDKUserMessage> = {
@@ -1010,15 +1028,12 @@ export class ClaudeAgent extends Disposable implements IAgent {
 		try {
 			const [account, models] = await Promise.all([query.accountInfo(), query.supportedModels()]);
 			const setUp = isClaudeAccountSetUp(account);
-			this._nativeAccountSetUp = setUp;
 			// Origin only — never the credential itself.
 			this._logService.info(`[Claude] Native account check: setUp=${setUp}, provider=${account.apiProvider ?? 'none'}, tokenSource=${account.tokenSource ?? 'absent'}, apiKeySource=${account.apiKeySource ?? 'absent'}`);
-			if (!setUp) {
-				return [];
-			}
-			return models
-				.filter(m => !isSdkDefaultModel(m))
-				.map(m => fromSdkModelInfo(m, this.id));
+			return {
+				accountSetUp: setUp,
+				models: setUp ? models.filter(m => !isSdkDefaultModel(m)).map(m => fromSdkModelInfo(m, this.id)) : [],
+			};
 		} finally {
 			// `close()` terminates the subprocess; aborting the controller is a
 			// belt-and-suspenders teardown for anything `close()` leaves pending.
