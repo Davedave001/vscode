@@ -34,7 +34,14 @@ suite('Devin Subscription Connection', () => {
 		const authentication = upcastPartial<IAuthenticationService>({
 			onDidChangeSessions: changes.event,
 			getSessions: async () => sessions,
-			createSession: async () => { signIns++; return createSession(); },
+			createSession: async () => {
+				signIns++;
+				const session = await createSession();
+				const removed = sessions;
+				sessions = [session];
+				changes.fire({ providerId: DevinSubscriptionProviderId, label: 'Devin Subscription', event: { added: [session], removed, changed: [] } });
+				return session;
+			},
 		});
 		const host = upcastPartial<IAgentHostService>({
 			onAgentHostStart: starts.event,
@@ -60,6 +67,38 @@ suite('Devin Subscription Connection', () => {
 		assert.deepStrictEqual(f.tokens, ['browser-token']);
 		assert.deepStrictEqual(f.connection.status.get(), { kind: 'ready', modelCount: 1 });
 	});
+
+	test('can replace a saved browser sign-in after the host rejects its connection', async () => {
+		const f = fixture();
+		f.setAuthenticate(async () => ({ authenticated: false }));
+		await assert.rejects(f.connection.connect(), /Restart the agent host/);
+		assert.deepStrictEqual(f.connection.status.get(), { kind: 'failed' });
+		const started = new DeferredPromise<void>();
+		const replacement = new DeferredPromise<AuthenticationSession>();
+		f.setCreateSession(async () => { await started.complete(); return replacement.p; });
+		const connecting = f.connection.connect({ forceSignIn: true });
+		await started.p;
+		assert.deepStrictEqual(f.connection.status.get(), { kind: 'signingIn' });
+		f.setAuthenticate(async () => ({ authenticated: true }));
+		await replacement.complete({ id: 'replacement', accessToken: 'replacement-token', account: { id: 'replacement', label: 'Replacement account' }, scopes: [] });
+		await connecting;
+		assert.strictEqual(f.signIns, 1);
+		assert.strictEqual(f.tokens.at(-1), 'replacement-token');
+		assert.deepStrictEqual(f.connection.status.get(), { kind: 'ready', modelCount: 1 });
+	});
+
+	for (const reason of ['Sign-in cancelled', 'Browser sign-in failed']) {
+		test(`preserves a saved connection when reauthentication ends with ${reason}`, async () => {
+			const f = fixture();
+			await f.connection.connect();
+			f.setCreateSession(async () => { throw new Error(reason); });
+			await assert.rejects(f.connection.connect({ forceSignIn: true }), error => error instanceof Error && error.message === reason);
+			await f.connection.connect();
+			assert.strictEqual(f.signIns, 1);
+			assert.deepStrictEqual(f.tokens, ['browser-token']);
+			assert.deepStrictEqual(f.connection.status.get(), { kind: 'ready', modelCount: 1 });
+		});
+	}
 
 	test('withdraws an unknown host credential when signed out, including after restart', async () => {
 		const f = fixture(true, 1, false);

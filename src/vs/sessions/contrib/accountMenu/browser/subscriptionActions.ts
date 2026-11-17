@@ -191,12 +191,22 @@ export class AgentSubscriptionsAction extends Action2 {
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
 			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), ...claude },
-			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: devinDescriptions[devinStatus.kind], detail: devinStatus.kind === 'unavailable' ? localize('subscriptions.devinUnavailableDetail', "Check the Devin executable setting and restart the local agent host. Your saved sign-in will be reused.") : localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. Select again to retry; a saved sign-in is reused.") },
+			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: devinDescriptions[devinStatus.kind], detail: devinStatus.kind === 'unavailable' ? localize('subscriptions.devinUnavailableDetail', "Check the Devin executable setting and restart the local agent host. Your saved sign-in will be reused.") : localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. Select to retry a saved connection or sign in again in your browser.") },
 			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });
 		if (!provider) { return; }
 		if (provider.id === 'devin-subscription') {
-			await devin.connect();
+			const current = devin.status.get();
+			if (current.kind === 'ready' || current.kind === 'failed' || current.kind === 'connecting' || current.kind === 'unavailable') {
+				const action = await quickInput.pick([
+					{ id: 'retry' as const, label: localize('subscriptions.devinRetry', "Retry Connection"), detail: localize('subscriptions.devinRetryDetail', "Reuse the saved Devin sign-in and check the agent connection.") },
+					{ id: 'signIn' as const, label: localize('subscriptions.devinSignInAgain', "Sign In Again"), detail: localize('subscriptions.devinSignInAgainDetail', "Open Devin browser sign-in again. The saved account is replaced only after sign-in succeeds.") },
+				], { title: localize('subscriptions.devinManage', "Devin Subscription"), placeHolder: localize('subscriptions.devinManagePlaceholder', "Retry the connection or sign in again"), matchOnDetail: true });
+				if (!action) { return; }
+				await devin.connect(action.id === 'signIn' ? { forceSignIn: true } : undefined);
+			} else {
+				await devin.connect();
+			}
 			const status = devin.status.get();
 			if (status.kind === 'ready') {
 				notifications.info(localize('subscriptions.devinConnected', "Devin Subscription has {0} models ready. Choose Devin Subscription in the agent picker, then select a model.", status.modelCount));

@@ -229,7 +229,9 @@ suite('Agent Subscriptions', () => {
 		test(`reports ${status.kind} in the picker without announcing models before readiness`, async () => {
 			const { instantiation } = nativeClaudeFixture();
 			const quickInput = new TestQuickInputService();
-			const picker = sinon.stub(quickInput, 'pick').resolves({ id: 'devin-subscription', label: 'Devin Subscription' });
+			const picker = sinon.stub(quickInput, 'pick');
+			picker.onFirstCall().resolves({ id: 'devin-subscription', label: 'Devin Subscription' });
+			picker.onSecondCall().resolves({ id: 'retry', label: 'Retry Connection' });
 			const notices: string[] = [];
 			instantiation.stub(IQuickInputService, quickInput);
 			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
@@ -245,6 +247,28 @@ suite('Agent Subscriptions', () => {
 				if (status.kind === 'unavailable') { assert.match(devin.detail ?? '', /executable setting.*restart/); }
 				assert.strictEqual(notices.length, 1);
 				assert.match(notices[0], status.kind === 'ready' ? /has 7 models ready/ : status.kind === 'signedOut' ? /is signed out/ : /models have not appeared yet/);
+			} finally { picker.restore(); }
+		});
+	}
+
+	for (const choice of ['retry', 'signIn', 'cancel'] as const) {
+		test(`offers Devin recovery choices and handles ${choice} without clearing the saved account`, async () => {
+			const { instantiation } = nativeClaudeFixture();
+			const quickInput = new TestQuickInputService();
+			const picker = sinon.stub(quickInput, 'pick');
+			picker.onFirstCall().resolves({ id: 'devin-subscription', label: 'Devin Subscription' });
+			picker.onSecondCall().resolves(choice === 'cancel' ? undefined : { id: choice, label: choice });
+			const calls: ({ readonly forceSignIn?: boolean } | undefined)[] = [];
+			instantiation.stub(IQuickInputService, quickInput);
+			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+			instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable({ kind: 'failed' }), connect: async options => { calls.push(options); } }));
+			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: () => {} }));
+			try {
+				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+				const items = picker.secondCall.args[0];
+				assert.ok(Array.isArray(items));
+				assert.deepStrictEqual(items.map(item => item.label), ['Retry Connection', 'Sign In Again']);
+				assert.deepStrictEqual(calls, choice === 'cancel' ? [] : [choice === 'signIn' ? { forceSignIn: true } : undefined]);
 			} finally { picker.restore(); }
 		});
 	}

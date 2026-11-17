@@ -21,7 +21,7 @@ export type DevinSubscriptionStatus = { readonly kind: 'checking' | 'signedOut' 
 export interface IDevinSubscriptionConnection {
 	readonly _serviceBrand: undefined;
 	readonly status: IObservable<DevinSubscriptionStatus>;
-	connect(): Promise<void>;
+	connect(options?: { readonly forceSignIn?: boolean }): Promise<void>;
 }
 
 export class DevinSubscriptionConnection extends Disposable implements IDevinSubscriptionConnection {
@@ -72,10 +72,9 @@ export class DevinSubscriptionConnection extends Disposable implements IDevinSub
 		this.syncInBackground();
 	}
 
-	async connect(): Promise<void> {
+	async connect(options?: { readonly forceSignIn?: boolean }): Promise<void> {
 		await this.extensions.whenInstalledExtensionsRegistered();
-		const sessions = await this.authentication.getSessions(DevinSubscriptionProviderId, [], undefined, true);
-		if (!sessions.length) {
+		if (options?.forceSignIn || !(await this.authentication.getSessions(DevinSubscriptionProviderId, [], undefined, true)).length) {
 			this.signingIn = true;
 			this.updateStatus();
 			try { await this.authentication.createSession(DevinSubscriptionProviderId, [], { activateImmediate: true }); }
