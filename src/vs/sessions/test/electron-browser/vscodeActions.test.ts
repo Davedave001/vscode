@@ -340,6 +340,19 @@ suite('VS Code Actions', () => {
 			assert.deepStrictEqual({ opens, notifications, folders: session.mainChat.get().workspace.get()?.folders.map(folder => folder.workingDirectory.toString()) }, { opens: 0, notifications: ['This workspace cannot be opened in one editor window because its folders use unsupported or different remote connections.'], folders: folders.map(folder => folder.toString()) });
 		});
 	}
+	test('rejects a complete root list owned by a different provider host', async () => {
+		const address = 'ssh:host';
+		const folders = ['/one', '/two'].map(path => toAgentHostUri(URI.file(path), agentHostAuthority('ssh:other')));
+		let opens = 0;
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(): Promise<void> { opens++; }
+		}());
+		const provider: ISessionsProvider = upcastPartial<IAgentHostSessionsProvider>({ id: 'agenthost-test', remoteAddress: address });
+		instantiationService.stub(ISessionsProvidersService, upcastPartial<ISessionsProvidersService>({ getProvider: <T extends ISessionsProvider>() => provider as T }));
+		instantiationService.stub(IRemoteAgentHostService, upcastPartial<IRemoteAgentHostService>({ getEntryByAddress: () => ({ name: 'Remote host', connection: { type: RemoteAgentHostEntryType.SSH, address, hostName: 'host' } }) }));
+		await instantiationService.invokeFunction(openSessionInVSCode, createSession('other-provider', true, folders));
+		assert.deepStrictEqual({ opens, notifications }, { opens: 0, notifications: ['This workspace cannot be opened in one editor window because its folders use unsupported or different remote connections.'] });
+	});
 	for (const folders of [
 		[URI.file('/local'), URI.parse('file://fileserver/share/project')],
 		[URI.parse('vscode-remote://wsl+Ubuntu/one'), URI.parse('vscode-remote://WSL+ubuntu/two')],

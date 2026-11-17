@@ -14,7 +14,8 @@ import { ISessionsProvidersService } from './sessionsProvidersService.js';
 import { isAgentHostProvider, LOCAL_AGENT_HOST_PROVIDER_ID, REMOTE_AGENT_HOST_PROVIDER_PREFIX } from '../common/agentHostSessionsProvider.js';
 import { encodeHex, VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
-import { AGENT_HOST_SCHEME, fromAgentHostUri, LOCAL_AGENT_HOST_AUTHORITY } from '../../../../platform/agentHost/common/agentHostUri.js';
+import { AGENT_HOST_SCHEME, agentHostAuthority, fromAgentHostUri, LOCAL_AGENT_HOST_AUTHORITY } from '../../../../platform/agentHost/common/agentHostUri.js';
+import { isEqualAuthority } from '../../../../base/common/resources.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { ISessionsProvider } from '../common/sessionsProvider.js';
 import { findDevContainerSample } from '../../../../platform/agentHost/common/devContainerSamples.js';
@@ -98,7 +99,7 @@ export function resolveRemoteAgentHostEntryAuthority(entry: IRemoteAgentHostEntr
 	}
 }
 
-/** Resolves an Agent Host folder for the Editor window, or returns undefined when no remote resolver supports it. */
+/** Resolves an Agent Host folder for the Editor window, or returns undefined when its owner or remote resolver is incompatible. */
 export function resolveRemoteFolderUri(
 	folderUri: URI,
 	providerId: string,
@@ -110,6 +111,11 @@ export function resolveRemoteFolderUri(
 	}
 	if (folderUri.scheme !== AGENT_HOST_SCHEME) {
 		return folderUri;
+	}
+	const provider = sessionsProvidersService.getProvider(providerId);
+	if (provider && isAgentHostProvider(provider) && provider.remoteAddress && !isEqualAuthority(folderUri.authority, agentHostAuthority(provider.remoteAddress))) {
+		// A resolver for this provider cannot reinterpret paths owned by another connection.
+		return undefined;
 	}
 
 	const remoteAuthority = resolveRemoteAuthority(providerId, sessionsProvidersService, remoteAgentHostService);

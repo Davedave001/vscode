@@ -228,9 +228,11 @@ suite('Web Open in Editor', () => {
 			const multiRoot = parseExternalEditorWindowLinkUri(links[0], 'vscode-test');
 			assert.deepStrictEqual({ host: multiRoot?.remoteAuthority, roots: multiRoot?.folders?.map(folder => folder.toString()), sessions }, { host: parsed.remoteAuthority, roots: ['/project', '/second project # 100%/项目'].map(path => URI.from({ scheme: 'vscode-remote', authority: parsed.remoteAuthority, path }).toString()), sessions: [sharesAgentHost ? 'agent-host-copilotcli:/session#chat' : null] });
 			for (const otherHostRoot of [URI.parse('vscode-remote://ssh-remote+other/second'), toAgentHostUri(URI.file('/second'), agentHostAuthority('ssh:other'))]) {
-				sessions.length = 0; notifications.length = 0; links.length = 0;
-				await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: [folder, otherHostRoot].map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) } }));
-				assert.deepStrictEqual({ links, notifications }, { links: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
+				for (const roots of [[folder, otherHostRoot], [otherHostRoot, otherHostRoot.with({ path: '/third' })]]) {
+					sessions.length = 0; notifications.length = 0; links.length = 0;
+					await instantiationService.invokeFunction(accessor => new OpenInVSCodeAction().run(accessor, { session, chat: { ...chat, workspace: constObservable(upcastPartial<ISessionWorkspace>({ folders: roots.map(root => ({ root, workingDirectory: root, name: 'root', description: undefined })) })) } }));
+					assert.deepStrictEqual({ links, notifications }, { links: [], notifications: ['This workspace cannot be opened in the editor because its folder paths are unsupported or its link is too large.'] });
+				}
 			}
 		});
 	}

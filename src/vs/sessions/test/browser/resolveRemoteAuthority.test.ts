@@ -151,7 +151,7 @@ suite('resolveRemoteAuthority', () => {
 			connection: { type: RemoteAgentHostEntryType.WSL, address: 'wsl:Ubuntu-24.04', distro: 'Ubuntu-24.04' },
 		}]);
 		const folderUri = resolveRemoteFolderUri(
-			URI.from({ scheme: AGENT_HOST_SCHEME, authority: 'wsl__Ubuntu-24.04', path: '/home/test/project' }),
+			toAgentHostUri(URI.file('/home/test/project'), agentHostAuthority('wsl:Ubuntu-24.04')),
 			'agenthost-wsl',
 			providersService,
 			remoteService,
@@ -266,6 +266,27 @@ suite('resolveRemoteAuthority', () => {
 			file: URI.file('/local/project'),
 		});
 	});
+	for (const connection of [
+		{ type: RemoteAgentHostEntryType.SSH, address: 'localhost:4321', hostName: 'host' },
+		{ type: RemoteAgentHostEntryType.Tunnel, tunnelId: 'tunnel-id', clusterId: 'region' },
+		{ type: RemoteAgentHostEntryType.WSL, address: 'wsl:Ubuntu', distro: 'Ubuntu' },
+		{ type: RemoteAgentHostEntryType.DevContainer, address: 'devcontainer:project', hostPath: '/source/project' },
+	] satisfies IRemoteAgentHostEntry['connection'][]) {
+		test(`does not remap another host's folder through a ${connection.type} provider`, () => {
+			const entry = { name: 'Expected host', connection };
+			const address = getEntryAddress(entry);
+			const providers = makeProvidersService(address);
+			const remoteService = makeRemoteAgentHostService([entry]);
+			const path = URI.file('/project # 100%');
+			const folder = toAgentHostUri(path, agentHostAuthority(address));
+			const own = resolveRemoteFolderUri(folder, 'agenthost-test', providers, remoteService);
+			assert.deepStrictEqual({
+				own: own && { scheme: own.scheme, authority: own.authority, path: own.path },
+				foreign: resolveRemoteFolderUri(toAgentHostUri(path, agentHostAuthority('ssh:other-host')), 'agenthost-test', providers, remoteService),
+				local: resolveRemoteFolderUri(URI.from({ scheme: AGENT_HOST_SCHEME, authority: LOCAL_AGENT_HOST_AUTHORITY, path: path.path }), 'agenthost-test', providers, remoteService),
+			}, { own: { scheme: 'vscode-remote', authority: resolveRemoteAuthority('agenthost-test', providers, remoteService), path: path.path }, foreign: undefined, local: undefined });
+		});
+	}
 
 	test('returns a Dev Containers authority for a POSIX source folder', () => {
 		assertDevContainerAuthority('/Users/test/project');
