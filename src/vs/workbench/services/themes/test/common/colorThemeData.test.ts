@@ -13,6 +13,36 @@ import { InMemoryStorageService, StorageScope } from '../../../../../platform/st
 import { editorBackground, foreground, inputBackground, inputForeground } from '../../../../../platform/theme/common/colorRegistry.js';
 import { ColorThemeData } from '../../common/colorThemeData.js';
 
+suite('ColorThemeData - Agent customization compatibility', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('standard user colors override fixed Agent colors from a fallback theme', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {
+			'agentsPanel.background': '#191a1b', 'activeSessionView.background': '#191a1b',
+			'inactiveSessionView.background': '#191a1b', 'agentsChatInput.background': '#202020',
+		});
+		theme.setCustomColors({ 'editor.background': '#08080c', 'panel.background': '#101020', 'input.background': '#181826' });
+		assert.strictEqual(theme.getColor('activeSessionView.background')?.toString(), '#08080c');
+		assert.strictEqual(theme.getColor('inactiveSessionView.background')?.toString(), '#08080c');
+		assert.strictEqual(theme.getColor('agentsPanel.background')?.toString(), '#101020');
+		assert.strictEqual(theme.getColor('agentsChatInput.background')?.toString(), '#181826');
+		assert.strictEqual(theme.getColor('agentsPanel.background', false)?.toString(), '#191a1b');
+	});
+
+	test('explicit Agent customizations and runtime overlays retain priority', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', { 'activeSessionView.background': '#191a1b' });
+		theme.setCustomColors({ 'editor.background': '#08080c', 'agentsPanel.background': '#223344', 'activeSessionView.background': '#112233' });
+		assert.strictEqual(theme.getColor('activeSessionView.background')?.toString(), '#112233');
+		theme.setTransientColors({ 'activeSessionView.background': Color.fromHex('#334455') });
+		assert.strictEqual(theme.getColor('activeSessionView.background')?.toString(), '#334455');
+		theme.setTransientColors(undefined);
+		theme.setCustomColors({ 'editor.background': '#08080c', 'agentsPanel.background': '#223344' });
+		assert.strictEqual(theme.getColor('activeSessionView.background')?.toString(), '#223344');
+		theme.setCustomColors({});
+		assert.strictEqual(theme.getColor('activeSessionView.background')?.toString(), '#191a1b');
+	});
+});
+
 suite('ColorThemeData - loading', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 

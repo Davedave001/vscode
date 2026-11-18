@@ -95,6 +95,28 @@ suite('Sessions - Titlebar Part', () => {
 		assert.strictEqual(part.element.style.color, 'rgb(171, 205, 239)');
 	});
 
+	test('user title colors override fixed Agent colors from 2026 Dark while explicit user Agent colors win', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {
+			'agents.background': '#121314', 'agentsPanel.foreground': '#bfbfbf',
+			'titleBar.activeBackground': '#191a1b', 'titleBar.activeForeground': '#8c8c8c',
+		});
+		theme.setCustomColors({
+			'titleBar.activeBackground': '#050508', 'titleBar.activeForeground': '#ffffff',
+			'titleBar.inactiveBackground': '#08080c', 'titleBar.inactiveForeground': '#999999',
+		});
+		const { part } = createTitlebar(ModernUIDensity.Default, new TestThemeService(theme));
+		part.updateStyles();
+		assert.strictEqual(part.element.style.backgroundColor, 'rgb(5, 5, 8)');
+		assert.strictEqual(part.element.style.color, 'rgb(255, 255, 255)');
+		Reflect.get(part, 'onBlur').call(part);
+		assert.strictEqual(part.element.style.backgroundColor, 'rgb(8, 8, 12)');
+		assert.strictEqual(part.element.style.color, 'rgb(153, 153, 153)');
+		theme.setCustomColors({ 'titleBar.inactiveBackground': '#050508', 'agents.background': '#112233', 'agentsPanel.foreground': '#ddeeff' });
+		part.updateStyles();
+		assert.strictEqual(part.element.style.backgroundColor, 'rgb(17, 34, 51)');
+		assert.strictEqual(part.element.style.color, 'rgb(221, 238, 255)');
+	});
+
 	test('uses 44px in Default and 35px in Compact at startup', () => {
 		const heights = [ModernUIDensity.Default, ModernUIDensity.Compact].map(density => {
 			const { part } = createTitlebar(density);

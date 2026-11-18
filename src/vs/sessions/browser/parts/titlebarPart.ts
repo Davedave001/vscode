@@ -17,6 +17,7 @@ import { RunOnceScheduler } from '../../../base/common/async.js';
 import { IThemeService } from '../../../platform/theme/common/themeService.js';
 import { agentsBackground, agentsPanelForeground } from '../../../workbench/contrib/sessions/common/theme.js';
 import { TITLE_BAR_ACTIVE_BACKGROUND, TITLE_BAR_INACTIVE_BACKGROUND, TITLE_BAR_ACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_FOREGROUND } from '../../../workbench/common/theme.js';
+import { ColorThemeData } from '../../../workbench/services/themes/common/colorThemeData.js';
 import { isLinux, isMacintosh, isWeb, isNative, platformLocale } from '../../../base/common/platform.js';
 import { EventType, EventHelper, append, $, addDisposableListener, prepend, getWindow, getWindowId, AnimationFrameScheduler } from '../../../base/browser/dom.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
@@ -426,14 +427,21 @@ export class TitlebarPart extends Part implements ITitlebarPart {
 		if (this.element) {
 			this.element.classList.toggle('inactive', this.isInactive);
 
-			// Standard theme tokens also apply in Agents mode unless the theme explicitly supplies Agent colors.
-			const titleBarBackground = this.theme.getColor(agentsBackground, false)?.toString()
-				?? this.getColor(this.isInactive ? TITLE_BAR_INACTIVE_BACKGROUND : TITLE_BAR_ACTIVE_BACKGROUND)
+			const backgroundId = this.isInactive ? TITLE_BAR_INACTIVE_BACKGROUND : TITLE_BAR_ACTIVE_BACKGROUND;
+			const foregroundId = this.isInactive ? TITLE_BAR_INACTIVE_FOREGROUND : TITLE_BAR_ACTIVE_FOREGROUND;
+			const customizedTheme = this.theme instanceof ColorThemeData ? this.theme : undefined;
+			// A fallback theme's Agent defaults must not mask the user's title-bar palette.
+			const titleBarBackground = customizedTheme?.getColorCustomization(agentsBackground)?.toString()
+				?? customizedTheme?.getColorCustomization(backgroundId)?.toString()
+				?? this.theme.getColor(agentsBackground, false)?.toString()
+				?? this.getColor(backgroundId)
 				?? this.getColor(agentsBackground);
 			this.element.style.backgroundColor = titleBarBackground || '';
 
-			const titleForeground = this.theme.getColor(agentsPanelForeground, false)?.toString()
-				?? this.getColor(this.isInactive ? TITLE_BAR_INACTIVE_FOREGROUND : TITLE_BAR_ACTIVE_FOREGROUND)
+			const titleForeground = customizedTheme?.getColorCustomization(agentsPanelForeground)?.toString()
+				?? customizedTheme?.getColorCustomization(foregroundId)?.toString()
+				?? this.theme.getColor(agentsPanelForeground, false)?.toString()
+				?? this.getColor(foregroundId)
 				?? this.getColor(agentsPanelForeground);
 			this.element.style.color = titleForeground || '';
 		}

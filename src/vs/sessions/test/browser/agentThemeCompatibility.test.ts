@@ -26,7 +26,11 @@ suite('Sessions - Extension theme compatibility', () => {
 		store.add(toDisposable(() => root.remove()));
 		const canvas = append(append(append(root, $('.part.sessionspart')), $('.content')), $('.session-view'));
 		const content = append(canvas, $('.session-view-content'));
-		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {});
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {
+			'agentsPanel.background': '#191a1b',
+			'activeSessionView.background': '#191a1b',
+			'inactiveSessionView.background': '#191a1b',
+		});
 		for (const palette of [
 			{ 'editor.background': '#17324d', 'editor.foreground': '#ddeeff', 'panel.background': '#442233', 'sideBar.background': '#332244' },
 			{ 'editor.background': '#fff4db', 'editor.foreground': '#202938', 'panel.background': '#dce8f4', 'sideBar.background': '#e5dcee' },

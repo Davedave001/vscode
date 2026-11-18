@@ -29,6 +29,29 @@ import { toStandardTokenType } from '../../../../editor/common/languages/support
 
 const colorRegistry = Registry.as<IColorRegistry>(ColorRegistryExtensions.ColorContribution);
 
+// Theme editors use standard workbench colors. Their user overrides must also win over
+// fixed Agent colors in a fallback theme, while explicit Agent overrides remain first.
+const agentCustomizationFallbacks: ReadonlyMap<string, readonly string[]> = new Map([
+	['agents.background', ['editor.background']],
+	['agentsPanel.background', ['panel.background']],
+	['agentsPanel.foreground', ['foreground']],
+	['agentsPanel.border', ['panel.border']],
+	['agentsCard.border', ['agentsPanel.border', 'panel.border']],
+	['agentsBottomPanel.border', ['agentsPanel.border', 'panel.border']],
+	['agentsDetail.background', ['sideBar.background']],
+	['agentsActivityBar.background', ['activityBar.background']],
+	['agentsActivityBar.border', ['activityBar.border']],
+	['agentsChatInput.background', ['input.background']],
+	['agentsChatInput.foreground', ['input.foreground']],
+	['agentsChatInput.border', ['input.border']],
+	['agentsChatInput.focusBorder', ['focusBorder']],
+	['agentsChatInput.placeholderForeground', ['input.placeholderForeground']],
+	['activeSessionView.background', ['agentsPanel.background', 'editor.background']],
+	['inactiveSessionView.background', ['agents.background', 'editor.background']],
+	['activeSessionView.foreground', ['agentsPanel.foreground', 'editor.foreground']],
+	['inactiveSessionView.foreground', ['agentsPanel.foreground', 'editor.foreground']],
+]);
+
 const tokenClassificationRegistry = getTokenClassificationRegistry();
 
 const tokenGroupToScopesMap = {
@@ -159,6 +182,17 @@ export class ColorThemeData implements IWorkbenchColorTheme {
 			return customColor;
 		}
 		if (customColor === undefined) { /* !== DEFAULT_COLOR_CONFIG_VALUE */
+			if (useDefault !== false) {
+				const fallbacks = agentCustomizationFallbacks.get(colorId);
+				if (fallbacks) {
+					for (const fallback of fallbacks) {
+						const customized = this.customColorMap[fallback];
+						if (customized instanceof Color) {
+							return customized;
+						}
+					}
+				}
+			}
 			const color = this.colorMap[colorId];
 			if (color !== undefined) {
 				return color;
