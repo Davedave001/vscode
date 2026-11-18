@@ -24,6 +24,7 @@ const commonResourcePatterns = [
 
 	// Images referenced from CSS or loaded dynamically
 	'vs/workbench/browser/media/code-icon.svg',
+	'vs/workbench/browser/media/signal-c-mark.png',
 	'vs/workbench/browser/parts/editor/media/letterpress*.svg',
 	'vs/workbench/contrib/chat/browser/widget/media/chatPet/**/*.{gif,png}',
 	'vs/sessions/contrib/chat/browser/media/*.svg',

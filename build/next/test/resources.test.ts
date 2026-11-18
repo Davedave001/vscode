@@ -30,6 +30,21 @@ globalThis.answer = calculateAnswer(41);
 `;
 
 suite('production resources', () => {
+	test('ships the transparent Signal-C aquarium logo unchanged in every UI target', async t => {
+		const logo = 'vs/workbench/browser/media/signal-c-mark.png';
+		const bytes = await fs.promises.readFile(path.join(repoRoot, 'src', logo));
+		for (const target of targets) {
+			const inventory = await getResourcePaths(path.join(repoRoot, 'src'), target);
+			assert.strictEqual(inventory.includes(logo), target !== 'server', `${target} logo inventory`);
+			if (target !== 'server') {
+				const { srcDir, outDir } = await createFixture(t);
+				await writeFile(srcDir, logo, bytes);
+				await copyResources(srcDir, outDir, target);
+				assert.deepStrictEqual(await fs.promises.readFile(path.join(outDir, logo)), bytes);
+			}
+		}
+	});
+
 	test('includes animated and reduced-motion koi backgrounds in every UI target', async () => {
 		const directory = 'vs/sessions/services/chatBackground/browser/media';
 		const images = ['koi-dark-static.webp', 'koi-dark.webp', 'koi-light-static.webp', 'koi-light.webp'].map(file => `${directory}/${file}`);
