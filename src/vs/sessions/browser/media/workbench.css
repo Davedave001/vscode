@@ -232,7 +232,7 @@
 }
 
 .agent-sessions-workbench .part.auxiliarybar > .content .pane-body {
-	background-color: var(--vscode-agentsPanel-background);
+	background-color: var(--part-background, var(--vscode-sideBar-background));
 }
 
 .agent-sessions-workbench .part.panel {

@@ -40,7 +40,7 @@ suite('Sessions - Extension theme compatibility', () => {
 	});
 
 	test('keeps sidebar, menu and picker surfaces on their theme colors across palette changes', () => {
-		const root = append(mainWindow.document.body, $('.monaco-workbench.agent-sessions-workbench.vs-dark'));
+		const root = append(mainWindow.document.body, $('.monaco-workbench.agent-sessions-workbench.vs-dark.dock-detail-panel'));
 		const style = append(mainWindow.document.head, $('style'));
 		store.add(toDisposable(() => { root.remove(); style.remove(); }));
 		const surfaces = [
@@ -48,12 +48,13 @@ suite('Sessions - Extension theme compatibility', () => {
 			append(root, $('.action-widget')),
 			append(root, $('.context-view.monaco-menu-container')),
 			append(root, $('.quick-input-widget')),
+			append(append(append(root, $('.part.auxiliarybar')), $('.content')), $('.pane-body')),
 		];
 		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {});
 		const read = () => surfaces.map(element => getWindow(element).getComputedStyle(element).backgroundColor);
 		for (const [colors, expected] of [
-			[{ 'editor.background': '#1a1b26', 'sideBar.background': '#16161e', 'menu.background': '#202132', 'quickInput.background': '#242538' }, ['rgb(22, 22, 30)', 'rgb(32, 33, 50)', 'rgb(32, 33, 50)', 'rgb(36, 37, 56)']],
-			[{ 'editor.background': '#fafafa', 'sideBar.background': '#eeeeff', 'menu.background': '#ddddff', 'quickInput.background': '#ccccff' }, ['rgb(238, 238, 255)', 'rgb(221, 221, 255)', 'rgb(221, 221, 255)', 'rgb(204, 204, 255)']],
+			[{ 'editor.background': '#1a1b26', 'panel.background': '#1a1b26', 'sideBar.background': '#16161e', 'menu.background': '#202132', 'quickInput.background': '#242538' }, ['rgb(22, 22, 30)', 'rgb(32, 33, 50)', 'rgb(32, 33, 50)', 'rgb(36, 37, 56)', 'rgb(22, 22, 30)']],
+			[{ 'editor.background': '#fafafa', 'panel.background': '#fafafa', 'sideBar.background': '#eeeeff', 'menu.background': '#ddddff', 'quickInput.background': '#ccccff' }, ['rgb(238, 238, 255)', 'rgb(221, 221, 255)', 'rgb(221, 221, 255)', 'rgb(204, 204, 255)', 'rgb(238, 238, 255)']],
 		] as const) {
 			theme.setCustomColors(colors);
 			style.textContent = generateColorThemeCSS(theme, '.agent-sessions-workbench').code;
