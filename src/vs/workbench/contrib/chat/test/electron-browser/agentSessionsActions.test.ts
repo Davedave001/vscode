@@ -80,6 +80,7 @@ suite('Agents window launch enablement', () => {
 		instantiationService.stub(IStorageService, storageService);
 		instantiationService.stub(IContextKeyService, contextKeyService);
 		instantiationService.stub(IProductService, upcastPartial<IProductService>({}));
+		instantiationService.stub(IConfigurationService, new TestConfigurationService());
 		instantiationService.stub(IActionViewItemService, upcastPartial<IActionViewItemService>({ register: () => Disposable.None }));
 		disposables.add(instantiationService.createInstance(OpenWorkspaceInAgentsContribution));
 		return { storageService, contextKeyService };

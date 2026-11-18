@@ -29,6 +29,7 @@ const { values: flags } = parseArgs({
 		keyboard: { type: 'boolean' },
 		'app-connections': { type: 'boolean' },
 		themes: { type: 'boolean' },
+		'originating-editor': { type: 'boolean' },
 		optimized: { type: 'boolean' },
 		'optimized-build': { type: 'string' },
 	},
@@ -61,7 +62,9 @@ const protocol = workspaceProtocol || flags.protocol;
 const launchToken = 'synthetic-test-launch-token';
 const conversation = protocol || flags.conversation;
 const emptyWorkspace = conversation || flags['empty-workspace'];
+const originatingEditor = flags['originating-editor'];
 assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
+assert.ok(!originatingEditor || !emptyWorkspace, '--originating-editor starts in a saved editor workspace');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
 const fixtureHome = join(run, 'home');
@@ -96,6 +99,8 @@ const report = {
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
 	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
 	recentWorkspaceProtocolVerified: false,
+	originatingEditorVerified: false,
+	closedOriginFallbackVerified: false,
 	launchEnvironmentExcludedFromTrace: false,
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
@@ -185,13 +190,23 @@ try {
 		'--agent-cli-fallback-dir', cliFallback,
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
-		...(protocol || keyboard ? ['--log', 'trace'] : [])];
+		...(protocol || keyboard || originatingEditor ? ['--log', 'trace'] : [])];
+	// A second instance must omit extensionTestsPath to forward to the isolated app.
+	const forwardingArgs = commonArgs.filter(arg => arg !== '--extensionTestsPath' && arg !== runner);
+	const forwardToRunningApp = async (args: string[]) => {
+		await promisify(execFile)(executable, [...applicationArgs, ...forwardingArgs, ...args], { env, windowsHide: true, timeout: 45000 }).catch(async (error: NodeJS.ErrnoException & { signal?: string; stdout?: string; stderr?: string }) => {
+			await writeFile(join(run, 'launch-helper-error.json'), JSON.stringify({ code: error.code, signal: error.signal, stdout: error.stdout?.replace(/https?:\/\/\S+/g, '[URL]'), stderr: error.stderr?.replace(/https?:\/\/\S+/g, '[URL]') }, null, 2));
+			throw new Error('The isolated launch helper did not exit successfully');
+		});
+	};
 	app = await _electron.launch({ executablePath: executable, args: [...applicationArgs, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
 	const launched = app;
 	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
-	report.executable = await realpath(await launched.evaluate(() => process.execPath));
+	await (await launched.firstWindow({ timeout: 45000 })).waitForLoadState('domcontentloaded');
+	const launchContext = await launched.evaluate(({ app }) => ({ executable: process.execPath, portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') }));
+	report.executable = await realpath(launchContext.executable);
 	assert.equal(report.executable, await realpath(executable), 'The fixture must run the selected executable');
-	assert.deepEqual(await launched.evaluate(({ app }) => ({ portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') })), { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
+	assert.deepEqual({ portable: launchContext.portable, profile: launchContext.profile }, { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
 	const capture = async (page: Page, name: string, target = launched) => {
 		const window = await target.browserWindow(page);
 		// A first capture wakes the hidden compositor, which may otherwise return its previous frame.
@@ -481,14 +496,6 @@ try {
 			try { await window.evaluate(nativeWindow => nativeWindow.close()); } finally { await window.dispose(); }
 			await closed;
 			// Direct CLI delivery exercises this fixture's URL receiver without OS protocol registration.
-			// A second instance must not carry extensionTestsPath: the launcher rejects test-instance forwarding.
-			const forwardingArgs = commonArgs.filter(arg => arg !== '--extensionTestsPath' && arg !== runner);
-			const forwardToRunningApp = async (args: string[]) => {
-				await promisify(execFile)(executable, [...applicationArgs, ...forwardingArgs, ...args], { env, windowsHide: true, timeout: 45000 }).catch(async (error: NodeJS.ErrnoException & { signal?: string; stdout?: string; stderr?: string }) => {
-					await writeFile(join(run, 'protocol-helper-error.json'), JSON.stringify({ code: error.code, signal: error.signal, stdout: error.stdout?.replace(/https?:\/\/\S+/g, '[URL]'), stderr: error.stderr?.replace(/https?:\/\/\S+/g, '[URL]') }, null, 2));
-					throw new Error('The isolated protocol helper did not exit successfully');
-				});
-			};
 			deliverProtocol = uri => forwardToRunningApp(['--open-url', '--', uri]);
 			[ide] = await Promise.all([
 				launched.waitForEvent('window', { timeout: 45000 }),
@@ -645,8 +652,38 @@ try {
 		]);
 		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
 		await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
+		const alternateWorkspace = join(run, 'Alternate.code-workspace');
+		let alternate: Page | undefined;
+		if (originatingEditor) {
+			stage = 'opening a second IDE with the same folders';
+			await writeFile(alternateWorkspace, JSON.stringify({ folders: folders.map(path => ({ path })) }));
+			[alternate] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', alternateWorkspace]),
+			]);
+			await alternate.getByRole('tree').getByText('two', { exact: true }).waitFor();
+		}
 		const expectedIds = await checkWindows('Agents ready');
-		assert.equal(expectedIds.length, 2, 'The fixture should contain only its editor and Agents windows');
+		assert.equal(expectedIds.length, alternate ? 3 : 2, 'Only the fixture windows should be open');
+		const workspaceRoutes = async () => {
+			const logs = join(profile, 'logs');
+			const directories = (await readdir(logs, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort();
+			const mainLogs = await Promise.all(directories.map(directory => readFile(join(logs, directory, 'main.log'), 'utf8').catch(() => '')));
+			return mainLogs.flatMap(log => [...log.matchAll(/windowsManager#open pathsToOpen (\[[^\r\n]*\])/g)]);
+		};
+		const expectRoutedWorkspace = async (expectedWorkspace: string, switchToEditor: () => Promise<void>) => {
+			const count = (await workspaceRoutes()).length;
+			await switchToEditor();
+			const until = Date.now() + 10000;
+			let route = (await workspaceRoutes())[count];
+			while (!route && Date.now() < until) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+				route = (await workspaceRoutes())[count];
+			}
+			assert.ok(route, 'The desktop main process must record the selected workspace');
+			const paths = JSON.parse(route[1]) as { workspace?: { configPath?: { path: string } } }[];
+			assert.deepEqual(paths.map(path => path.workspace?.configPath?.path.toLowerCase()), [decodeURIComponent(pathToFileURL(expectedWorkspace).pathname).toLowerCase()]);
+		};
 		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
 		const draft = 'Signal-C native draft preserved across mode switches';
 		await input.click(); await agents.keyboard.type(draft);
@@ -683,7 +720,15 @@ try {
 		}
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `return to IDE ${roundTrip}`;
-			await activateSwitch(agents, roundTrip, input);
+			if (alternate) {
+				const window = await launched.browserWindow(alternate);
+				// Focus the alternate editor for routing purposes while keeping the fixture hidden.
+				try { await window.evaluate(nativeWindow => { nativeWindow.emit('focus'); }); } finally { await window.dispose(); }
+				await expectRoutedWorkspace(workspace, () => activateSwitch(agents, roundTrip, input));
+				report.originatingEditorVerified = true;
+			} else {
+				await activateSwitch(agents, roundTrip, input);
+			}
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'The handoff must not open another editor window');
 			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
@@ -697,9 +742,20 @@ try {
 			assert.deepEqual(await checkWindows(stage), expectedIds);
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The original Agents draft must remain');
 			report.agentsDraftRetained = true;
-			console.log(`Native round trip ${roundTrip} retained both window IDs, the dirty buffer, and the Agents draft`);
+			console.log(`Native round trip ${roundTrip} retained the window IDs, the dirty buffer, and the Agents draft`);
 		}
 		await capture(agents, 'agents-returned.png');
+		if (alternate) {
+			stage = 'return after the originating editor closed';
+			const closed = ide.waitForEvent('close', { timeout: 30000 });
+			const window = await launched.browserWindow(ide);
+			try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
+			await closed;
+			await expectRoutedWorkspace(alternateWorkspace, () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click());
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.equal((await checkWindows(stage)).length, 2);
+			report.closedOriginFallbackVerified = true;
+		}
 	}
 	if (keyboard) { assert.equal(report.keyboardActivations.length, 4, 'The native fixture must exercise both modes by shortcut and focused control'); }
 	if (protocol) {
