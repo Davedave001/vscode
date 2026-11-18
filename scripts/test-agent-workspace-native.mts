@@ -158,6 +158,8 @@ try {
 	Object.assign(env, {
 		// Portable mode also confines argv.json and disables OS protocol registration.
 		VSCODE_PORTABLE: portable,
+		// Keep Chromium diagnostics with the fixture when testing a staged release.
+		ELECTRON_LOG_FILE: join(run, 'chromium.log'),
 		// Workspace-less chat scratch directories use os.homedir(), independently of SDK storage.
 		USERPROFILE: fixtureHome, HOME: fixtureHome, APPDATA: join(fixtureHome, 'AppData', 'Roaming'), LOCALAPPDATA: join(fixtureHome, 'AppData', 'Local'),
 		CODEX_HOME: join(run, 'codex'), CLAUDE_CONFIG_DIR: join(run, 'claude'), COPILOT_HOME: join(run, 'copilot'), XDG_STATE_HOME: join(run, 'state'),
@@ -662,6 +664,11 @@ try {
 				forwardToRunningApp(['--new-window', alternateWorkspace]),
 			]);
 			await alternate.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			if (themes) {
+				await alternate.locator('body').click({ position: { x: 600, y: 400 } });
+				await alternate.keyboard.press('Control+n');
+				await alternate.locator('.part.editor .monaco-editor-background').first().waitFor();
+			}
 		}
 		const expectedIds = await checkWindows('Agents ready');
 		assert.equal(expectedIds.length, alternate ? 3 : 2, 'Only the fixture windows should be open');
