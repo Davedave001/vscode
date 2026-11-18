@@ -285,12 +285,16 @@ try {
 		const cdp = await page.context().newCDPSession(page);
 		try {
 			await page.emulateMedia({ forcedColors: 'active' });
-			const cue = await control.evaluate(element => ({
-				forcedColors: element.ownerDocument.defaultView!.matchMedia('(forced-colors: active)').matches,
-				decorations: [...element.querySelectorAll('.workspace-mode-segment')].map(segment => getComputedStyle(segment).textDecorationLine),
-			}));
-			assert.ok(cue.forcedColors);
-			assert.deepEqual(cue.decorations, mode === 'Agents' ? ['underline', 'none'] : ['none', 'underline'],
+			await control.waitFor({ state: 'visible' });
+			const cue = await page.waitForFunction(() => {
+				const element = document.querySelector('.part.titlebar .workspace-mode-switch');
+				if (!element?.getBoundingClientRect().width || !matchMedia('(forced-colors: active)').matches) { return false; }
+				const decorations = [...element.querySelectorAll('.workspace-mode-segment')].map(segment => getComputedStyle(segment).textDecorationLine);
+				return decorations.length === 2 && decorations.every(Boolean) ? decorations : false;
+			}, undefined, { timeout: 15000 });
+			const decorations = await cue.jsonValue() as string[];
+			await cue.dispose();
+			assert.deepEqual(decorations, mode === 'Agents' ? ['underline', 'none'] : ['none', 'underline'],
 				'Only the active mode needs a visible, color-independent indicator');
 
 			const { root } = await cdp.send('DOM.getDocument');
@@ -304,7 +308,7 @@ try {
 			const description = String(node.description?.value);
 			assert.ok(description.startsWith(`${mode} is active. Switch to ${mode === 'Agents' ? 'IDE' : 'Agents'}`), description);
 			assert.match(description, /Ctrl\+K Ctrl\+Shift\+A/);
-			report.switchAccessibilityChecks.push({ mode, checked, description, decorations: cue.decorations });
+			report.switchAccessibilityChecks.push({ mode, checked, description, decorations });
 			await capture(page, `switch-${mode.toLowerCase()}-forced-colors.png`);
 		} finally {
 			await page.emulateMedia({ forcedColors: null });
