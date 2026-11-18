@@ -285,6 +285,18 @@ try {
 		assert.ok((await datadogReview.innerText()).includes('https://mcp.datadoghq.eu/v1/mcp'));
 		await page.keyboard.press('Escape');
 		await datadogReview.waitFor({ state: 'hidden' });
+		assert.ok(await connectDatadog.evaluate(element => element.ownerDocument.activeElement === element), 'Cancelling the setup review must return focus to its gallery card');
+		await gallery.locator('.customization-discovery-search').click({ position: { x: 80, y: 12 } });
+		await page.keyboard.press('Control+a');
+		await page.keyboard.type('Gmail');
+		const galleryGmail = gallery.getByRole('button', { name: 'Connect Gmail', exact: true });
+		await galleryGmail.press('Enter');
+		await googleReview.waitFor();
+		await googleReview.getByRole('button', { name: 'Connect with OAuth', exact: true }).press('Enter');
+		await page.getByText('Gmail OAuth App Client ID', { exact: true }).waitFor();
+		await input.press('Escape');
+		await page.locator('.quick-input-widget').waitFor({ state: 'hidden' });
+		assert.ok(await galleryGmail.evaluate(element => element.ownerDocument.activeElement === element), 'Cancelling client registration must return focus to its gallery card');
 		report.browseAppConnectionsVerified = true;
 		await page.keyboard.press('Control+w');
 		await editor.waitFor({ state: 'hidden' });
