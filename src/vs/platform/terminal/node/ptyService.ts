@@ -84,7 +84,7 @@ export function traceRpc(_target: Object, key: string, descriptor: PropertyDescr
 			throw e;
 		}
 		if (this.traceRpcArgs.logService.getLevel() === LogLevel.Trace) {
-			this.traceRpcArgs.logService.trace(`[RPC Response] PtyService#${fn.name}`, result);
+			this.traceRpcArgs.logService.trace(`[RPC Response] PtyService#${fn.name}`, key === 'getEnvironment' ? '[environment omitted]' : result);
 		}
 		return result;
 	};

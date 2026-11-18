@@ -936,7 +936,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		if (openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && isCommandLineOrAPICall && pathsToOpen.length === 1) {
 			const folder = pathsToOpen[0];
 			if (isSingleFolderWorkspacePathToOpen(folder) && !findWindowOnWorkspaceOrFolder(this.getWindows(), folder.workspace.uri)) {
-				const workspace = await this.doGetOpenWorkspaceMatchingFolders(folder.remoteAuthority, [folder], true);
+				const workspace = await this.doGetOpenWorkspaceMatchingFolders(folder.remoteAuthority, [folder], { allowAdditionalFolders: true, preferRecentlyFocused: true });
 				if (workspace) {
 					pathsToOpen = [{ workspace, remoteAuthority: folder.remoteAuthority }];
 				}
@@ -954,7 +954,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 				if (foldersToOpen.every(folderToOpen => isEqualAuthority(folderToOpen.remoteAuthority, remoteAuthority))) {
 					let workspace: IWorkspaceIdentifier | undefined;
 
-					const workspaceMatchingFolders = await this.doGetWorkspaceMatchingFolders(remoteAuthority, foldersToOpen);
+					const workspaceMatchingFolders = await this.doGetWorkspaceMatchingFolders(remoteAuthority, foldersToOpen, openConfig.reuseWorkspaceContainingFolder);
 					if (workspaceMatchingFolders) {
 						workspace = workspaceMatchingFolders;
 					} else {
@@ -1165,10 +1165,12 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return restoreWindows;
 	}
 
-	private async doGetOpenWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], allowAdditionalFolders = false): Promise<IWorkspaceIdentifier | undefined> {
-		const windows = this.getWindows();
-		const candidates = allowAdditionalFolders ? [...windows].sort((a, b) => b.lastFocusTime - a.lastFocusTime) : windows;
-		const match = await findWindowOnWorkspaceFolders(candidates, folders.map(folder => folder.workspace.uri), remoteAuthority, workspace => this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath), allowAdditionalFolders);
+	private async doGetOpenWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], options: { allowAdditionalFolders?: boolean; preferRecentlyFocused?: boolean }): Promise<IWorkspaceIdentifier | undefined> {
+		const candidates = this.getWindows();
+		if (options.preferRecentlyFocused) {
+			candidates.sort((a, b) => b.lastFocusTime - a.lastFocusTime);
+		}
+		const match = await findWindowOnWorkspaceFolders(candidates, folders.map(folder => folder.workspace.uri), remoteAuthority, workspace => this.workspacesManagementMainService.resolveLocalWorkspace(workspace.configPath), options.allowAdditionalFolders);
 		// Preserve the validated identity across this await, rather than substituting a later navigation.
 		const current = match?.window.openedWorkspace;
 		if (match && this.getWindows().includes(match.window) && isWorkspaceIdentifier(current)
@@ -1179,8 +1181,8 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return undefined;
 	}
 
-	private async doGetWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspaceIdentifier | undefined> {
-		const openWorkspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders);
+	private async doGetWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], preferRecentlyFocused?: boolean): Promise<IWorkspaceIdentifier | undefined> {
+		const openWorkspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { preferRecentlyFocused });
 		if (openWorkspace) {
 			return openWorkspace;
 		}

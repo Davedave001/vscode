@@ -50,7 +50,7 @@ export class LaunchMainService implements ILaunchMainService {
 	) { }
 
 	async start(args: NativeParsedArgs, userEnv: IProcessEnvironment): Promise<void> {
-		this.logService.trace('Received data from other instance: ', args, userEnv);
+		this.logService.trace('Received a launch request from another instance');
 
 		// macOS: Electron > 7.x changed its behaviour to not
 		// bring the application to the foreground when a window

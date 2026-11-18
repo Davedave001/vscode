@@ -215,7 +215,7 @@ export class SessionsMain extends Disposable {
 			logService.info('workbench#open()'); // marking workbench open helps to diagnose flaky integration/smoke tests
 		}
 		if (logService.getLevel() === LogLevel.Trace) {
-			logService.trace('workbench#open(): with configuration', safeStringify({ ...this.configuration, nls: undefined /* exclude large property */ }));
+			logService.trace('workbench#open(): with configuration', safeStringify({ ...this.configuration, nls: undefined, userEnv: undefined }));
 		}
 
 		// Default Account
