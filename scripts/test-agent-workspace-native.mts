@@ -192,6 +192,7 @@ try {
 		'--agent-codex-home', join(run, 'codex'), '--agent-claude-config-dir', join(run, 'claude'),
 		'--agent-cli-fallback-dir', cliFallback,
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
+		'--disable-crash-reporter',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
 		...(protocol || keyboard || originatingEditor ? ['--log', 'trace'] : [])];
 	// A second instance must omit extensionTestsPath to forward to the isolated app.
