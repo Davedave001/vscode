@@ -30,6 +30,9 @@
 .monaco-workbench .workspace-mode-segment.active-mode {
 	background: var(--vscode-button-secondaryBackground);
 	color: var(--vscode-button-secondaryForeground);
+	/* Keep the selection visible when system colors replace the fill. */
+	text-decoration: underline;
+	text-underline-offset: 2px;
 }
 
 .monaco-workbench .workspace-mode-switch:hover:not(.disabled) {

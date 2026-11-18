@@ -37,8 +37,13 @@ suite('Workspace Mode Switch', () => {
 			await clicked;
 			assert.deepStrictEqual({
 				checked: control.getAttribute('aria-checked'), label: control.getAttribute('aria-label'),
+				description: control.getAttribute('aria-description'),
 				active: control.querySelector('.active-mode')?.textContent, focused: mainWindow.document.activeElement === control, runs,
-			}, { checked: String(mode === 'ide'), label: 'IDE mode', active: mode === 'ide' ? 'IDE' : 'Agents', focused: true, runs: 1 });
+			}, {
+				checked: String(mode === 'ide'), label: 'IDE mode',
+				description: mode === 'ide' ? 'IDE is active. Switch to Agents.' : 'Agents is active. Switch to IDE with this session\'s workspace.',
+				active: mode === 'ide' ? 'IDE' : 'Agents', focused: true, runs: 1,
+			});
 			for (const [key, keyCode] of [['Enter', 13], [' ', 32]] as const) {
 				const completed = Event.toPromise(bar.onDidRun);
 				for (const type of ['keydown', 'keyup']) {
@@ -159,9 +164,9 @@ suite('Workspace Mode Switch', () => {
 		assert.ok(element.getAttribute('aria-description')?.includes('Ctrl+K Ctrl+Shift+A'));
 		shortcut = 'F9';
 		changed.fire();
-		assert.strictEqual(element.getAttribute('aria-description'), 'Switch to IDE with This Session\'s Workspace (F9)');
+		assert.strictEqual(element.getAttribute('aria-description'), 'Agents is active. Switch to IDE with this session\'s workspace. (F9)');
 		shortcut = undefined;
 		changed.fire();
-		assert.strictEqual(element.getAttribute('aria-description'), 'Switch to IDE with This Session\'s Workspace');
+		assert.strictEqual(element.getAttribute('aria-description'), 'Agents is active. Switch to IDE with this session\'s workspace.');
 	});
 });

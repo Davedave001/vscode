@@ -56,8 +56,8 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 		container.setAttribute('aria-label', localize('workspaceModeSwitch.label', "IDE mode"));
 		container.setAttribute('aria-checked', String(this.mode === 'ide'));
 		const label = this.mode === 'agents'
-			? localize('workspaceModeSwitch.toIDE', "Switch to IDE with This Session's Workspace")
-			: localize('workspaceModeSwitch.toAgents', "Return to Agents");
+			? localize('workspaceModeSwitch.toIDE', "Agents is active. Switch to IDE with this session's workspace.")
+			: localize('workspaceModeSwitch.toAgents', "IDE is active. Switch to Agents.");
 		const hover = this._register(this.hoverService.setupManagedHover(this.options.hoverDelegate ?? getDefaultHoverDelegate('element'), container, label));
 		const updateShortcut = () => {
 			const description = this.keybindingService.appendKeybinding(label, this.commandId);

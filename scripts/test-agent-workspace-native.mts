@@ -29,6 +29,7 @@ const { values: flags } = parseArgs({
 		keyboard: { type: 'boolean' },
 		'app-connections': { type: 'boolean' },
 		themes: { type: 'boolean' },
+		'switch-accessibility': { type: 'boolean' },
 		'originating-editor': { type: 'boolean' },
 		optimized: { type: 'boolean' },
 		'optimized-build': { type: 'string' },
@@ -38,6 +39,7 @@ const optimized = flags.optimized ?? false;
 const optimizedBuild = flags['optimized-build'];
 assert.ok(optimizedBuild === undefined || (optimized && optimizedBuild.trim()), 'Use --optimized --optimized-build <folder> to select a staged desktop build.');
 const { keyboard, 'app-connections': appConnections, themes } = flags;
+const switchAccessibility = flags['switch-accessibility'];
 const themePalettes = {
 	dark: {
 		name: 'Dark 2026', themeClass: 'vscode-theme-defaults-themes-2026-dark-json',
@@ -65,6 +67,7 @@ const emptyWorkspace = conversation || flags['empty-workspace'];
 const originatingEditor = flags['originating-editor'];
 const folderlessOrigin = originatingEditor && emptyWorkspace;
 assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
+assert.ok(!switchAccessibility || !emptyWorkspace, '--switch-accessibility checks both title bars in the workspace round trip');
 assert.ok(!folderlessOrigin || (conversation && !protocol), 'Use --originating-editor with --conversation to check folderless editor routing');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
@@ -117,6 +120,7 @@ const report = {
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 	themeChecks: [] as { stage: string; mode: string; theme: string; canvas: string[]; titlebar: string }[],
 	switchSettingChangedWithoutReload: false,
+	switchAccessibilityChecks: [] as { mode: string; checked: string; description: string; decorations: string[] }[],
 };
 try {
 	const settings = {
@@ -275,6 +279,37 @@ try {
 			for (const page of launched.windows()) { await checkTheme(page, label); }
 		}
 		return windows.map(window => window.id).sort((a, b) => a - b);
+	};
+	const checkSwitchAccessibility = async (page: Page, mode: 'Agents' | 'IDE') => {
+		const control = page.getByRole('switch', { name: 'IDE mode', exact: true });
+		const cdp = await page.context().newCDPSession(page);
+		try {
+			await page.emulateMedia({ forcedColors: 'active' });
+			const cue = await control.evaluate(element => ({
+				forcedColors: element.ownerDocument.defaultView!.matchMedia('(forced-colors: active)').matches,
+				decorations: [...element.querySelectorAll('.workspace-mode-segment')].map(segment => getComputedStyle(segment).textDecorationLine),
+			}));
+			assert.ok(cue.forcedColors);
+			assert.deepEqual(cue.decorations, mode === 'Agents' ? ['underline', 'none'] : ['none', 'underline'],
+				'Only the active mode needs a visible, color-independent indicator');
+
+			const { root } = await cdp.send('DOM.getDocument');
+			const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: '.part.titlebar .workspace-mode-switch' });
+			const { nodes } = await cdp.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+			const node = nodes[0];
+			assert.equal(node.role?.value, 'switch');
+			assert.equal(node.name?.value, 'IDE mode');
+			const checked = String(node.properties?.find(property => property.name === 'checked')?.value.value);
+			assert.equal(checked, String(mode === 'IDE'));
+			const description = String(node.description?.value);
+			assert.ok(description.startsWith(`${mode} is active. Switch to ${mode === 'Agents' ? 'IDE' : 'Agents'}`), description);
+			assert.match(description, /Ctrl\+K Ctrl\+Shift\+A/);
+			report.switchAccessibilityChecks.push({ mode, checked, description, decorations: cue.decorations });
+			await capture(page, `switch-${mode.toLowerCase()}-forced-colors.png`);
+		} finally {
+			await page.emulateMedia({ forcedColors: null });
+			await cdp.detach();
+		}
 	};
 	const simulateNativeFocus = async (page: Page) => {
 		const window = await launched.browserWindow(page);
@@ -715,6 +750,11 @@ try {
 		]);
 		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
 		await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
+		if (switchAccessibility) {
+			stage = 'checking both mode switches in forced colors';
+			await checkSwitchAccessibility(ide, 'IDE');
+			await checkSwitchAccessibility(agents, 'Agents');
+		}
 		const alternateWorkspace = join(run, 'Alternate.code-workspace');
 		let alternate: Page | undefined;
 		if (originatingEditor) {
