@@ -72,25 +72,35 @@ export function findWindowOnWorkspaceOrFolder(windows: ICodeWindow[], folderOrWo
 	return undefined;
 }
 
-/** Finds a live workspace on the requested folders/host, optionally allowing other workspace folders. */
+/** Finds a live editor on the requested host. Exact folder sets take priority over containing workspaces. */
 export async function findWindowOnWorkspaceFolders(windows: readonly ICodeWindow[], folders: readonly URI[], remoteAuthority: string | undefined, localWorkspaceResolver: (workspace: IWorkspaceIdentifier) => Promise<IResolvedWorkspace | undefined>, allowAdditionalFolders = false): Promise<IWorkspaceWindowMatch | undefined> {
+	const containingMatches: IWorkspaceWindowMatch[] = [];
 	for (const window of windows) {
 		const workspace = window.openedWorkspace;
-		if (!isWorkspaceIdentifier(workspace) || window.isExtensionDevelopmentHost || window.remoteAuthority !== remoteAuthority) {
+		if (!isWorkspaceIdentifier(workspace) || window.config?.isSessionsWindow || window.isExtensionDevelopmentHost || window.remoteAuthority !== remoteAuthority) {
 			continue;
 		}
+		const match: IWorkspaceWindowMatch = { window, workspace: { id: workspace.id, configPath: workspace.configPath } };
 		const resolved = await localWorkspaceResolver(workspace);
 		if (!resolved || !workspaceMatchesFolders(resolved, folders, remoteAuthority, allowAdditionalFolders)) {
 			continue;
 		}
-		// Resolving the file can outlive navigation to another workspace or remote host.
-		const current = window.openedWorkspace;
-		if (!isWorkspaceIdentifier(current) || current.id !== workspace.id || !extUriBiasedIgnorePathCase.isEqual(current.configPath, workspace.configPath) || window.remoteAuthority !== remoteAuthority || window.isExtensionDevelopmentHost) {
-			continue;
+		if (resolved.folders.length === folders.length) {
+			if (isCurrentEditorWorkspace(match, remoteAuthority)) {
+				return match;
+			}
+		} else {
+			containingMatches.push(match);
 		}
-		return { window, workspace: { id: current.id, configPath: current.configPath } };
 	}
-	return undefined;
+	// A containing window may have navigated while the remaining workspace files were read.
+	return containingMatches.find(match => isCurrentEditorWorkspace(match, remoteAuthority));
+}
+
+function isCurrentEditorWorkspace({ window, workspace }: IWorkspaceWindowMatch, remoteAuthority: string | undefined): boolean {
+	const current = window.openedWorkspace;
+	return isWorkspaceIdentifier(current) && current.id === workspace.id && extUriBiasedIgnorePathCase.isEqual(current.configPath, workspace.configPath)
+		&& window.remoteAuthority === remoteAuthority && !window.config?.isSessionsWindow && !window.isExtensionDevelopmentHost;
 }
 
 /** Compares folder/host identity; containing-workspace reuse requires an explicit handoff preference. */

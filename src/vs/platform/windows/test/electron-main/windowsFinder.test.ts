@@ -163,6 +163,41 @@ suite('WindowsFinder', () => {
 		].map(match => match?.window), [undefined, workspaceWindow, undefined, undefined, undefined]);
 	});
 
+	test('Prefers an exact editor workspace over a newer editor that also contains unrelated roots', async () => {
+		const exact = createTestCodeWindow({ lastFocusTime: 1, openedWorkspace: testWorkspace });
+		const widerWorkspace = { id: 'wider', configPath: URI.file('/wider.code-workspace') };
+		const wider = createTestCodeWindow({ lastFocusTime: 2, openedWorkspace: widerWorkspace });
+		const requested = [testWorkspaceFolders[0].uri];
+		const resolve = async (workspace: IWorkspaceIdentifier) => ({
+			...workspace,
+			folders: workspace === testWorkspace ? [testWorkspaceFolders[0]] : testWorkspaceFolders,
+		});
+		assert.strictEqual((await findWindowOnWorkspaceFolders([wider, exact], requested, undefined, resolve, true))?.window, exact);
+		assert.strictEqual((await findWindowOnWorkspaceFolders([wider], requested, undefined, resolve, true))?.window, wider);
+	});
+
+	test('A containing editor must still match its workspace after other candidates resolve', async () => {
+		let currentWorkspace = testWorkspace;
+		const stale = upcastPartial<ICodeWindow>({ get openedWorkspace() { return currentWorkspace; } });
+		const widerWorkspace = { id: 'wider', configPath: URI.file('/wider.code-workspace') };
+		const wider = createTestCodeWindow({ lastFocusTime: 1, openedWorkspace: widerWorkspace });
+		const resolve = async (workspace: IWorkspaceIdentifier) => {
+			if (workspace === widerWorkspace) {
+				currentWorkspace = { id: 'unrelated', configPath: URI.file('/unrelated.code-workspace') };
+			}
+			return { ...workspace, folders: testWorkspaceFolders };
+		};
+		const match = await findWindowOnWorkspaceFolders([stale, wider], [testWorkspaceFolders[0].uri], undefined, resolve, true);
+		assert.strictEqual(match?.window, wider);
+	});
+
+	test('Ignores the Agents window when looking for a matching editor', async () => {
+		const agents = createTestCodeWindow({ lastFocusTime: 2, openedWorkspace: testWorkspace, isSessionsWindow: true });
+		const editor = createTestCodeWindow({ lastFocusTime: 1, openedWorkspace: testWorkspace, isSessionsWindow: false });
+		const requested = testWorkspaceFolders.map(folder => folder.uri);
+		assert.strictEqual((await findWindowOnWorkspaceFolders([agents, editor], requested, undefined, localWorkspaceResolver))?.window, editor);
+	});
+
 	test('Returns the validated workspace identity instead of rereading a later window navigation', async () => {
 		let currentWorkspace = testWorkspace;
 		const window = upcastPartial<ICodeWindow>({

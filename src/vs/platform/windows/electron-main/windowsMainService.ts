@@ -1173,7 +1173,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		const current = match?.window.openedWorkspace;
 		if (match && this.getWindows().includes(match.window) && isWorkspaceIdentifier(current)
 			&& current.id === match.workspace.id && extUriBiasedIgnorePathCase.isEqual(current.configPath, match.workspace.configPath)
-			&& match.window.remoteAuthority === remoteAuthority && !match.window.isExtensionDevelopmentHost) {
+			&& match.window.remoteAuthority === remoteAuthority && !match.window.config?.isSessionsWindow && !match.window.isExtensionDevelopmentHost) {
 			return match.workspace;
 		}
 		return undefined;
