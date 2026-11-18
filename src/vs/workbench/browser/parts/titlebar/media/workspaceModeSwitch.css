@@ -23,6 +23,8 @@
 	border-radius: var(--vscode-cornerRadius-medium);
 	font-size: var(--vscode-fontSize-label1);
 	font-weight: var(--vscode-fontWeight-semiBold);
+	/* Keep the switch and its focus ring inside the shortest title bar. */
+	line-height: 1.25;
 }
 
 .monaco-workbench .workspace-mode-segment.active-mode {
