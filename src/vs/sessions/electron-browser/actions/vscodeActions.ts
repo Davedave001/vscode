@@ -30,7 +30,7 @@ import { AgentsWindowMenus } from '../../browser/agentsWindowMenus.js';
 import { resolveSessionCommandTarget } from '../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
 import { ISessionsProvidersService } from '../../../workbench/contrib/sessions/browser/sessionsProvidersService.js';
 import { IWorkbenchContribution } from '../../../workbench/common/contributions.js';
-import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
+import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { OpenInVSCodeTitleBarWidget } from '../../browser/widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IActionViewItemService } from '../../../platform/actions/browser/actionViewItemService.js';
@@ -217,6 +217,6 @@ export class OpenInVSCodeWidgetContribution extends Disposable implements IWorkb
 			return configurationService.getValue<boolean>(WORKSPACE_MODE_SWITCH_SETTING) === false
 				? instantiationService.createInstance(OpenInVSCodeTitleBarWidget, action, options, OpenVSCodeWindowAction.ID)
 				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'agents', OpenSessionInVSCodeAction.ID);
-		}, undefined));
+		}, onDidChangeWorkspaceModeSwitch(configurationService)));
 	}
 }

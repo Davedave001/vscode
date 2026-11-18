@@ -32,7 +32,7 @@ import { IActionViewItemService } from '../../../platform/actions/browser/action
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution } from '../../../workbench/common/contributions.js';
 import { getChatSessionToOpenInEditor, getEditorWindowSessionResource, notifyEditorWindowSessionUnsupported, resolveRemoteAuthority, resolveRemoteFolderUri } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
-import { WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
+import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
@@ -173,6 +173,6 @@ export class OpenInVSCodeWidgetContribution extends Disposable implements IWorkb
 			return configurationService.getValue<boolean>(WORKSPACE_MODE_SWITCH_SETTING) === false
 				? instantiationService.createInstance(OpenInVSCodeTitleBarWidget, action, options, OpenInVSCodeAction.ID)
 				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'agents', OpenInVSCodeAction.ID);
-		}, undefined));
+		}, onDidChangeWorkspaceModeSwitch(configurationService)));
 	}
 }

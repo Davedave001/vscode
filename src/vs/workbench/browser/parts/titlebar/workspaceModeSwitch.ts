@@ -8,10 +8,12 @@ import { $, append, EventHelper, EventLike } from '../../../../base/browser/dom.
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IAction, toAction } from '../../../../base/common/actions.js';
+import { Event } from '../../../../base/common/event.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { localize } from '../../../../nls.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 
@@ -23,10 +25,14 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 	properties: {
 		[WORKSPACE_MODE_SWITCH_SETTING]: {
 			type: 'boolean', default: true,
-			description: localize('workspaceModeSwitch.setting', "Show a labelled Agents and IDE switch in the title bar. Reload the window after changing this setting."),
+			description: localize('workspaceModeSwitch.setting', "Show a labelled Agents and IDE switch in the title bar."),
 		},
 	},
 });
+
+export function onDidChangeWorkspaceModeSwitch(configurationService: IConfigurationService): Event<unknown> {
+	return Event.filter(configurationService.onDidChangeConfiguration, event => event.affectsConfiguration(WORKSPACE_MODE_SWITCH_SETTING));
+}
 
 /** A persistent, labelled switch between agent orchestration and the code editor. */
 export class WorkspaceModeSwitch extends BaseActionViewItem {

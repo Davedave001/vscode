@@ -36,6 +36,7 @@ import { safeIntl } from '../../../base/common/date.js';
 import { isDefined } from '../../../base/common/types.js';
 import { ITitlebarPart, ITitleProperties, ITitleVariable, IAuxiliaryTitlebarPart } from '../../../workbench/browser/parts/titlebar/titlebarPart.js';
 import { WindowTitle } from '../../../workbench/browser/parts/titlebar/windowTitle.js';
+import { onDidChangeWorkspaceModeSwitch } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { AgentsWindowMenus } from '../agentsWindowMenus.js';
 import { IsNewChatSessionContext } from '../../../workbench/contrib/sessions/common/contextkeys.js';
 import { createInstantHoverDelegate } from '../../../base/browser/ui/hover/hoverDelegateFactory.js';
@@ -302,6 +303,8 @@ export class TitlebarPart extends Part implements ITitlebarPart {
 			hiddenItemStrategy: HiddenItemStrategy.NoHide,
 			toolbarOptions: { primaryGroup: () => true },
 		}));
+
+		this._register(onDidChangeWorkspaceModeSwitch(this.configurationService)(() => this.titleBarToolBarOverflowScheduler.schedule()));
 
 		// Center section: [nav toolbar] [command center box] [actions toolbar]
 		// All live inside .titlebar-center so the cluster is window-centered.

@@ -16,6 +16,7 @@ import { DisposableStore, IDisposable, MutableDisposable } from '../../../../bas
 import { IBrowserWorkbenchEnvironmentService } from '../../../services/environment/browser/environmentService.js';
 import { IColorTheme, IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { MODERN_UI_INACTIVE_SHELL_BACKGROUND, MODERN_UI_SHELL_BACKGROUND, TITLE_BAR_ACTIVE_BACKGROUND, TITLE_BAR_ACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_BACKGROUND, TITLE_BAR_BORDER, WORKBENCH_BACKGROUND } from '../../../common/theme.js';
+import { onDidChangeWorkspaceModeSwitch } from './workspaceModeSwitch.js';
 import { isMacintosh, isWindows, isLinux, isWeb, isNative, platformLocale } from '../../../../base/common/platform.js';
 import { Color } from '../../../../base/common/color.js';
 import { EventType, EventHelper, Dimension, append, $, addDisposableListener, prepend, reset, getWindow, getWindowId, isAncestor, getActiveDocument, isHTMLElement, AnimationFrameScheduler } from '../../../../base/browser/dom.js';
@@ -551,6 +552,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 
 			// Re-evaluate fit when items change, see #303222.
 			this.centerAdjacentToolBarDisposable.add(centerAdjacentToolBar.onDidChangeMenuItems(() => this.titleBarToolBarOverflowScheduler.schedule()));
+			this.centerAdjacentToolBarDisposable.add(onDidChangeWorkspaceModeSwitch(this.configurationService)(() => this.titleBarToolBarOverflowScheduler.schedule()));
 		}
 
 		// Update Toolbar (before the right-aligned toolbar actions)

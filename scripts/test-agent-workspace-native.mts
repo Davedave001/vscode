@@ -88,6 +88,7 @@ const report = {
 	appHeaderVerified: false, googleOAuthSetupVerified: false, browseAppConnectionsVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
 	themeChecks: [] as { stage: string; mode: string; theme: string; canvas: string[]; titlebar: string }[],
+	switchSettingChangedWithoutReload: false,
 };
 try {
 	const settings = {
@@ -603,6 +604,28 @@ try {
 			const currentSettings = JSON.parse(await readFile(settingsFile, 'utf8'));
 			await writeFile(settingsFile, JSON.stringify({ ...currentSettings, 'workbench.colorTheme': expectedTheme.name, 'workbench.colorCustomizations': expectedTheme.colors }));
 			assert.deepEqual(await checkWindows(stage), expectedIds);
+		}
+		if (keyboard) {
+			stage = 'changing the title bar switch setting';
+			const settingsFile = join(profile, 'User', 'settings.json');
+			const currentSettings = JSON.parse(await readFile(settingsFile, 'utf8'));
+			const windows = [ide, agents];
+			const rendererStarts = () => Promise.all(windows.map(page => page.evaluate(() => performance.timeOrigin)));
+			const starts = await rendererStarts();
+			const setSwitchEnabled = (enabled: boolean) => writeFile(settingsFile, JSON.stringify({ ...currentSettings, 'workbench.titleBar.workspaceModeSwitch': enabled }));
+			await setSwitchEnabled(false);
+			await Promise.all([
+				ide.locator('.part.titlebar .open-in-agents-titlebar-widget').waitFor({ timeout: 15000 }),
+				agents.locator('.part.titlebar .open-in-vscode-titlebar-widget').waitFor({ timeout: 15000 }),
+			]);
+			for (const page of windows) {
+				assert.equal(await page.getByRole('switch', { name: 'IDE mode', exact: true }).count(), 0);
+			}
+			await setSwitchEnabled(true);
+			await Promise.all(windows.map(page => page.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 15000 })));
+			assert.deepEqual(await rendererStarts(), starts);
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+			report.switchSettingChangedWithoutReload = true;
 		}
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `return to IDE ${roundTrip}`;
