@@ -246,6 +246,8 @@ suite('MCP configuration entry points', () => {
 		['GitLab.com', 'gitlab-com', 'https://gitlab.com/api/v4/mcp'],
 		['Netlify', 'netlify', 'https://mcp.netlify.com/mcp'],
 		['Cal.com', 'cal-com', 'https://mcp.cal.com/mcp'],
+		['Attio', 'attio', 'https://mcp.attio.com/mcp'],
+		['Fireflies', 'fireflies', 'https://api.fireflies.ai/mcp'],
 		['Apollo', 'apollo', 'https://mcp.apollo.io/mcp'],
 		['Amplitude (US)', 'amplitude-us', 'https://mcp.amplitude.com/mcp'],
 		['Amplitude (EU)', 'amplitude-eu', 'https://mcp.eu.amplitude.com/mcp'],

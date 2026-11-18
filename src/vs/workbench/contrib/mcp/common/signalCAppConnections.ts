@@ -118,6 +118,8 @@ export const signalCAppConnections: readonly ISignalCAppConnection[] = [
 	},
 	{ id: 'netlify', name: 'Netlify', description: localize('apps.netlify', "Sites, deployments, build logs and hosting"), url: 'https://mcp.netlify.com/mcp', documentation: 'https://docs.netlify.com/build/build-with-ai/agent-setup-guides/agent-setup-overview/' },
 	{ id: 'cal-com', name: 'Cal.com', description: localize('apps.calCom', "Availability, bookings and event types"), url: 'https://mcp.cal.com/mcp', documentation: 'https://cal.com/docs/mcp-server' },
+	{ id: 'attio', name: 'Attio', description: localize('apps.attio', "CRM people, companies, deals, tasks and notes"), url: 'https://mcp.attio.com/mcp', documentation: 'https://docs.attio.com/mcp/overview' },
+	{ id: 'fireflies', name: 'Fireflies', description: localize('apps.fireflies', "Meeting transcripts, summaries, action items and search"), url: 'https://api.fireflies.ai/mcp', documentation: 'https://guide.fireflies.ai/articles/8272956938-learn-about-the-fireflies-mcp-server-model-context-protocol' },
 	{
 		id: 'apollo', name: 'Apollo',
 		description: localize('apps.apollo', "Sales accounts, contacts, lists and outreach"),
