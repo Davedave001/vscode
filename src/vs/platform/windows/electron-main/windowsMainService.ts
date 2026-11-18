@@ -175,11 +175,9 @@ interface ISingleFolderWorkspacePathToOpen extends IPathToOpen {
 	readonly workspace: ISingleFolderWorkspaceIdentifier;
 }
 
-interface IEditorHandoffOrigin {
-	readonly windowId: number;
-	readonly workspace: IWorkspaceIdentifier;
-	readonly folder: URI;
-}
+type EditorHandoffOrigin =
+	| { readonly kind: 'workspace'; readonly windowId: number; readonly workspace: IWorkspaceIdentifier; readonly folder: URI }
+	| { readonly kind: 'folderless'; readonly windowId: number; readonly backupPath: string; readonly remoteAuthority: string | undefined };
 
 function isWorkspacePathToOpen(path: IPathToOpen | undefined): path is IWorkspacePathToOpen {
 	return isWorkspaceIdentifier(path?.workspace);
@@ -223,7 +221,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 	readonly onDidTriggerSystemContextMenu = this._onDidTriggerSystemContextMenu.event;
 
 	private readonly windows = new Map<number, ICodeWindow>();
-	private readonly editorHandoffOrigins = new WeakMap<ICodeWindow, IEditorHandoffOrigin>();
+	private readonly editorHandoffOrigins = new WeakMap<ICodeWindow, EditorHandoffOrigin>();
 
 	private readonly windowsStateHandler: WindowsStateHandler;
 
@@ -293,7 +291,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		const forceNewWindow = !forceReuseWindow;
 
 		if (options?.reuseExistingWindow && !forceReuseWindow && !options.forceProfile && !options.forceTempProfile) {
-			const window = findWindowForEmptyHandoff(this.getWindows(), remoteAuthority);
+			const window = this.getOriginatingFolderlessEditor(openConfig, remoteAuthority) ?? findWindowForEmptyHandoff(this.getWindows(), remoteAuthority);
 			if (window) {
 				this.openExistingWindow(window, { ...openConfig, cli, remoteAuthority });
 				return Promise.resolve([window]);
@@ -320,10 +318,15 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 		const isModeSwitch = openConfig.context === OpenContext.API && (source === AgentsWindowOpenSource.TitleBar || source === AgentsWindowOpenSource.CommandPalette || source === AgentsWindowOpenSource.KeyboardShortcut);
 		const editor = isModeSwitch && openConfig.contextWindowId !== undefined ? this.getWindowById(openConfig.contextWindowId) : undefined;
-		const workspace = editor?.openedWorkspace;
-		const origin = folderUri && editor?.config && !editor.config.isSessionsWindow && !editor.isExtensionDevelopmentHost && isWorkspaceIdentifier(workspace)
-			? { windowId: editor.id, workspace: { id: workspace.id, configPath: workspace.configPath }, folder: folderUri }
-			: undefined;
+		let origin: EditorHandoffOrigin | undefined;
+		if (editor?.config && !editor.config.isSessionsWindow && !editor.isExtensionDevelopmentHost) {
+			const workspace = editor.openedWorkspace;
+			if (folderUri && isWorkspaceIdentifier(workspace)) {
+				origin = { kind: 'workspace', windowId: editor.id, workspace: { id: workspace.id, configPath: workspace.configPath }, folder: folderUri };
+			} else if (!workspace && editor.backupPath) {
+				origin = { kind: 'folderless', windowId: editor.id, backupPath: editor.backupPath, remoteAuthority: editor.remoteAuthority };
+			}
+		}
 
 		const existingWindows = this.getWindows();
 		folderUri = await resolveAgentsWindowFolder(openConfig, folderUri, reveal === 'new' ? undefined : reveal, source, cli => this.doExtractPathsFromCLI(cli));
@@ -1192,11 +1195,22 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return restoreWindows;
 	}
 
+	private getOriginatingFolderlessEditor(openConfig: IOpenEmptyConfiguration, remoteAuthority: string | undefined): ICodeWindow | undefined {
+		const agents = openConfig.context === OpenContext.API && openConfig.contextWindowId !== undefined ? this.getWindowById(openConfig.contextWindowId) : undefined;
+		const origin = agents && this.editorHandoffOrigins.get(agents);
+		if (origin?.kind !== 'folderless' || origin.remoteAuthority !== remoteAuthority) {
+			return undefined;
+		}
+
+		const editor = this.getWindowById(origin.windowId);
+		return editor && !editor.openedWorkspace && editor.backupPath === origin.backupPath ? findWindowForEmptyHandoff([editor], remoteAuthority) : undefined;
+	}
+
 	private async doGetOriginatingEditorWorkspace(contextWindowId: number | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspacePathToOpen | undefined> {
 		const agents = contextWindowId !== undefined ? this.getWindowById(contextWindowId) : undefined;
 		const origin = agents && this.editorHandoffOrigins.get(agents);
 		const editor = origin && this.getWindowById(origin.windowId);
-		if (!agents || !origin || !editor) {
+		if (!agents || origin?.kind !== 'workspace' || !editor) {
 			return undefined;
 		}
 

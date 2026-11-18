@@ -63,8 +63,9 @@ const launchToken = 'synthetic-test-launch-token';
 const conversation = protocol || flags.conversation;
 const emptyWorkspace = conversation || flags['empty-workspace'];
 const originatingEditor = flags['originating-editor'];
+const folderlessOrigin = originatingEditor && emptyWorkspace;
 assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
-assert.ok(!originatingEditor || !emptyWorkspace, '--originating-editor starts in a saved editor workspace');
+assert.ok(!folderlessOrigin || (conversation && !protocol), 'Use --originating-editor with --conversation to check folderless editor routing');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
 const fixtureHome = join(run, 'home');
@@ -267,6 +268,11 @@ try {
 			for (const page of launched.windows()) { await checkTheme(page, label); }
 		}
 		return windows.map(window => window.id).sort((a, b) => a - b);
+	};
+	const simulateNativeFocus = async (page: Page) => {
+		const window = await launched.browserWindow(page);
+		// Update the main process's focus history without showing a fixture window.
+		try { await window.evaluate(nativeWindow => { nativeWindow.emit('focus'); }); } finally { await window.dispose(); }
 	};
 	const rendererLogs = async () => {
 		const logs: string[] = [];
@@ -540,8 +546,37 @@ try {
 				} finally { await alternateWindow.dispose(); }
 			}
 		}
+		let alternateEditor: Page | undefined;
+		if (folderlessOrigin) {
+			stage = 'opening a second folderless editor';
+			[alternateEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window']),
+			]);
+			await alternateEditor.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor();
+			for (const editor of [ide, alternateEditor]) {
+				await editor.evaluate(() => {
+					Reflect.set(globalThis, 'fixtureChatHandoffs', 0);
+					Reflect.get(globalThis, 'vscode').ipcRenderer.on('vscode:openChatSession', () => {
+						Reflect.set(globalThis, 'fixtureChatHandoffs', Reflect.get(globalThis, 'fixtureChatHandoffs') + 1);
+					});
+				});
+			}
+		}
+		const expectChatHandoff = async (editors: Page[], target: Page, switchToIDE: () => Promise<void>) => {
+			const counts = () => Promise.all(editors.map(editor => editor.evaluate(() => Number(Reflect.get(globalThis, 'fixtureChatHandoffs')))));
+			const before = await counts();
+			await switchToIDE();
+			const until = Date.now() + 12000;
+			let after = await counts();
+			while (after.every((count, index) => count === before[index]) && Date.now() < until) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+				after = await counts();
+			}
+			assert.deepEqual(after, before.map((count, index) => count + Number(editors[index] === target)), 'The conversation must go to the selected editor only');
+		};
 		const expectedIds = await checkWindows(stage);
-		assert.equal(expectedIds.length, 2);
+		assert.equal(expectedIds.length, alternateEditor ? 3 : 2);
 		const marker = '// Signal-C empty editor unsaved buffer';
 		await ide.locator('body').click({ position: { x: 600, y: 400 } });
 		await ide.keyboard.press('Control+n');
@@ -567,7 +602,13 @@ try {
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
 			report.agentsDraftRetained = true;
 			stage = `empty return to IDE ${roundTrip}`;
-			await activateSwitch(agents, roundTrip, input);
+			if (alternateEditor) {
+				await simulateNativeFocus(alternateEditor);
+				await expectChatHandoff([ide, alternateEditor], ide, () => activateSwitch(agents, roundTrip, input));
+				report.originatingEditorVerified = true;
+			} else {
+				await activateSwitch(agents, roundTrip, input);
+			}
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'A folderless handoff must reuse the existing editor');
 			if (conversation) { await ide.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor(); }
@@ -577,6 +618,16 @@ try {
 		}
 		await capture(ide, 'empty-ide-returned.png');
 		await capture(agents, 'empty-agents-retained.png');
+		if (alternateEditor) {
+			stage = 'return after the originating folderless editor closed';
+			const closed = ide.waitForEvent('close', { timeout: 30000 });
+			const window = await launched.browserWindow(ide);
+			try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
+			await closed;
+			await expectChatHandoff([alternateEditor], alternateEditor, () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click());
+			assert.equal((await checkWindows(stage)).length, 2);
+			report.closedOriginFallbackVerified = true;
+		}
 		if (conversation) { assert.equal(mock.getRequests().length, report.modelRequestCountBeforeHandoff, 'Restoring the conversation must not send another model request'); }
 		console.log('Two folderless round trips retained the editor window, dirty buffer, and Agents draft');
 		if (protocol) {
@@ -728,9 +779,7 @@ try {
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `return to IDE ${roundTrip}`;
 			if (alternate) {
-				const window = await launched.browserWindow(alternate);
-				// Focus the alternate editor for routing purposes while keeping the fixture hidden.
-				try { await window.evaluate(nativeWindow => { nativeWindow.emit('focus'); }); } finally { await window.dispose(); }
+				await simulateNativeFocus(alternate);
 				await expectRoutedWorkspace(workspace, () => activateSwitch(agents, roundTrip, input));
 				report.originatingEditorVerified = true;
 			} else {
