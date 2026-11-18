@@ -81,7 +81,11 @@ for (const folder of folders) {
 	execFileSync('git', ['init', '--quiet'], { cwd: folder, windowsHide: true, stdio: 'pipe' });
 }
 const workspace = join(run, 'continuity.code-workspace');
-await writeFile(workspace, JSON.stringify({ folders: folders.map(path => ({ path })) }));
+const savedWorkspaceTitle = 'Signal-C saved workspace fixture';
+await writeFile(workspace, JSON.stringify({
+	folders: folders.map(path => ({ path })),
+	...(originatingEditor && !emptyWorkspace ? { settings: { 'window.title': savedWorkspaceTitle } } : {}),
+}));
 const runner = join(run, 'unused-extension-test-runner.cjs');
 // Hidden-window mode requires a test location. No extension-development path is supplied, so no runner executes.
 await writeFile(runner, 'exports.run = async () => { throw new Error("Unexpected extension-development test execution"); };\n');
@@ -102,6 +106,8 @@ const report = {
 	recentWorkspaceProtocolVerified: false,
 	originatingEditorVerified: false,
 	closedOriginFallbackVerified: false,
+	reopenedOriginWorkspaceVerified: false,
+	changedOriginFallbackVerified: false,
 	launchEnvironmentExcludedFromTrace: false,
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
@@ -274,6 +280,12 @@ try {
 		const window = await launched.browserWindow(page);
 		// Update the main process's focus history without showing a fixture window.
 		try { await window.evaluate(nativeWindow => { nativeWindow.emit('focus'); }); } finally { await window.dispose(); }
+	};
+	const destroyFixtureWindow = async (page: Page) => {
+		const closed = page.waitForEvent('close', { timeout: 30000 });
+		const window = await launched.browserWindow(page);
+		try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
+		await closed;
 	};
 	const rendererLogs = async () => {
 		const logs: string[] = [];
@@ -621,10 +633,7 @@ try {
 		await capture(agents, 'empty-agents-retained.png');
 		if (alternateEditor) {
 			stage = 'return after the originating folderless editor closed';
-			const closed = ide.waitForEvent('close', { timeout: 30000 });
-			const window = await launched.browserWindow(ide);
-			try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
-			await closed;
+			await destroyFixtureWindow(ide);
 			await expectChatHandoff([alternateEditor], alternateEditor, () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click());
 			assert.equal((await checkWindows(stage)).length, 2);
 			report.closedOriginFallbackVerified = true;
@@ -730,7 +739,7 @@ try {
 			const mainLogs = await Promise.all(directories.map(directory => readFile(join(logs, directory, 'main.log'), 'utf8').catch(() => '')));
 			return mainLogs.flatMap(log => [...log.matchAll(/windowsManager#open pathsToOpen (\[[^\r\n]*\])/g)]);
 		};
-		const expectRoutedWorkspace = async (expectedWorkspace: string, switchToEditor: () => Promise<void>) => {
+		const expectRoutedWorkspace = async (expectedPath: string, switchToEditor: () => Promise<void>, key: 'configPath' | 'uri' = 'configPath') => {
 			const count = (await workspaceRoutes()).length;
 			await switchToEditor();
 			const until = Date.now() + 10000;
@@ -740,8 +749,8 @@ try {
 				route = (await workspaceRoutes())[count];
 			}
 			assert.ok(route, 'The desktop main process must record the selected workspace');
-			const paths = JSON.parse(route[1]) as { workspace?: { configPath?: { path: string } } }[];
-			assert.deepEqual(paths.map(path => path.workspace?.configPath?.path.toLowerCase()), [decodeURIComponent(pathToFileURL(expectedWorkspace).pathname).toLowerCase()]);
+			const paths = JSON.parse(route[1]) as { workspace?: Partial<Record<typeof key, { path: string }>> }[];
+			assert.deepEqual(paths.map(path => path.workspace?.[key]?.path.toLowerCase()), [decodeURIComponent(pathToFileURL(expectedPath).pathname).toLowerCase()]);
 		};
 		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
 		const draft = 'Signal-C native draft preserved across mode switches';
@@ -803,15 +812,36 @@ try {
 		}
 		await capture(agents, 'agents-returned.png');
 		if (alternate) {
+			const switchToEditor = () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
 			stage = 'return after the originating editor closed';
-			const closed = ide.waitForEvent('close', { timeout: 30000 });
-			const window = await launched.browserWindow(ide);
-			try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
-			await closed;
-			await expectRoutedWorkspace(alternateWorkspace, () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click());
+			await destroyFixtureWindow(ide);
+			await expectRoutedWorkspace(alternateWorkspace, switchToEditor);
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.equal((await checkWindows(stage)).length, 2);
 			report.closedOriginFallbackVerified = true;
+
+			stage = 'reopening the originating workspace after all editors closed';
+			await destroyFixtureWindow(alternate);
+			const [reopened] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, switchToEditor),
+			]);
+			await reopened.getByRole('tree').getByText('one', { exact: true }).waitFor();
+			await reopened.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			await reopened.waitForFunction(title => document.title.includes(title), savedWorkspaceTitle);
+			assert.equal(launched.windows().length, 2);
+			report.reopenedOriginWorkspaceVerified = true;
+
+			stage = 'return after the saved workspace no longer contains the Agents folder';
+			await destroyFixtureWindow(reopened);
+			await writeFile(workspace, JSON.stringify({ folders: [{ path: folders[1] }] }));
+			const [folderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(folders[0], switchToEditor, 'uri'),
+			]);
+			await folderEditor.getByRole('tree').getByText('README.md', { exact: true }).waitFor();
+			assert.equal(launched.windows().length, 2);
+			report.changedOriginFallbackVerified = true;
 		}
 	}
 	if (keyboard) { assert.equal(report.keyboardActivations.length, 4, 'The native fixture must exercise both modes by shortcut and focused control'); }

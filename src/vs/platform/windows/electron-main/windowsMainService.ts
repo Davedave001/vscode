@@ -44,7 +44,7 @@ import { findWindowForEmptyHandoff, findWindowOnExtensionDevelopmentPath, findWi
 import { IFolderLocationsMainService, IValidatedFolderLocation } from './folderLocationsMainService.js';
 import { IWindowState, WindowsStateHandler } from './windowsStateHandler.js';
 import { IRecent } from '../../workspaces/common/workspaces.js';
-import { hasWorkspaceFileExtension, IAnyWorkspaceIdentifier, ISingleFolderWorkspaceIdentifier, isSingleFolderWorkspaceIdentifier, isWorkspaceIdentifier, IWorkspaceIdentifier, toWorkspaceIdentifier } from '../../workspace/common/workspace.js';
+import { hasWorkspaceFileExtension, IAnyWorkspaceIdentifier, ISingleFolderWorkspaceIdentifier, isSavedWorkspace, isSingleFolderWorkspaceIdentifier, isWorkspaceIdentifier, IWorkspaceIdentifier, toWorkspaceIdentifier } from '../../workspace/common/workspace.js';
 import { createEmptyWorkspaceIdentifier, getSingleFolderWorkspaceIdentifier, getWorkspaceIdentifier } from '../../workspaces/node/workspaces.js';
 import { IWorkspacesHistoryMainService } from '../../workspaces/electron-main/workspacesHistoryMainService.js';
 import { IWorkspacesManagementMainService } from '../../workspaces/electron-main/workspacesManagementMainService.js';
@@ -1209,8 +1209,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 	private async doGetOriginatingEditorWorkspace(contextWindowId: number | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspacePathToOpen | undefined> {
 		const agents = contextWindowId !== undefined ? this.getWindowById(contextWindowId) : undefined;
 		const origin = agents && this.editorHandoffOrigins.get(agents);
-		const editor = origin && this.getWindowById(origin.windowId);
-		if (!agents || origin?.kind !== 'workspace' || !editor) {
+		if (!agents || origin?.kind !== 'workspace') {
 			return undefined;
 		}
 
@@ -1219,12 +1218,32 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		if (!folders.some(folder => resources.isEqual(folder.workspace.uri, origin.folder)) || folders.some(folder => folder.remoteAuthority !== remoteAuthority)) {
 			return undefined;
 		}
-		const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders: folders.length === 1 }, [editor]);
-		if (workspace?.id === origin.workspace.id && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, origin.workspace.configPath)
-			&& this.editorHandoffOrigins.get(agents) === origin) {
-			return { workspace, remoteAuthority };
+		const editor = this.getWindowById(origin.windowId);
+		const allowAdditionalFolders = folders.length === 1;
+		const { configPath } = origin.workspace;
+		if (editor) {
+			const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders }, [editor]);
+			if (workspace?.id === origin.workspace.id && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, configPath)
+				&& this.editorHandoffOrigins.get(agents) === origin) {
+				return { workspace, remoteAuthority };
+			}
+			return undefined;
 		}
-		return undefined;
+
+		if (configPath.scheme !== Schemas.file || !isSavedWorkspace(configPath, this.environmentMainService)) {
+			return undefined;
+		}
+		const saved = await this.workspacesManagementMainService.resolveLocalWorkspace(configPath);
+		if (!saved || !workspaceMatchesFolders(saved, folders.map(folder => folder.workspace.uri), remoteAuthority, allowAdditionalFolders)) {
+			return undefined;
+		}
+
+		// Keep the existing preference for open editors before reopening a saved workspace.
+		const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders, preferRecentlyFocused: true });
+		if (this.editorHandoffOrigins.get(agents) !== origin || (allowAdditionalFolders && findWindowOnWorkspaceOrFolder(this.getWindows(), folders[0].workspace.uri))) {
+			return undefined;
+		}
+		return { workspace: workspace ?? origin.workspace, remoteAuthority };
 	}
 
 	private async doGetOpenWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], options: { allowAdditionalFolders?: boolean; preferRecentlyFocused?: boolean }, candidates = this.getWindows()): Promise<IWorkspaceIdentifier | undefined> {
