@@ -9,7 +9,7 @@ import { localize } from '../../nls.js';
 import { Color } from '../../base/common/color.js';
 import { darken, ifDefinedThenElse, lighten, registerColor, transparent } from '../../platform/theme/common/colorUtils.js';
 import { contrastBorder, focusBorder } from '../../platform/theme/common/colorRegistry.js';
-import { editorWidgetBackground, editorWidgetBorder, editorBackground, editorWarningForeground, toolbarHoverBackground } from '../../platform/theme/common/colors/editorColors.js';
+import { editorWidgetBackground, editorWidgetBorder, editorBackground, editorForeground, editorWarningForeground, toolbarHoverBackground } from '../../platform/theme/common/colors/editorColors.js';
 import { foreground } from '../../platform/theme/common/colors/baseColors.js';
 import { buttonBackground, buttonSecondaryBorder, inputBackground, inputBorder, inputForeground, inputPlaceholderForeground } from '../../platform/theme/common/colors/inputColors.js';
 import { listWarningForeground } from '../../platform/theme/common/colors/listColors.js';
@@ -214,22 +214,22 @@ export const agentsUnreadBadgeForeground = registerColor(
 );
 
 export const activeSessionViewBackground = registerColor(
-	'activeSessionView.background', agentsPanelBackground,
+	'activeSessionView.background', ifDefinedThenElse(agentsPanelBackground, agentsPanelBackground, editorBackground),
 	localize('activeSessionView.background', 'Background color of an active session view in the agent sessions window.')
 );
 
 export const inactiveSessionViewBackground = registerColor(
-	'inactiveSessionView.background', agentsBackground,
+	'inactiveSessionView.background', ifDefinedThenElse(agentsBackground, agentsBackground, editorBackground),
 	localize('inactiveSessionView.background', 'Background color of an inactive session view in the agent sessions window.')
 );
 
 export const activeSessionViewForeground = registerColor(
-	'activeSessionView.foreground', agentsPanelForeground,
+	'activeSessionView.foreground', ifDefinedThenElse(agentsPanelForeground, agentsPanelForeground, editorForeground),
 	localize('activeSessionView.foreground', 'Foreground color of an active session view in the agent sessions window.')
 );
 
 export const inactiveSessionViewForeground = registerColor(
-	'inactiveSessionView.foreground', agentsPanelForeground,
+	'inactiveSessionView.foreground', ifDefinedThenElse(agentsPanelForeground, agentsPanelForeground, editorForeground),
 	localize('inactiveSessionView.foreground', 'Foreground color of an inactive session view in the agent sessions window.')
 );
 

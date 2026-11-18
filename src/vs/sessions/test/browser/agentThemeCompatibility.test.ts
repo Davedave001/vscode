@@ -11,11 +11,44 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/comm
 import { ColorThemeData } from '../../../workbench/services/themes/common/colorThemeData.js';
 import { generateColorThemeCSS } from '../../../workbench/services/themes/browser/colorThemeCss.js';
 import { agentsActivityBarBackground, agentsActivityBarBorder, agentsChatInputBackground, agentsChatInputForeground, agentsDetailBackground, agentsPanelBackground, agentsPanelBorder, agentsPanelForeground } from '../../../workbench/common/agentsColors.js';
+import { applySessionViewThemeColors } from '../../../workbench/contrib/sessions/browser/parts/sessionBarStyles.js';
+import '../../../workbench/contrib/sessions/browser/parts/media/chatCompositeBar.css';
+import '../../../workbench/contrib/sessions/browser/parts/media/sessionView.css';
+import '../../../workbench/contrib/sessions/browser/parts/media/sessionsGridContent.css';
 import '../../browser/media/style.css';
 import '../../browser/media/workbench.css';
 
 suite('Sessions - Extension theme compatibility', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('paints the entire central session canvas with editor colors even when panels use another palette', () => {
+		const root = append(mainWindow.document.body, $('.monaco-workbench.agent-sessions-workbench'));
+		store.add(toDisposable(() => root.remove()));
+		const canvas = append(append(append(root, $('.part.sessionspart')), $('.content')), $('.session-view'));
+		const content = append(canvas, $('.session-view-content'));
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {});
+		for (const palette of [
+			{ 'editor.background': '#17324d', 'editor.foreground': '#ddeeff', 'panel.background': '#442233', 'sideBar.background': '#332244' },
+			{ 'editor.background': '#fff4db', 'editor.foreground': '#202938', 'panel.background': '#dce8f4', 'sideBar.background': '#e5dcee' },
+		]) {
+			theme.setCustomColors(palette);
+			for (const active of [true, false]) {
+				applySessionViewThemeColors(canvas, theme, active);
+				const painted = getWindow(canvas).getComputedStyle(canvas);
+				assert.strictEqual(canvas.style.getPropertyValue('--session-view-background'), palette['editor.background']);
+				assert.strictEqual(canvas.style.getPropertyValue('--session-view-foreground'), palette['editor.foreground']);
+				const expected = $('div');
+				expected.style.backgroundColor = palette['editor.background'];
+				assert.strictEqual(painted.backgroundColor, expected.style.backgroundColor);
+				assert.strictEqual(getWindow(content).getComputedStyle(content).backgroundColor, expected.style.backgroundColor);
+			}
+		}
+		theme.setCustomColors({ 'editor.background': '#17324d', 'activeSessionView.background': '#112233', 'inactiveSessionView.background': '#334455' });
+		applySessionViewThemeColors(canvas, theme, true);
+		assert.strictEqual(canvas.style.getPropertyValue('--session-view-background'), '#112233');
+		applySessionViewThemeColors(canvas, theme, false);
+		assert.strictEqual(canvas.style.getPropertyValue('--session-view-background'), '#334455');
+	});
 
 	test('inherits conventional theme colors for chat cards, details, composer, frames and activity bar', () => {
 		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {});
