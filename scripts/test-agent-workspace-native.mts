@@ -20,14 +20,35 @@ const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(
 const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv, optimized?: boolean): { executable: string; args: string[]; environment: NodeJS.ProcessEnv } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections', '--optimized'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, --app-connections, or --optimized');
+assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections', '--themes', '--optimized'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, --app-connections, --themes, or --optimized');
 const optimized = process.argv.includes('--optimized');
 const keyboard = process.argv.includes('--keyboard');
 const appConnections = process.argv.includes('--app-connections');
+const themes = process.argv.includes('--themes');
+const themePalettes = {
+	dark: {
+		name: 'Dark 2026', themeClass: 'vscode-theme-defaults-themes-2026-dark-json',
+		colors: {
+			'editor.background': '#17324d', 'editor.foreground': '#ddeeff', 'panel.background': '#30243a',
+			'sideBar.background': '#11202b', 'input.background': '#1e2f44',
+			'titleBar.activeBackground': '#0a1118', 'titleBar.inactiveBackground': '#0a1118',
+		},
+	},
+	light: {
+		name: 'Light 2026', themeClass: 'vscode-theme-defaults-themes-2026-light-json',
+		colors: {
+			'editor.background': '#fff4db', 'editor.foreground': '#25364a', 'panel.background': '#e6edf7',
+			'sideBar.background': '#e8dfee', 'input.background': '#f2e9f6',
+			'titleBar.activeBackground': '#e0d6ee', 'titleBar.inactiveBackground': '#e0d6ee',
+		},
+	},
+} as const;
+let expectedTheme: typeof themePalettes[keyof typeof themePalettes] = themePalettes.dark;
 const workspaceProtocol = process.argv.includes('--workspace-protocol');
 const protocol = workspaceProtocol || process.argv.includes('--protocol');
 const conversation = protocol || process.argv.includes('--conversation');
 const emptyWorkspace = conversation || process.argv.includes('--empty-workspace');
+assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
 const fixtureHome = join(run, 'home');
@@ -66,6 +87,7 @@ const report = {
 	appPickerVerified: false, payPalSandboxVerified: false, datadogRegionVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
 	appHeaderVerified: false, googleOAuthSetupVerified: false, browseAppConnectionsVerified: false,
 	windowChecks: [] as { stage: string; windows: { id: number; hidden: boolean; title: string }[] }[],
+	themeChecks: [] as { stage: string; mode: string; theme: string; canvas: string[]; titlebar: string }[],
 };
 try {
 	const settings = {
@@ -81,6 +103,7 @@ try {
 		'agents.subscriptions.devinExecutable': join(run, 'not-installed-devin.exe'),
 		'sessions.useWorktree': false, 'files.autoSave': 'off',
 		'extensions.autoUpdate': false, 'extensions.autoCheckUpdates': false,
+		...(themes ? { 'workbench.colorTheme': expectedTheme.name, 'workbench.colorCustomizations': expectedTheme.colors } : {}),
 		...(appConnections ? { 'chat.customizations.marketplace.enabled': true } : {}),
 		...(protocol ? { 'security.promptForLocalFileProtocolHandling': false, 'security.promptForRemoteFileProtocolHandling': false } : {}),
 	};
@@ -160,10 +183,45 @@ try {
 			await window.dispose();
 		}
 	};
+	const themeWindowTimes = new Map<Page, number>();
+	const checkTheme = async (page: Page, label: string) => {
+		await page.waitForFunction(({ colors, themeClass }) => {
+			const root = document.querySelector('.monaco-workbench');
+			if (!root?.classList.contains(themeClass)) { return false; }
+			const style = getComputedStyle(root);
+			return Object.entries(colors).every(([key, value]) => style.getPropertyValue(`--vscode-${key.replaceAll('.', '-')}`).trim() === value);
+		}, expectedTheme, { timeout: 30000 });
+		const painted = await page.evaluate(() => {
+			const root = document.querySelector('.monaco-workbench')!;
+			const agents = root.classList.contains('agent-sessions-workbench');
+			const selector = agents ? '.session-view, .session-view > .session-view-content' : '.part.editor .monaco-editor .monaco-editor-background';
+			const canvases = [...root.querySelectorAll<HTMLElement>(selector)]
+				.filter(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+			return {
+				mode: agents ? 'agents' : 'ide',
+				canvas: canvases.map(element => getComputedStyle(element).backgroundColor),
+				titlebar: getComputedStyle(document.querySelector('.part.titlebar')!).backgroundColor,
+				timeOrigin: performance.timeOrigin,
+			};
+		});
+		const rgb = (hex: string) => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
+		const { mode, canvas, titlebar, timeOrigin } = painted;
+		assert.equal(timeOrigin, themeWindowTimes.get(page) ?? timeOrigin, `${label}: the ${mode} window should not reload`);
+		themeWindowTimes.set(page, timeOrigin);
+		assert.equal(titlebar, rgb(expectedTheme.colors['titleBar.activeBackground']), `${label}: title bar should retain the theme`);
+		assert.ok(canvas.length, `${label}: expected a visible ${mode} canvas`);
+		for (const background of canvas) {
+			assert.equal(background, rgb(expectedTheme.colors['editor.background']), `${label}: the visible ${mode} canvas should retain the editor color`);
+		}
+		report.themeChecks.push({ stage: label, mode, theme: expectedTheme.name, canvas, titlebar });
+	};
 	const checkWindows = async (label: string) => {
 		const windows = await launched.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(window => ({ id: window.id, hidden: !window.isVisible(), title: window.getTitle() })));
 		report.windowChecks.push({ stage: label, windows });
 		assert.ok(windows.every(window => window.hidden), 'Every fixture window must remain hidden');
+		if (themes) {
+			for (const page of launched.windows()) { await checkTheme(page, label); }
+		}
 		return windows.map(window => window.id).sort((a, b) => a - b);
 	};
 	const rendererLogs = async () => {
@@ -516,7 +574,6 @@ try {
 		await ide.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
 		await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
 		if (appConnections) { await checkAppConnections(ide); }
-		await checkWindows('IDE ready');
 		const marker = '// Signal-C native unsaved buffer';
 		await ide.locator('body').click({ position: { x: 600, y: 400 } });
 		await ide.keyboard.press('Control+n');
@@ -524,6 +581,7 @@ try {
 		await ide.keyboard.type(marker);
 		await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
 		await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+		await checkWindows('IDE ready');
 		console.log('Created a dirty buffer in the hidden native multi-root editor');
 		stage = 'native Agents';
 		const [agents] = await Promise.all([
@@ -538,6 +596,14 @@ try {
 		const draft = 'Signal-C native draft preserved across mode switches';
 		await input.click(); await agents.keyboard.type(draft);
 		await capture(agents, 'agents-draft.png');
+		if (themes) {
+			stage = 'live theme change in both modes';
+			expectedTheme = themePalettes.light;
+			const settingsFile = join(profile, 'User', 'settings.json');
+			const currentSettings = JSON.parse(await readFile(settingsFile, 'utf8'));
+			await writeFile(settingsFile, JSON.stringify({ ...currentSettings, 'workbench.colorTheme': expectedTheme.name, 'workbench.colorCustomizations': expectedTheme.colors }));
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+		}
 		for (let roundTrip = 1; roundTrip <= 2; roundTrip++) {
 			stage = `return to IDE ${roundTrip}`;
 			await activateSwitch(agents, roundTrip, input);
