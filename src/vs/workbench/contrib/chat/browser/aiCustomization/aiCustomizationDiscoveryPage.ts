@@ -1851,22 +1851,18 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 		browseSectionsPromise: Promise<BrowseSectionsLoadOutcome>,
 		onProgress: () => void,
 	): Promise<void> {
-		let curatedSourceId: string | undefined;
-		try {
-			const outcome = await browseSectionsPromise;
-			if (outcome.kind === 'success') {
-				curatedSourceId = outcome.result?.sourceId;
-			}
-		} catch (error) {
-			if (isCancellationError(error) || token.isCancellationRequested) {
-				return;
-			}
-			onUnexpectedError(error);
-		}
-
+		const curatedSourceId = browseSectionsPromise.then(
+			outcome => outcome.kind === 'success' ? outcome.result?.sourceId : undefined,
+			error => {
+				if (!isCancellationError(error) && !token.isCancellationRequested) {
+					onUnexpectedError(error);
+				}
+				return undefined;
+			},
+		);
 		const sourceOrder = (id: string) => id === signalCAppConnectionSource.id ? 0 : id === CustomizationMarketplaceSources.CopilotConnectors.id ? 1 : 2;
 		const sources = this.marketplaceSources
-			.filter(source => source.id !== CustomizationMarketplaceSources.AgentFinderPublicFeed.id && source.id !== curatedSourceId)
+			.filter(source => source.id !== CustomizationMarketplaceSources.AgentFinderPublicFeed.id)
 			.sort((first, second) => sourceOrder(first.id) - sourceOrder(second.id));
 		const sections: ISourceBrowseSection[] = [];
 		for (const source of sources) {
@@ -1874,6 +1870,16 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 				return;
 			}
 			try {
+				// The built-in app catalog is ready locally, even while the online editorial feed is pending.
+				if (source.id !== signalCAppConnectionSource.id) {
+					const editorialSourceId = await curatedSourceId;
+					if (token.isCancellationRequested) {
+						return;
+					}
+					if (editorialSourceId === source.id) {
+						continue;
+					}
+				}
 				const page = await this.marketplaceService.query({
 					sourceIds: [source.id],
 					pageSize: leadingBrowseItemCount,

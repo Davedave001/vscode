@@ -33,6 +33,7 @@ import { IUserInteractionService, MockUserInteractionService } from '../../../..
 import { IChatEntitlementService } from '../../../../../services/chat/common/chatEntitlementService.js';
 import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
 import { IMcpWorkbenchService, IWorkbenchMcpServer, McpServerInstallState } from '../../../../mcp/common/mcpTypes.js';
+import { signalCAppConnectionSource } from '../../../../mcp/common/signalCAppConnections.js';
 import { AICustomizationDiscoveryPage } from '../../../browser/aiCustomization/aiCustomizationDiscoveryPage.js';
 import { IAICustomizationItemSource, IAICustomizationListItem } from '../../../browser/aiCustomization/aiCustomizationItemSource.js';
 import { IAICustomizationItemsModel, ItemsModelSection } from '../../../browser/aiCustomization/aiCustomizationItemsModel.js';
@@ -88,6 +89,7 @@ suite('AICustomizationDiscoveryPage', () => {
 		sourcePreviews: Readonly<Record<string, readonly ICustomizationMarketplaceResource[] | Promise<readonly ICustomizationMarketplaceResource[]>>> = {},
 		providerItems: readonly ICustomizationItem[] = [],
 	) {
+		const pageSources = enabledSources.includes(signalCAppConnectionSource.id) ? [...sources, signalCAppConnectionSource] : sources;
 		const container = DOM.append(mainWindow.document.body, DOM.$('.customization-discovery-test'));
 		container.style.width = '900px';
 		container.style.height = '600px';
@@ -95,7 +97,7 @@ suite('AICustomizationDiscoveryPage', () => {
 		const configuration = new TestConfigurationService({
 			'workbench.list.smoothScrolling': false,
 			[CustomizationMarketplaceConfiguration.MarketplaceEnabled]: true,
-			...Object.fromEntries(sources
+			...Object.fromEntries(pageSources
 				.filter(source => !source.id.startsWith(`${CustomizationMarketplaceSources.PluginMarketplaces.id}.`))
 				.map(source => [source.enablementSetting, enabledSources.includes(source.id)])),
 		});
@@ -166,8 +168,8 @@ suite('AICustomizationDiscoveryPage', () => {
 			}
 		}());
 		instantiationService.stub(ICustomizationMarketplaceService, new class extends mock<ICustomizationMarketplaceService>() {
-			override readonly sources = sources;
-			override readonly allSources = sources;
+			override readonly sources = pageSources;
+			override readonly allSources = pageSources;
 			override readonly onDidChangeSources = marketplaceChanges.event;
 			override getSourceRecoveryAction(sourceId: string) { return recoveryActions.get(sourceId); }
 			override async getBrowseSections(_options: Pick<ICustomizationMarketplaceQuery, 'sourceIds'>, _token: CancellationToken, onProgress?: (progress: ICustomizationMarketplaceBrowseSectionsProgress) => void) {
@@ -3420,6 +3422,26 @@ suite('AICustomizationDiscoveryPage', () => {
 			id: MANAGE_PLUGIN_MARKETPLACES_COMMAND_ID,
 			args: [],
 		}]);
+	});
+
+	test('shows built-in app cards while online editorial content is still pending', async () => {
+		const browseSections = new DeferredPromise<ICustomizationMarketplaceBrowseSections>();
+		const nativeSource = signalCAppConnectionSource.id;
+		const app = resource('notion', { sourceId: nativeSource, displayName: 'Notion' });
+		const fixture = createPage(
+			['agentFinder', nativeSource],
+			[AICustomizationManagementSection.McpServers], [], undefined, [], browseSections.p,
+			{ [nativeSource]: [app] },
+		);
+		fixture.page.setVisible(true);
+		try {
+			await timeout(0);
+			assert.deepStrictEqual([...fixture.container.querySelectorAll('.customization-discovery-card-name')].map(item => item.textContent), ['Notion']);
+			assert.strictEqual(fixture.container.querySelector('.customization-discovery-card-actions .monaco-button')?.textContent, 'Connect');
+		} finally {
+			await browseSections.complete({ sourceId: 'agentFinder', sections: [] });
+			await fixture.requests[0].result.complete({ items: [app] });
+		}
 	});
 
 	test('prioritizes editorial Browse content while remaining sources load', async () => {
