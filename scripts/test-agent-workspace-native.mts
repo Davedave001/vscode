@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { parseArgs, promisify } from 'node:util';
+import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,14 +17,26 @@ assert.equal(process.platform, 'win32', 'This smoke check uses the prepared Wind
 const require = createRequire(import.meta.url);
 const { startServer, registerScenario } = require('./chat-simulation/common/mock-llm-server.ts') as typeof import('./chat-simulation/common/mock-llm-server.ts');
 const { buildEnv } = require('./chat-simulation/common/utils.js') as { buildEnv(server: { url: string }): Record<string, string> };
-const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv, optimized?: boolean): { executable: string; args: string[]; environment: NodeJS.ProcessEnv } };
+const { createLaunchOptions } = require('./code-agent-workspace.ts') as { createLaunchOptions(root: string, workspace: string, ide: boolean, env: NodeJS.ProcessEnv, optimized?: boolean, optimizedBuild?: string): { executable: string; args: string[]; environment: NodeJS.ProcessEnv } };
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const run = join(root, '.build', 'agent-workspace-native-smoke', `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`);
-assert.ok(process.argv.slice(2).every(arg => ['--empty-workspace', '--conversation', '--protocol', '--workspace-protocol', '--keyboard', '--app-connections', '--themes', '--optimized'].includes(arg)), 'Use --empty-workspace, --conversation, --protocol, --workspace-protocol, --keyboard, --app-connections, --themes, or --optimized');
-const optimized = process.argv.includes('--optimized');
-const keyboard = process.argv.includes('--keyboard');
-const appConnections = process.argv.includes('--app-connections');
-const themes = process.argv.includes('--themes');
+const { values: flags } = parseArgs({
+	options: {
+		'empty-workspace': { type: 'boolean' },
+		conversation: { type: 'boolean' },
+		protocol: { type: 'boolean' },
+		'workspace-protocol': { type: 'boolean' },
+		keyboard: { type: 'boolean' },
+		'app-connections': { type: 'boolean' },
+		themes: { type: 'boolean' },
+		optimized: { type: 'boolean' },
+		'optimized-build': { type: 'string' },
+	},
+});
+const optimized = flags.optimized ?? false;
+const optimizedBuild = flags['optimized-build'];
+assert.ok(optimizedBuild === undefined || (optimized && optimizedBuild.trim()), 'Use --optimized --optimized-build <folder> to select a staged desktop build.');
+const { keyboard, 'app-connections': appConnections, themes } = flags;
 const themePalettes = {
 	dark: {
 		name: 'Dark 2026', themeClass: 'vscode-theme-defaults-themes-2026-dark-json',
@@ -44,11 +56,11 @@ const themePalettes = {
 	},
 } as const;
 let expectedTheme: typeof themePalettes[keyof typeof themePalettes] = themePalettes.dark;
-const workspaceProtocol = process.argv.includes('--workspace-protocol');
-const protocol = workspaceProtocol || process.argv.includes('--protocol');
+const workspaceProtocol = flags['workspace-protocol'];
+const protocol = workspaceProtocol || flags.protocol;
 const launchToken = 'synthetic-test-launch-token';
-const conversation = protocol || process.argv.includes('--conversation');
-const emptyWorkspace = conversation || process.argv.includes('--empty-workspace');
+const conversation = protocol || flags.conversation;
+const emptyWorkspace = conversation || flags['empty-workspace'];
 assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
@@ -78,6 +90,7 @@ let deadline: ReturnType<typeof setTimeout> | undefined;
 let stage = 'preparing';
 const report = {
 	optimized,
+	executable: '',
 	scenario: workspaceProtocol ? 'workspace-protocol-conversation' : protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
@@ -150,7 +163,7 @@ try {
 	assert.equal(execFileSync(process.execPath, ['-p', 'require("node:os").homedir()'], { env, windowsHide: true, encoding: 'utf8' }).trim(), fixtureHome);
 	const inspectArgs = await allocateInspectorArgs();
 	stage = 'launching';
-	const launch = createLaunchOptions(root, workspace, true, {}, optimized);
+	const launch = createLaunchOptions(root, workspace, true, {}, optimized, optimizedBuild);
 	const executable = launch.executable;
 	if (optimized) {
 		delete env.VSCODE_DEV;
@@ -176,6 +189,8 @@ try {
 	app = await _electron.launch({ executablePath: executable, args: [...applicationArgs, ...(emptyWorkspace ? ['--agents'] : [workspace]), ...commonArgs, ...inspectArgs], env, timeout: 60000 });
 	const launched = app;
 	deadline = setTimeout(() => { void app?.close().catch(() => {}); }, 180000);
+	report.executable = await realpath(await launched.evaluate(() => process.execPath));
+	assert.equal(report.executable, await realpath(executable), 'The fixture must run the selected executable');
 	assert.deepEqual(await launched.evaluate(({ app }) => ({ portable: process.env.VSCODE_PORTABLE, profile: app.getPath('userData') })), { portable, profile }, 'The fixture must keep portable configuration and editor storage under its own run directory');
 	const capture = async (page: Page, name: string, target = launched) => {
 		const window = await target.browserWindow(page);
