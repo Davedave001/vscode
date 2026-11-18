@@ -120,6 +120,27 @@ test('prefers the Signal-C runtime and supports an existing development runtime'
 	}
 });
 
+test('selects a side-by-side optimized package while preserving workspace, profiles and agent homes', () => {
+	const root = path.resolve('fork with spaces');
+	const workspace = path.resolve('project with spaces');
+	const build = path.resolve('updated package with spaces');
+	for (const ide of [false, true]) {
+		const original = createLaunchOptions(root, workspace, ide, {}, true);
+		const updated = createLaunchOptions(root, workspace, ide, {}, true, build);
+		assert.strictEqual(updated.executable, path.join(build, 'Signal-C.exe'));
+		assert.deepStrictEqual(updated.args, original.args);
+		assert.strictEqual(updated.profile, original.profile);
+		assert.deepStrictEqual(updated.agentHomes, original.agentHomes);
+		assert.deepStrictEqual(updated.environment, original.environment);
+	}
+});
+
+test('requires optimized mode when selecting a package', { skip: process.platform !== 'win32' }, () => {
+	const result = spawnSync(process.execPath, [path.join(__dirname, 'code-agent-workspace.ts'), '--dry-run', '--optimized-build', 'updated package'], { encoding: 'utf8' });
+	assert.notStrictEqual(result.status, 0);
+	assert.match(result.stderr, /Use --optimized --optimized-build/);
+});
+
 test('dry-run accepts a workspace with spaces without launching an editor or creating a profile', { skip: process.platform !== 'win32' }, () => {
 	const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-workspace-launch-'));
 	const workspace = path.join(temporary, 'Project with spaces');

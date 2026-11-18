@@ -10,11 +10,34 @@ import { toDisposable } from '../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
 import { ColorThemeData } from '../../../workbench/services/themes/common/colorThemeData.js';
 import { generateColorThemeCSS } from '../../../workbench/services/themes/browser/colorThemeCss.js';
+import { agentsActivityBarBackground, agentsActivityBarBorder, agentsChatInputBackground, agentsChatInputForeground, agentsDetailBackground, agentsPanelBackground, agentsPanelBorder, agentsPanelForeground } from '../../../workbench/common/agentsColors.js';
 import '../../browser/media/style.css';
 import '../../browser/media/workbench.css';
 
 suite('Sessions - Extension theme compatibility', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('inherits conventional theme colors for chat cards, details, composer, frames and activity bar', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {});
+		const pairs = [
+			[agentsPanelBackground, 'panel.background'], [agentsPanelForeground, 'foreground'],
+			[agentsDetailBackground, 'sideBar.background'], [agentsPanelBorder, 'panel.border'],
+			[agentsActivityBarBackground, 'activityBar.background'], [agentsActivityBarBorder, 'activityBar.border'],
+			[agentsChatInputBackground, 'input.background'], [agentsChatInputForeground, 'input.foreground'],
+		] as const;
+		for (const palette of [
+			{ 'panel.background': '#1a1b26', foreground: '#c0caf5', 'sideBar.background': '#16161e', 'panel.border': '#1f2335', 'activityBar.background': '#13141c', 'activityBar.border': '#24283b', 'input.background': '#1f2335', 'input.foreground': '#a9b1d6' },
+			{ 'panel.background': '#fdf6e3', foreground: '#384c54', 'sideBar.background': '#eee8d5', 'panel.border': '#93a1a1', 'activityBar.background': '#e4ddc8', 'activityBar.border': '#839496', 'input.background': '#e8e1cc', 'input.foreground': '#586e75' },
+		]) {
+			theme.setCustomColors(palette);
+			for (const [agent, standard] of pairs) {
+				assert.strictEqual(theme.getColor(agent)?.toString(), theme.getColor(standard)?.toString(), `${agent} should inherit ${standard}`);
+			}
+		}
+		theme.setCustomColors({ 'panel.background': '#112233', 'agentsPanel.background': '#445566', 'sideBar.background': '#778899', 'agentsDetail.background': '#aabbcc' });
+		assert.strictEqual(theme.getColor(agentsPanelBackground)?.toString(), '#445566');
+		assert.strictEqual(theme.getColor(agentsDetailBackground)?.toString(), '#aabbcc');
+	});
 
 	test('keeps sidebar, menu and picker surfaces on their theme colors across palette changes', () => {
 		const root = append(mainWindow.document.body, $('.monaco-workbench.agent-sessions-workbench.vs-dark'));

@@ -25,7 +25,7 @@ function bundledClaudeDirectory(repoRoot: string): string | undefined {
 	} catch { return undefined; }
 }
 
-function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv, optimized = false) {
+function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, inheritedEnvironment: NodeJS.ProcessEnv, optimized = false, optimizedBuild?: string) {
 	const buildRoot = path.join(repoRoot, '.build');
 	const profile = path.join(buildRoot, 'agent-workspace-profile');
 	const codexHome = path.join(buildRoot, 'agent-workspace-codex');
@@ -63,7 +63,7 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 	}
 	return {
 		// Existing development runtimes remain usable until native assets are rebuilt.
-		executable: optimized ? path.join(path.dirname(repoRoot), `VSCode-win32-${process.arch}`, `${product.nameShort}.exe`) : fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
+		executable: optimized ? path.join(optimizedBuild ? path.resolve(optimizedBuild) : path.join(path.dirname(repoRoot), `VSCode-win32-${process.arch}`), `${product.nameShort}.exe`) : fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
 		args: [...(!optimized ? [repoRoot] : []), ...(ide ? [] : ['--agents']), workspace,
 			'--user-data-dir', profile,
 			'--shared-data-dir', path.join(buildRoot, 'agent-workspace-shared'),
@@ -78,24 +78,27 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 }
 
 function main() {
-	const args = minimist(process.argv.slice(2), { boolean: ['help', 'ide', 'optimized', 'dry-run'], string: ['workspace'] });
+	const args = minimist(process.argv.slice(2), { boolean: ['help', 'ide', 'optimized', 'dry-run'], string: ['workspace', 'optimized-build'] });
 	if (args.help) {
-		console.log('node scripts/code-agent-workspace.ts [--ide] [--optimized] [--workspace <folder>] [--dry-run]\nLaunch Signal-C (Signal-Connections) with separate editor, shared-storage, extension, and agent profiles. --optimized uses the packaged desktop build.');
+		console.log('node scripts/code-agent-workspace.ts [--ide] [--optimized [--optimized-build <folder>]] [--workspace <folder>] [--dry-run]\nLaunch Signal-C (Signal-Connections) with separate editor, shared-storage, extension, and agent profiles. --optimized uses the packaged desktop build. --optimized-build selects a side-by-side package while retaining this checkout\'s profiles.');
 		return;
 	}
 	if (process.platform !== 'win32') {
 		throw new Error('This development launcher currently supports Windows.');
 	}
-	const unknown = Object.keys(args).filter(key => !['_', 'help', 'ide', 'optimized', 'dry-run', 'workspace'].includes(key));
+	const unknown = Object.keys(args).filter(key => !['_', 'help', 'ide', 'optimized', 'optimized-build', 'dry-run', 'workspace'].includes(key));
 	if (unknown.length || args._.length) {
 		throw new Error('Use --workspace <folder> to select a workspace; additional editor arguments are not forwarded.');
+	}
+	if (args['optimized-build'] !== undefined && (!args.optimized || !args['optimized-build'].trim())) {
+		throw new Error('Use --optimized --optimized-build <folder> to select a packaged desktop build.');
 	}
 	const repoRoot = path.resolve(__dirname, '..');
 	const workspace = path.resolve(args.workspace ?? repoRoot);
 	if (!fs.statSync(workspace).isDirectory()) {
 		throw new Error('The workspace must be an existing directory.');
 	}
-	const options = createLaunchOptions(repoRoot, workspace, args.ide, process.env, args.optimized);
+	const options = createLaunchOptions(repoRoot, workspace, args.ide, process.env, args.optimized, args['optimized-build']);
 	if (args['dry-run']) {
 		console.log(JSON.stringify({ executable: options.executable, args: options.args }, null, 2));
 		return;

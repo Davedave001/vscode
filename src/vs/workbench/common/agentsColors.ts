@@ -7,13 +7,13 @@
 
 import { localize } from '../../nls.js';
 import { Color } from '../../base/common/color.js';
-import { darken, lighten, registerColor, transparent } from '../../platform/theme/common/colorUtils.js';
+import { darken, ifDefinedThenElse, lighten, registerColor, transparent } from '../../platform/theme/common/colorUtils.js';
 import { contrastBorder, focusBorder } from '../../platform/theme/common/colorRegistry.js';
 import { editorWidgetBackground, editorWidgetBorder, editorBackground, editorWarningForeground, toolbarHoverBackground } from '../../platform/theme/common/colors/editorColors.js';
 import { foreground } from '../../platform/theme/common/colors/baseColors.js';
 import { buttonBackground, buttonSecondaryBorder, inputBackground, inputBorder, inputForeground, inputPlaceholderForeground } from '../../platform/theme/common/colors/inputColors.js';
 import { listWarningForeground } from '../../platform/theme/common/colors/listColors.js';
-import { ACTIVITY_BAR_BADGE_BACKGROUND, ACTIVITY_BAR_BADGE_FOREGROUND, SIDE_BAR_BACKGROUND, SIDE_BAR_FOREGROUND } from './theme.js';
+import { ACTIVITY_BAR_BACKGROUND, ACTIVITY_BAR_BORDER, ACTIVITY_BAR_BADGE_BACKGROUND, ACTIVITY_BAR_BADGE_FOREGROUND, PANEL_BACKGROUND, PANEL_BORDER, SIDE_BAR_BACKGROUND, SIDE_BAR_FOREGROUND } from './theme.js';
 
 export const agentSessionNeedsInputForeground = registerColor(
 	'agentSessionNeedsInput.foreground',
@@ -37,23 +37,33 @@ export const agentsBackground = registerColor(
 
 export const agentsPanelBackground = registerColor(
 	'agentsPanel.background',
-	{ dark: SIDE_BAR_BACKGROUND, light: editorBackground, hcDark: SIDE_BAR_BACKGROUND, hcLight: SIDE_BAR_BACKGROUND },
+	{
+		dark: ifDefinedThenElse(PANEL_BACKGROUND, PANEL_BACKGROUND, SIDE_BAR_BACKGROUND),
+		light: ifDefinedThenElse(PANEL_BACKGROUND, PANEL_BACKGROUND, editorBackground),
+		hcDark: ifDefinedThenElse(PANEL_BACKGROUND, PANEL_BACKGROUND, SIDE_BAR_BACKGROUND),
+		hcLight: ifDefinedThenElse(PANEL_BACKGROUND, PANEL_BACKGROUND, SIDE_BAR_BACKGROUND),
+	},
 	localize('agentsPanel.background', 'Background color of the card panels (chat, files, terminal) in the agent sessions window.')
 );
 
 export const agentsDetailBackground = registerColor(
-	'agentsDetail.background', editorBackground,
+	'agentsDetail.background', ifDefinedThenElse(SIDE_BAR_BACKGROUND, SIDE_BAR_BACKGROUND, editorBackground),
 	localize('agentsDetail.background', 'Background color of the docked details pane in the agent sessions window.')
 );
 
 export const agentsPanelForeground = registerColor(
-	'agentsPanel.foreground', SIDE_BAR_FOREGROUND,
+	'agentsPanel.foreground', ifDefinedThenElse(foreground, foreground, SIDE_BAR_FOREGROUND),
 	localize('agentsPanel.foreground', 'Foreground color of the card panels (chat, files, terminal) in the agent sessions window.')
 );
 
 export const agentsPanelBorder = registerColor(
 	'agentsPanel.border',
-	{ dark: transparent(foreground, 0.15), light: transparent(foreground, 0.15), hcDark: contrastBorder, hcLight: contrastBorder },
+	{
+		dark: ifDefinedThenElse(PANEL_BORDER, PANEL_BORDER, transparent(foreground, 0.15)),
+		light: ifDefinedThenElse(PANEL_BORDER, PANEL_BORDER, transparent(foreground, 0.15)),
+		hcDark: contrastBorder,
+		hcLight: contrastBorder,
+	},
 	localize('agentsPanel.border', 'Border color of the card panels (chat, files, terminal) in the agent sessions window.')
 );
 
@@ -68,12 +78,12 @@ export const agentsBottomPanelBorder = registerColor(
 );
 
 export const agentsActivityBarBackground = registerColor(
-	'agentsActivityBar.background', Color.transparent,
+	'agentsActivityBar.background', ifDefinedThenElse(ACTIVITY_BAR_BACKGROUND, ACTIVITY_BAR_BACKGROUND, Color.transparent),
 	localize('agentsActivityBar.background', 'Background color of the docked Session Activity Bar in the Agents window.')
 );
 
 export const agentsActivityBarBorder = registerColor(
-	'agentsActivityBar.border', Color.transparent,
+	'agentsActivityBar.border', ifDefinedThenElse(ACTIVITY_BAR_BORDER, ACTIVITY_BAR_BORDER, Color.transparent),
 	localize('agentsActivityBar.border', 'Border color of the docked Session Activity Bar in the Agents window.')
 );
 
