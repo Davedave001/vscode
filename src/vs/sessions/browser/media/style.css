@@ -114,13 +114,7 @@
 
 /* ---- Sessions Action Widget Pickers ---- */
 
-.monaco-workbench.agent-sessions-workbench.modern-ui-frosted-glass:not(.hc-black):not(.hc-light) {
-	--modern-ui-solid-menu-background: var(--vscode-agentsPanel-background);
-	--modern-ui-solid-quick-input-background: var(--vscode-agentsPanel-background);
-}
-
 .agent-sessions-workbench .action-widget {
-	--vscode-menu-background: var(--vscode-agentsPanel-background);
 	background-color: var(--vscode-menu-background);
 }
 
@@ -139,10 +133,6 @@
 
 /* ---- Sessions Quick Picks ---- */
 
-.agent-sessions-workbench .quick-input-widget {
-	--vscode-quickInput-background: var(--vscode-agentsPanel-background);
-}
-
 .agent-sessions-workbench .quick-input-widget,
 .agent-sessions-workbench .quick-input-titlebar {
 	background-color: var(--vscode-quickInput-background) !important;
@@ -160,10 +150,6 @@
 }
 
 /* ---- Sessions Context Menus ---- */
-
-.agent-sessions-workbench .context-view.monaco-menu-container {
-	--vscode-menu-background: var(--vscode-agentsPanel-background);
-}
 
 .agent-sessions-workbench .context-view.monaco-menu-container,
 .agent-sessions-workbench .context-view.monaco-menu-container .monaco-menu,

@@ -16,6 +16,7 @@ import { DisposableStore, MutableDisposable } from '../../../base/common/lifecyc
 import { RunOnceScheduler } from '../../../base/common/async.js';
 import { IThemeService } from '../../../platform/theme/common/themeService.js';
 import { agentsBackground, agentsPanelForeground } from '../../../workbench/contrib/sessions/common/theme.js';
+import { TITLE_BAR_ACTIVE_BACKGROUND, TITLE_BAR_INACTIVE_BACKGROUND, TITLE_BAR_ACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_FOREGROUND } from '../../../workbench/common/theme.js';
 import { isLinux, isMacintosh, isWeb, isNative, platformLocale } from '../../../base/common/platform.js';
 import { EventType, EventHelper, append, $, addDisposableListener, prepend, getWindow, getWindowId, AnimationFrameScheduler } from '../../../base/browser/dom.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
@@ -425,10 +426,15 @@ export class TitlebarPart extends Part implements ITitlebarPart {
 		if (this.element) {
 			this.element.classList.toggle('inactive', this.isInactive);
 
-			const titleBarBackground = this.getColor(agentsBackground); // transparent background not supported on some platforms
+			// Standard theme tokens also apply in Agents mode unless the theme explicitly supplies Agent colors.
+			const titleBarBackground = this.theme.getColor(agentsBackground, false)?.toString()
+				?? this.getColor(this.isInactive ? TITLE_BAR_INACTIVE_BACKGROUND : TITLE_BAR_ACTIVE_BACKGROUND)
+				?? this.getColor(agentsBackground);
 			this.element.style.backgroundColor = titleBarBackground || '';
 
-			const titleForeground = this.getColor(agentsPanelForeground);
+			const titleForeground = this.theme.getColor(agentsPanelForeground, false)?.toString()
+				?? this.getColor(this.isInactive ? TITLE_BAR_INACTIVE_FOREGROUND : TITLE_BAR_ACTIVE_FOREGROUND)
+				?? this.getColor(agentsPanelForeground);
 			this.element.style.color = titleForeground || '';
 		}
 	}

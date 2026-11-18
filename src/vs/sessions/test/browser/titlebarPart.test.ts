@@ -12,6 +12,9 @@ import { CodeWindow, ensureCodeWindow, mainWindow } from '../../../base/browser/
 import { DeferredPromise, timeout } from '../../../base/common/async.js';
 import { runWithFakedTimers } from '../../../base/test/common/timeTravelScheduler.js';
 import { Emitter, Event } from '../../../base/common/event.js';
+import { IThemeService } from '../../../platform/theme/common/themeService.js';
+import { TestThemeService } from '../../../platform/theme/test/common/testThemeService.js';
+import { ColorThemeData } from '../../../workbench/services/themes/common/colorThemeData.js';
 import { IHostService } from '../../../workbench/services/host/browser/host.js';
 import { toDisposable } from '../../../base/common/lifecycle.js';
 import { isMacintosh, isNative } from '../../../base/common/platform.js';
@@ -44,7 +47,7 @@ suite('Sessions - Titlebar Part', () => {
 
 	const updateTitleBarToolBarOverflow = Reflect.get(TitlebarPart.prototype, 'updateTitleBarToolBarOverflow') as (this: TitlebarPart) => void;
 
-	function createTitlebar(density: ModernUIDensity = ModernUIDensity.Default) {
+	function createTitlebar(density: ModernUIDensity = ModernUIDensity.Default, themeService?: TestThemeService) {
 		const configuration = new TestConfigurationService({
 			window: { titleBarStyle: 'custom' },
 			[LayoutSettings.MODERN_UI_DENSITY]: density,
@@ -52,10 +55,45 @@ suite('Sessions - Titlebar Part', () => {
 		});
 		store.add(configuration.onDidChangeConfigurationEmitter);
 		const instantiationService = workbenchInstantiationService({ configurationService: () => configuration }, store);
+		if (themeService) {
+			instantiationService.stub(IThemeService, themeService);
+		}
 		const part = store.add(instantiationService.createInstance(TitlebarPart, Parts.TITLEBAR_PART, mainWindow));
 		part.element = $('div');
 		return { part, configuration, instantiationService };
 	}
+
+	test('honors extension title colors, inactive colors and live palette changes', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {
+			'editor.background': '#1a1b26', 'sideBar.foreground': '#cccccc',
+			'titleBar.activeBackground': '#13141c', 'titleBar.activeForeground': '#ffffff',
+			'titleBar.inactiveBackground': '#11121a', 'titleBar.inactiveForeground': '#999999',
+		});
+		const service = new TestThemeService(theme);
+		const { part } = createTitlebar(ModernUIDensity.Default, service);
+		const container = append(mainWindow.document.body, $('.monaco-workbench.agent-sessions-workbench'));
+		store.add(toDisposable(() => container.remove()));
+		part.create(append(container, $('.part.titlebar')));
+		const read = () => ({ background: part.element.style.backgroundColor, foreground: part.element.style.color });
+		part.updateStyles();
+		assert.deepStrictEqual(read(), { background: 'rgb(19, 20, 28)', foreground: 'rgb(255, 255, 255)' });
+		Reflect.get(part, 'onBlur').call(part);
+		assert.deepStrictEqual(read(), { background: 'rgb(17, 18, 26)', foreground: 'rgb(153, 153, 153)' });
+		theme.setCustomColors({ 'titleBar.inactiveBackground': '#e8e8f0', 'titleBar.inactiveForeground': '#333344' });
+		service.fireThemeChange();
+		assert.deepStrictEqual(read(), { background: 'rgb(232, 232, 240)', foreground: 'rgb(51, 51, 68)' });
+	});
+
+	test('preserves explicit Agent title color overrides', () => {
+		const theme = ColorThemeData.createUnloadedTheme('vs-dark', {
+			'agents.background': '#123456', 'agentsPanel.foreground': '#abcdef',
+			'titleBar.activeBackground': '#13141c', 'titleBar.activeForeground': '#ffffff',
+		});
+		const { part } = createTitlebar(ModernUIDensity.Default, new TestThemeService(theme));
+		part.updateStyles();
+		assert.strictEqual(part.element.style.backgroundColor, 'rgb(18, 52, 86)');
+		assert.strictEqual(part.element.style.color, 'rgb(171, 205, 239)');
+	});
 
 	test('uses 44px in Default and 35px in Compact at startup', () => {
 		const heights = [ModernUIDensity.Default, ModernUIDensity.Compact].map(density => {
