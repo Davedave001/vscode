@@ -4130,6 +4130,31 @@ suite('SessionsManagementService', () => {
 		});
 	}
 
+	test('a workspace draft restored by the composer keeps the current custom view and focus', async () => {
+		const folderUri = URI.file('/workspace');
+		const workspace: ISessionWorkspace = {
+			uri: folderUri, label: 'workspace', icon: Codicon.folder,
+			folders: [{ root: folderUri, workingDirectory: folderUri, name: 'workspace', description: undefined }],
+			requiresWorkspaceTrust: false, isVirtualWorkspace: false,
+		};
+		const draft = stubSession({ sessionId: 'draft', providerId: 'test', status: constObservable(SessionStatus.Untitled), workspace: constObservable(workspace) });
+		const provider = new class extends TestSessionsProvider {
+			override resolveWorkspace(): ISessionWorkspace { return workspace; }
+		}(draft);
+		const { view, customViewService, sessionsPartService } = createSessionsManagementService(draft, disposables, provider);
+		showTestCustomView(customViewService, disposables);
+		const navigation = view.navigationRequest.get();
+		const result = await view.openNewSession({ folderUri, preserveNavigation: true });
+		assert.strictEqual(result.session, draft);
+		assert.strictEqual(activeSessionOf(view), draft);
+		assert.strictEqual(customViewService.activeCustomView.get()?.id, 'test.customView');
+		assert.strictEqual(view.navigationRequest.get(), navigation);
+		assert.deepStrictEqual(sessionsPartService.focusedSessions, []);
+
+		await view.openNewSession();
+		assert.strictEqual(customViewService.activeCustomView.get(), undefined);
+	});
+
 	for (const trusted of [false, true]) {
 		test(`custom-view draft preparation preserves the grid and honors workspace trust (${trusted})`, async () => {
 			const folderUri = URI.file('/workspace');

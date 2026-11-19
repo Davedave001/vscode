@@ -31,12 +31,15 @@ import { IMcpServerConfiguration, McpServerType, McpServerVariableType } from '.
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IInputOptions, IPickOptions, IQuickInputService, IQuickPick, IQuickPickDidAcceptEvent, IQuickPickItem, QuickPickInput } from '../../../../../platform/quickinput/common/quickInput.js';
+import { ISecretStorageService } from '../../../../../platform/secrets/common/secrets.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { NullTelemetryService } from '../../../../../platform/telemetry/common/telemetryUtils.js';
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { isWorkspaceFolder, IWorkspaceContextService, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { ActiveEditorContext, ResourceContextKey } from '../../../../common/contextkeys.js';
+import { IAuthenticationService } from '../../../../services/authentication/common/authentication.js';
+import { IAuthenticationQueryService } from '../../../../services/authentication/common/authenticationQuery.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
 import { IRemoteUserDataProfilesService } from '../../../../services/userDataProfile/common/remoteUserDataProfiles.js';
@@ -49,16 +52,18 @@ import { ICustomizationHarnessService, type IHarnessDescriptor } from '../../../
 import { ChatContextKeys } from '../../../chat/common/actions/chatContextKeys.js';
 import { AICustomizationManagementCommands, AICustomizationManagementSection } from '../../../chat/common/aiCustomizationWorkspaceService.js';
 import { SessionType } from '../../../chat/common/chatSessionsService.js';
+import { ContributionEnablementState } from '../../../chat/common/enablement.js';
 import { TEXT_FILE_EDITOR_ID } from '../../../files/common/files.js';
-import { AddConfigurationAction, ConnectAppAction, OpenRemoteUserMcpResourceCommand, OpenUserMcpResourceCommand, OpenWorkspaceFolderMcpResourceCommand } from '../../browser/mcpCommands.js';
-import { signalCAppConnections } from '../../common/signalCAppConnections.js';
+import { AddConfigurationAction, ConnectAppAction, McpServerOptionsCommand, OpenRemoteUserMcpResourceCommand, OpenUserMcpResourceCommand, OpenWorkspaceFolderMcpResourceCommand } from '../../browser/mcpCommands.js';
+import { findSignalCAppConnection, matchesSignalCAppConnection, microsoft365WorkIq, signalCAppConnections } from '../../common/signalCAppConnections.js';
 import { McpConfigurationDestination } from '../../browser/mcpConfigurationDestination.js';
 import { getContextMenuActions, InstallAction, InstallInRemoteAction, InstallInWorkspaceAction, ShowServerJsonConfigurationAction } from '../../browser/mcpServerActions.js';
 import { mcpWorkspaceRootConfig } from '../../common/mcpConfiguration.js';
+import { McpCommandIds } from '../../common/mcpCommandIds.js';
 import { getMcpGenerationSchema, McpGeneratedConfiguration } from '../../common/mcpConfigurationGeneration.js';
 import { IMcpCopilotGlobalConfigurationService } from '../../common/mcpCopilotGlobalConfigurationService.js';
 import { IMcpRegistry } from '../../common/mcpRegistryTypes.js';
-import { IMcpServer, IMcpService, IMcpWorkbenchService, IWorkbenchMcpServer, McpCollectionDefinition, McpConnectionState, McpServerDefinition, McpServerInstallState } from '../../common/mcpTypes.js';
+import { IMcpSamplingService, IMcpServer, IMcpService, IMcpWorkbenchService, IWorkbenchMcpServer, McpCollectionDefinition, McpConnectionState, mcpOAuthClientSecretStorageKey, McpServerDefinition, McpServerInstallState, McpServerLaunch, McpServerTransportType } from '../../common/mcpTypes.js';
 import { startServerByFilter } from '../../common/mcpTypesUtils.js';
 
 class TestQuickInputService extends mock<IQuickInputService>() {
@@ -119,6 +124,8 @@ suite('MCP configuration entry points', () => {
 		const opened: URI[] = [];
 		const selections: (IRange | undefined)[] = [];
 		const started: string[] = [];
+		const secrets = new Map<string, string>();
+		const keysAtStart: string[][] = [];
 		const appDialogs: IPrompt<unknown>[] = [];
 		const chosenFiles: (URI[] | undefined)[] = [];
 		const errors: Parameters<INotificationService['error']>[0][] = [];
@@ -131,6 +138,7 @@ suite('MCP configuration entry points', () => {
 
 		instantiation.stub(IConfigurationService, new TestConfigurationService({ [mcpWorkspaceRootConfig]: enabled }));
 		instantiation.stub(IQuickInputService, quickInput);
+		instantiation.stub(ISecretStorageService, { get: async key => secrets.get(key), set: async (key, value) => { secrets.set(key, value); } });
 		instantiation.stub(IFileDialogService, { showOpenDialog: async () => { assert.ok(chosenFiles.length, 'Unexpected file picker'); return chosenFiles.shift(); } });
 		instantiation.stub(IDialogService, {
 			prompt: async prompt => {
@@ -187,15 +195,21 @@ suite('MCP configuration entry points', () => {
 		instantiation.stub(IAllowedMcpServersService, { isAllowed: () => true });
 		instantiation.stub(IUserDataProfileService, upcastDeepPartial<IUserDataProfileService>({ currentProfile: { mcpResource: URI.file('/user/mcp.json') } }));
 
-		const runtimeServer = (id: string, resource: URI) => {
-			const definition = upcastPartial<McpServerDefinition>({ id, label: installable.name, presentation: { origin: { uri: resource, range: new Range(3, 1, 3, 5) } } });
-			const collection = upcastPartial<McpCollectionDefinition>({ id, serverDefinitions: constObservable([definition]) });
-			collections.set([...collections.get().filter(collection => collection.id !== id), collection], undefined);
-			return upcastDeepPartial<IMcpServer>({
-				definition: { id, label: installable.name },
-				collection: { id },
+		const runtimeServer = (id: string, resource: URI, options?: { label: string; launch: McpServerLaunch; state?: McpConnectionState; collectionId?: string }) => {
+			const label = options?.label ?? installable.name;
+			const definition = upcastPartial<McpServerDefinition>({ id, label, launch: options?.launch, presentation: { origin: { uri: resource, range: new Range(3, 1, 3, 5) } } });
+			const collection = upcastPartial<McpCollectionDefinition>({ id: options?.collectionId ?? id, label: 'User MCP', serverDefinitions: constObservable([definition]) });
+			collections.set([...collections.get().filter(existing => existing.id !== collection.id), collection], undefined);
+			return upcastPartial<IMcpServer>({
+				definition: { id, label },
+				collection: { id: collection.id, label: collection.label, order: 0 },
+				connectionState: constObservable<McpConnectionState>(options?.state ?? { state: McpConnectionState.Kind.Stopped }),
+				enablement: constObservable(ContributionEnablementState.EnabledProfile),
+				readDefinitions: () => constObservable({ server: definition, collection }),
+				capabilities: constObservable(undefined),
 				start: async () => {
 					started.push(id);
+					keysAtStart.push([...secrets.keys()]);
 					return { state: McpConnectionState.Kind.Stopped };
 				},
 			});
@@ -221,7 +235,7 @@ suite('MCP configuration entry points', () => {
 				return upcastPartial<IWorkbenchMcpServer>({ id: local.id, name: local.name, local });
 			},
 		});
-		return { instantiation, quickInput, appDialogs, chosenFiles, folder, secondFolder, workspace, opened, selections, started, errors, existenceChecks, installs, agentHostAdds, agentHostGlobalAdds, servers, runtimeServer, destination: instantiation.createInstance(McpConfigurationDestination) };
+		return { instantiation, quickInput, appDialogs, chosenFiles, folder, secondFolder, workspace, opened, selections, started, secrets, keysAtStart, errors, existenceChecks, installs, agentHostAdds, agentHostGlobalAdds, servers, runtimeServer, destination: instantiation.createInstance(McpConfigurationDestination) };
 	}
 
 	test('app connections install through the existing MCP management and start flow', async () => {
@@ -237,6 +251,199 @@ suite('MCP configuration entry points', () => {
 		});
 		assert.deepStrictEqual(fixture.started, ['installed:/user/mcp.json']);
 		assert.ok(fixture.quickInput.pickOptions[0].placeholder?.includes('review setup'));
+	});
+
+	test('Outlook and Microsoft 365 names lead to one native Work IQ connection with the published public client', async () => {
+		for (const name of ['Outlook', 'Outlook Calendar', 'Microsoft 365', 'Teams', 'OneDrive', 'SharePoint']) {
+			assert.strictEqual(findSignalCAppConnection(name), microsoft365WorkIq);
+			assert.ok(matchesSignalCAppConnection(microsoft365WorkIq, name));
+		}
+		const fixture = setup(true, [], false, true);
+		fixture.quickInput.selections.push('Connect with OAuth');
+		fixture.quickInput.inputs.push('Work Outlook');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, microsoft365WorkIq.id, 'assistant');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.deepStrictEqual(fixture.installs, [{
+			server: {
+				name: 'Work Outlook',
+				config: {
+					type: McpServerType.REMOTE, transport: 'http', url: 'https://workiq.svc.cloud.microsoft/mcp',
+					oauth: { clientId: 'ba081686-5d24-4bc6-a0d6-d034ecffed87' },
+				},
+				inputs: undefined,
+			},
+			options: { target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined },
+		}]);
+		assert.deepStrictEqual(fixture.started, ['installed:/user/mcp.json']);
+		assert.match(String(fixture.appDialogs[0].detail), /work or school account.*Copilot Credits/);
+		assert.strictEqual(fixture.quickInput.questionOrder.filter(item => item === 'input').length, 1, 'The account setup needs only a connection name');
+		assert.deepStrictEqual(fixture.keysAtStart, [[]]);
+	});
+
+	test('Assistant Slack connects in its active profile and stores its masked credential before start', async () => {
+		const fixture = setup(true, [], false, true);
+		fixture.instantiation.stub(IMcpCopilotGlobalConfigurationService, { getConfigurationResource: async () => URI.file('/copilot/mcp-config.json') });
+		fixture.quickInput.selections.push('Connect with OAuth');
+		fixture.quickInput.inputs.push('registered-slack-id', 'support-slack', 'synthetic-slack-secret');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'slack', 'assistant');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.deepStrictEqual(fixture.installs, [{
+			server: { name: 'support-slack', config: { type: McpServerType.REMOTE, transport: 'http', url: 'https://mcp.slack.com/mcp', oauth: { clientId: 'registered-slack-id' } }, inputs: undefined },
+			options: { target: ConfigurationTarget.USER_LOCAL, workspaceConfig: undefined },
+		}]);
+		assert.deepStrictEqual(fixture.agentHostAdds, []);
+		assert.deepStrictEqual(fixture.agentHostGlobalAdds, []);
+		assert.deepStrictEqual(fixture.opened, []);
+		assert.deepStrictEqual(fixture.started, ['installed:/user/mcp.json']);
+		assert.strictEqual(fixture.quickInput.inputOptions[2]?.password, true);
+		const key = mcpOAuthClientSecretStorageKey('https://mcp.slack.com/mcp', 'registered-slack-id');
+		assert.strictEqual(fixture.secrets.get(key), 'synthetic-slack-secret');
+		assert.deepStrictEqual(fixture.keysAtStart, [[key]]);
+	});
+
+	for (const continueWithPublicClient of [false, true]) {
+		test(`Assistant Slack ${continueWithPublicClient ? 'accepts a public PKCE client' : 'cancels before writing setup'}`, async () => {
+			const fixture = setup(true);
+			fixture.quickInput.selections.push('Connect with OAuth');
+			fixture.quickInput.inputs.push('registered-slack-id', 'support-slack', continueWithPublicClient ? '' : undefined);
+			await new ConnectAppAction().run(fixture.instantiation, undefined, 'slack', 'assistant');
+			assert.deepStrictEqual(fixture.errors, []);
+			assert.strictEqual(fixture.installs.length, continueWithPublicClient ? 1 : 0);
+			assert.strictEqual(fixture.started.length, continueWithPublicClient ? 1 : 0);
+			assert.strictEqual(fixture.secrets.size, 0);
+		});
+	}
+
+	test('Assistant opens existing Slack options by exact endpoint and keeps setup unchanged', async () => {
+		const fixture = setup(true);
+		const commands: unknown[][] = [];
+		fixture.instantiation.stub(ICommandService, 'executeCommand', async (...args: unknown[]) => { commands.push(args); });
+		const config = URI.file('/user/mcp.json');
+		const official = URI.parse('https://mcp.slack.com/mcp');
+		fixture.servers.set([
+			fixture.runtimeServer('support', config, {
+				label: 'Support workspace', launch: { type: McpServerTransportType.HTTP, uri: official, headers: [] },
+				state: { state: McpConnectionState.Kind.Error, message: 'Credential failure details' },
+			}),
+			fixture.runtimeServer('engineering', config, {
+				label: 'Engineering workspace', launch: { type: McpServerTransportType.HTTP, uri: URI.parse('https://MCP.SLACK.COM:443/mcp'), headers: [] },
+				state: { state: McpConnectionState.Kind.Running },
+			}),
+			fixture.runtimeServer('lookalike', config, {
+				label: 'Slack lookalike', launch: { type: McpServerTransportType.HTTP, uri: URI.parse('https://mcp.slack.com/other'), headers: [] },
+			}),
+		], undefined);
+		fixture.quickInput.selections.push('Support workspace', undefined);
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'slack', 'assistant');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'slack', 'assistant');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.deepStrictEqual(fixture.quickInput.pickLabels[0], ['Support workspace', 'Engineering workspace', 'Add another Slack connection']);
+		assert.deepStrictEqual(fixture.quickInput.pickOptions[0].descriptions, ['Needs attention', 'Running', undefined]);
+		assert.deepStrictEqual(commands, [[McpCommandIds.ServerOptions, 'support']]);
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.started, []);
+		assert.deepStrictEqual(fixture.appDialogs, []);
+		assert.strictEqual(fixture.secrets.size, 0);
+	});
+
+	test('Assistant can explicitly add a second Slack connection', async () => {
+		const fixture = setup(true);
+		const existing = fixture.runtimeServer('first', URI.file('/user/mcp.json'), {
+			label: 'First Slack', launch: { type: McpServerTransportType.HTTP, uri: URI.parse('https://mcp.slack.com/mcp'), headers: [] },
+		});
+		fixture.servers.set([existing], undefined);
+		fixture.quickInput.selections.push('Add another Slack connection', 'Connect with OAuth');
+		fixture.quickInput.inputs.push('registered-slack-id', 'second-slack', '');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'slack', 'assistant');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.strictEqual(fixture.installs.length, 1);
+		assert.strictEqual(fixture.installs[0].server.name, 'second-slack');
+		assert.strictEqual(existing.definition.label, 'First Slack');
+	});
+
+	test('Assistant reopens a configured local QuickBooks server before asking for file paths', async () => {
+		const fixture = setup(true);
+		const commands: unknown[][] = [];
+		fixture.instantiation.stub(ICommandService, 'executeCommand', async (...args: unknown[]) => { commands.push(args); });
+		fixture.servers.set([fixture.runtimeServer('books', URI.file('/user/mcp.json'), {
+			label: 'Company Books', launch: {
+				type: McpServerTransportType.Stdio, command: 'node', args: ['/private/quickbooks/dist/index.js'],
+				env: { QUICKBOOKS_TOKEN_STORE_PATH: '/private/tokens.json' }, cwd: undefined, envFile: undefined, sandbox: undefined,
+			},
+		})], undefined);
+		fixture.quickInput.selections.push('Company Books');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, 'quickbooks-local', 'assistant');
+		assert.deepStrictEqual(fixture.errors, []);
+		assert.deepStrictEqual(commands, [[McpCommandIds.ServerOptions, 'books']]);
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.quickInput.pickOptions[0].details, ['User MCP', undefined]);
+	});
+
+	test('server options opens the native OAuth credential editor with the configured endpoint and client ID', async () => {
+		const fixture = setup(true);
+		fixture.instantiation.stub(IMcpSamplingService, { hasLogs: () => false });
+		fixture.instantiation.stub(IAuthenticationService, {});
+		fixture.instantiation.stub(IAuthenticationQueryService, { mcpServer: () => upcastPartial<ReturnType<IAuthenticationQueryService['mcpServer']>>({ getAllAccountPreferences: () => new Map() }) });
+		const commands: unknown[][] = [];
+		fixture.instantiation.stub(ICommandService, 'executeCommand', async (...args: unknown[]) => { commands.push(args); });
+		const url = 'https://mcp.slack.com/mcp';
+		fixture.servers.set([fixture.runtimeServer('support', URI.file('/user/mcp.json'), {
+			label: 'Support workspace', launch: { type: McpServerTransportType.HTTP, uri: URI.parse(url), headers: [], oauth: { clientId: 'approved-id' } },
+		})], undefined);
+		fixture.quickInput.selections.push('Set OAuth Client Secret…');
+		await new McpServerOptionsCommand().run(fixture.instantiation, 'support');
+		assert.deepStrictEqual(commands, [[McpCommandIds.SetOAuthClientSecret, 'approved-id', url, 'Support workspace']]);
+		assert.deepStrictEqual(fixture.started, []);
+	});
+
+	test('Assistant can sign in to an existing Microsoft 365 connection after OAuth was dismissed', async () => {
+		const fixture = setup(true);
+		fixture.instantiation.stub(IMcpSamplingService, { hasLogs: () => false });
+		fixture.instantiation.stub(IAuthenticationService, {});
+		fixture.instantiation.stub(IAuthenticationQueryService, { mcpServer: () => upcastPartial<ReturnType<IAuthenticationQueryService['mcpServer']>>({ getAllAccountPreferences: () => new Map() }) });
+		fixture.instantiation.stub(ICommandService, 'executeCommand', async (id: string, serverId: string) => {
+			assert.strictEqual(id, McpCommandIds.ServerOptions);
+			return new McpServerOptionsCommand().run(fixture.instantiation, serverId);
+		});
+		fixture.servers.set([fixture.runtimeServer('workiq', URI.file('/user/mcp.json'), {
+			label: 'Work Outlook',
+			launch: {
+				type: McpServerTransportType.HTTP,
+				uri: URI.parse(microsoft365WorkIq.url),
+				headers: [],
+				oauth: { clientId: microsoft365WorkIq.publicClientId },
+			},
+			state: { state: McpConnectionState.Kind.Stopped, reason: 'needs-user-interaction' },
+		})], undefined);
+		fixture.quickInput.selections.push('Work Outlook', 'Sign In…');
+		await new ConnectAppAction().run(fixture.instantiation, undefined, microsoft365WorkIq.id, 'assistant');
+		assert.strictEqual(fixture.quickInput.pickOptions[0].descriptions[0], 'Sign-in required');
+		assert.strictEqual(fixture.quickInput.pickLabels[1][0], 'Sign In…');
+		assert.deepStrictEqual(fixture.started, ['workiq']);
+		assert.deepStrictEqual(fixture.installs, []);
+		assert.deepStrictEqual(fixture.errors, []);
+	});
+
+	test('report recovery finds only the selected connection when server IDs match across collections', async () => {
+		const fixture = setup(true);
+		fixture.instantiation.stub(IMcpSamplingService, { hasLogs: () => false });
+		fixture.instantiation.stub(IAuthenticationService, {});
+		fixture.instantiation.stub(IAuthenticationQueryService, { mcpServer: () => upcastPartial<ReturnType<IAuthenticationQueryService['mcpServer']>>({ getAllAccountPreferences: () => new Map() }) });
+		const uri = URI.parse(microsoft365WorkIq.url);
+		const launch: McpServerLaunch = { type: McpServerTransportType.HTTP, uri, headers: [] };
+		fixture.servers.set([
+			fixture.runtimeServer('microsoft365', URI.file('/other/mcp.json'), { label: 'Other outlook', launch, collectionId: 'other' }),
+			fixture.runtimeServer('microsoft365', URI.file('/user/mcp.json'), {
+				label: 'Work Outlook', launch, collectionId: 'work',
+			}),
+		], undefined);
+		const command = new McpServerOptionsCommand();
+		await command.run(fixture.instantiation, 'microsoft365', { collectionId: 'removed', needsSignIn: true });
+		assert.deepStrictEqual(fixture.quickInput.pickLabels, []);
+		fixture.quickInput.selections.push('Sign In…');
+		await command.run(fixture.instantiation, 'microsoft365', { collectionId: 'work', needsSignIn: true });
+		assert.match(fixture.quickInput.pickOptions[0].placeholder ?? '', /Work Outlook/);
+		assert.deepStrictEqual(fixture.started, ['microsoft365']);
 	});
 
 	for (const [name, id, url] of [
@@ -335,8 +542,12 @@ suite('MCP configuration entry points', () => {
 	for (const name of ['Gmail', 'Google Drive', 'Box', 'Dropbox', 'Xero']) {
 		test(`${name} uses registered OAuth setup without storing a client secret in configuration`, async () => {
 			const fixture = setup(true);
+			const googleWorkspace = name === 'Gmail' || name === 'Google Drive';
 			fixture.quickInput.selections.push(name, 'Connect with OAuth', 'Global');
 			fixture.quickInput.inputs.push('test-public-client-id', '$suggested');
+			if (googleWorkspace) {
+				fixture.quickInput.inputs.push('fixture-google-secret');
+			}
 			await new ConnectAppAction().run(fixture.instantiation);
 			assert.deepStrictEqual(fixture.errors, []);
 			assert.strictEqual(fixture.installs.length, 1);
@@ -345,6 +556,15 @@ suite('MCP configuration entry points', () => {
 			if (config.type === McpServerType.REMOTE) {
 				assert.deepStrictEqual(config.oauth, { clientId: 'test-public-client-id' });
 				assert.strictEqual(config.headers, undefined);
+				if (googleWorkspace) {
+					assert.ok(String(fixture.appDialogs[0].detail).includes('http://127.0.0.1:33418/'));
+					const key = mcpOAuthClientSecretStorageKey(config.url, 'test-public-client-id');
+					assert.strictEqual(fixture.secrets.get(key), 'fixture-google-secret');
+					const passwordInput = fixture.quickInput.inputOptions.find(input => input?.password);
+					assert.ok(passwordInput?.validateInput);
+					assert.ok(await passwordInput.validateInput('  '));
+					assert.strictEqual(await passwordInput.validateInput('fixture-google-secret'), undefined);
+				}
 			}
 			assert.ok(fixture.quickInput.prompts.includes(`${name} OAuth App Client ID`));
 		});
@@ -991,6 +1211,49 @@ suite('MCP configuration entry points', () => {
 			fixture.instantiation.stub(ILabelService, { getUriLabel: uri => uri.toString(true), getHostLabel: () => 'test-host' });
 			fixture.instantiation.stub(INotificationService, 'info', (message: Parameters<INotificationService['info']>[0]) => { notifications.push(message); });
 			return { ...fixture, writes, notifications, get lookups() { return lookups; } };
+		}
+
+		test('adds Gmail to Copilot Global and saves the client secret separately', async () => {
+			const fixture = setupGlobal();
+			const url = 'https://gmailmcp.googleapis.com/mcp/v1';
+			const key = mcpOAuthClientSecretStorageKey(url, 'gmail-client');
+			fixture.quickInput.selections.push('Connect with OAuth', 'Global', 'Copilot Global');
+			fixture.quickInput.inputs.push('gmail-client', 'work-gmail', '  fixture-secret  ');
+			await new ConnectAppAction().run(fixture.instantiation, undefined, 'gmail');
+			assert.deepStrictEqual(fixture.errors, []);
+			assert.deepStrictEqual(fixture.agentHostGlobalAdds, [{
+				name: 'work-gmail',
+				config: { type: McpServerType.REMOTE, transport: 'http', url, oauth: { clientId: 'gmail-client' } },
+			}]);
+			assert.strictEqual(fixture.quickInput.inputOptions[2]?.password, true);
+			assert.strictEqual(fixture.secrets.get(key), 'fixture-secret');
+			assert.strictEqual(fixture.notifications.length, 1);
+		});
+
+		for (const credential of ['existing', 'missing', 'failed'] as const) {
+			test(`handles a ${credential} Gmail credential when adding to Copilot Global`, async () => {
+				const fixture = setupGlobal();
+				const key = mcpOAuthClientSecretStorageKey('https://gmailmcp.googleapis.com/mcp/v1', 'gmail-client');
+				fixture.quickInput.selections.push('Connect with OAuth', 'Global', 'Copilot Global');
+				fixture.quickInput.inputs.push('gmail-client', 'work-gmail');
+				if (credential === 'existing') {
+					fixture.secrets.set(key, 'existing-secret');
+				} else {
+					fixture.quickInput.inputs.push(credential === 'failed' ? 'fixture-secret' : undefined);
+				}
+				if (credential === 'failed') {
+					fixture.instantiation.stub(ICustomizationHarnessService, {
+						getActiveDescriptor: () => upcastDeepPartial<IHarnessDescriptor>({
+							mcpConfigurationProvider: { addGlobal: async () => { throw new Error('Configuration write failed'); } },
+						}),
+					});
+				}
+				await new ConnectAppAction().run(fixture.instantiation, undefined, 'gmail');
+				assert.strictEqual(fixture.agentHostGlobalAdds.length, credential === 'existing' ? 1 : 0);
+				assert.strictEqual(fixture.secrets.get(key), credential === 'existing' ? 'existing-secret' : undefined);
+				assert.strictEqual(fixture.opened.length, credential === 'existing' ? 1 : 0);
+				assert.strictEqual(fixture.errors.length, credential === 'failed' ? 1 : 0);
+			});
 		}
 
 		for (const remote of [false, true]) {

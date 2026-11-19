@@ -9,6 +9,7 @@ import { DeferredPromise } from '../../../../base/common/async.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { type ILogService, NullLogService } from '../../../log/common/log.js';
 import { AcpClient, isAcpRecord } from '../../node/acp/acpClient.js';
 import { DevinSubscriptionAgent, DEVIN_SUBSCRIPTION_RESOURCE, devinSubscriptionEnvironment, parseDevinModels } from '../../node/acp/devinSubscriptionAgent.js';
 import { ActionType, isChatAction } from '../../common/state/sessionActions.js';
@@ -20,6 +21,8 @@ import { CustomizationEnablementKind } from '../../common/state/protocol/state.j
 import { chatReducer } from '../../common/state/protocol/reducers.js';
 import { resolveAcpPrompt } from '../../node/acp/acpPromptResolver.js';
 import { type AcpMcpServer, type IDevinMcpConfiguration } from '../../node/acp/devinMcpConfiguration.js';
+import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
+import type { IAgentChatConfigurationChangeEvent } from '../../node/agentConfigurationService.js';
 
 const catalog = { families: [{ variants: [{ model_uid: 'swe-2-high', label: 'SWE-2 High', max_context_tokens: 262000 }] }] };
 const chat = URI.parse('agent-host-chat://devin-subscription/chat');
@@ -30,14 +33,19 @@ function toolUpdate(transport: TestAcpTransport, update: Record<string, unknown>
 	transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update } });
 }
 
+function nativeApprovalMode(currentValue: string) {
+	return { id: 'native-mode', category: 'mode', type: 'select', currentValue, options: [{ value: 'accept-edits', name: 'Code' }, { value: 'bypass', name: 'Bypass Permissions' }] };
+}
+
 suite('Devin Subscription Agent', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	function fixture(modelCatalog = catalog, mcpConfiguration?: IDevinMcpConfiguration) {
+	function fixture(modelCatalog = catalog, mcpConfiguration?: IDevinMcpConfiguration, logService?: ILogService, configuration?: ConstructorParameters<typeof DevinSubscriptionAgent>[4]) {
 		const transports: TestAcpTransport[] = [];
 		const launches: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
 		const events: AgentSignal[] = [];
 		let onPrompt: ((transport: TestAcpTransport, request: Record<string, unknown>) => void) | undefined;
+		let onNew: typeof onPrompt;
 		let onLoad: typeof onPrompt;
 		let onConfig: typeof onPrompt;
 		let onInitialize: typeof onPrompt;
@@ -53,7 +61,7 @@ suite('Devin Subscription Agent', () => {
 						case 'initialize':
 							if (onInitialize) { onInitialize(transport, request); } else { transport.reply(request, { protocolVersion: 1, agentCapabilities: { loadSession: true } }); }
 							break;
-						case 'session/new': transport.reply(request, { sessionId: 'native', configOptions }); break;
+						case 'session/new': if (onNew) { onNew(transport, request); } else { transport.reply(request, { sessionId: 'native', configOptions }); } break;
 						case 'session/load':
 							if (onLoad) { onLoad(transport, request); break; }
 							transport.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native', update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'original' } } } });
@@ -67,14 +75,116 @@ suite('Devin Subscription Agent', () => {
 				};
 				return new AcpClient(transport);
 			},
-		}, mcpConfiguration));
+		}, mcpConfiguration, logService, configuration));
 		store.add(agent.onDidChatProgress(event => events.push(event)));
-		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; }, set onInitialize(value: typeof onInitialize) { onInitialize = value; } };
+		return { agent, transports, launches, events, set onPrompt(value: typeof onPrompt) { onPrompt = value; }, set onNew(value: typeof onNew) { onNew = value; }, set onLoad(value: typeof onLoad) { onLoad = value; }, set onConfig(value: typeof onConfig) { onConfig = value; }, set onInitialize(value: typeof onInitialize) { onInitialize = value; } };
 	}
+
+	function approvalFixture() {
+		const changed = store.add(new Emitter<IAgentChatConfigurationChangeEvent>());
+		const rootChanged = store.add(new Emitter<void>());
+		const configured = sinon.stub().returns('default');
+		const restricted = sinon.stub().returns(false);
+		const f = fixture(catalog, undefined, undefined, { getChatEffectiveValue: configured, getRootValue: restricted, onDidChatConfigChange: changed.event, onDidRootConfigChange: rootChanged.event });
+		f.onNew = (transport, request) => transport.reply(request, { sessionId: 'native', configOptions: [nativeApprovalMode('accept-edits')] });
+		return { f, configured, restricted, changed, rootChanged };
+	}
+
+	test('applies native bypass before a prompt and restores the previous mode when switched back', async () => {
+		const { f, configured } = approvalFixture();
+		const config = await f.agent.resolveChatConfig({ config: { autoApprove: 'autoApprove' } });
+		assert.deepStrictEqual(config.schema.properties.autoApprove.enum, ['default', 'autoApprove']);
+		assert.strictEqual(config.values.autoApprove, 'autoApprove');
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const observed: string[] = [];
+		f.onConfig = (transport, request) => {
+			assert.ok(isAcpRecord(request.params));
+			assert.strictEqual(request.params.configId, 'native-mode');
+			const mode = String(request.params.value);
+			observed.push(mode);
+			transport.reply(request, { configOptions: [nativeApprovalMode(mode)] });
+		};
+		f.onPrompt = (transport, request) => { observed.push('prompt'); transport.reply(request, { stopReason: 'end_turn' }); };
+		configured.returns('autoApprove');
+		await f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'bypass-turn');
+		configured.returns('default');
+		await f.agent.chats.sendMessage(chat, 'second', [cwd], undefined, 'default-turn');
+		assert.deepStrictEqual(observed, ['bypass', 'prompt', 'accept-edits', 'prompt']);
+		assert.deepStrictEqual(configured.firstCall.args[0], { session: owner.toString(), chat: chat.toString() });
+	});
+
+	test('does not send a prompt when Devin fails to confirm bypass', async () => {
+		const { f, configured } = approvalFixture();
+		configured.returns('autoApprove');
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		f.onConfig = (transport, request) => transport.reply(request, { configOptions: [nativeApprovalMode('accept-edits')] });
+		await assert.rejects(f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'bypass-turn'), /Devin did not confirm/);
+		assert.ok(!f.transports[0].sent.some(request => request.method === 'session/prompt'));
+	});
+
+	test('terminates a bypass turn on policy revocation and restores permissions before retry', async () => {
+		const { f, configured, restricted, rootChanged } = approvalFixture();
+		configured.returns('autoApprove');
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const prompted = new DeferredPromise<void>();
+		f.onPrompt = () => { void prompted.complete(); };
+		const modes: string[] = [];
+		f.onConfig = (transport, request) => {
+			assert.ok(isAcpRecord(request.params));
+			const mode = String(request.params.value);
+			modes.push(mode);
+			transport.reply(request, { configOptions: [nativeApprovalMode(mode)] });
+		};
+		const rejected = assert.rejects(f.agent.chats.sendMessage(chat, 'first', [cwd], undefined, 'bypass-turn'));
+		await prompted.p;
+		restricted.returns(true);
+		rootChanged.fire();
+		await rejected;
+		const config = await f.agent.resolveChatConfig({ config: { autoApprove: 'autoApprove' } });
+		assert.deepStrictEqual(config.schema.properties[SessionConfigKey.AutoApprove].enum, ['default']);
+		assert.strictEqual(config.values.autoApprove, 'default');
+		f.onLoad = (transport, request) => transport.reply(request, { configOptions: [nativeApprovalMode('bypass')] });
+		f.onPrompt = undefined;
+		await f.agent.chats.sendMessage(chat, 'second', [cwd], undefined, 'default-turn');
+		assert.deepStrictEqual(modes, ['bypass', 'accept-edits']);
+	});
 
 	function clientBundle(name: string, nonce = 'revision'): ClientPluginCustomization {
 		return { type: CustomizationType.Plugin, id: name, name, uri: `client-files://window/${name}`, nonce, childEnablement: { tools: [{ kind: CustomizationEnablementKind.Global, enabled: true }] } };
 	}
+
+	test('correlates a cancelled Devin send with a local report explaining the MCP change', async () => {
+		const reports: string[] = [];
+		const logService = new class extends NullLogService {
+			override error(message: string | Error): void { reports.push(String(message)); }
+		}();
+		const f = fixture(catalog, { onDidChange: Event.None, getServers: async (_owner, clients = []) => clients.flatMap(client => client.customizations.map(ref => ({ name: ref.name, command: 'private-command', args: [], env: [] }))) }, logService);
+		await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'private-token');
+		await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+		const handle = f.agent.getOrCreateActiveClient(chat, owner, { clientId: 'editor' });
+		handle.customizations = [clientBundle('private-tool')];
+		const prompted = new DeferredPromise<void>();
+		f.onPrompt = () => { void prompted.complete(); };
+		const rejected = assert.rejects(f.agent.chats.sendMessage(chat, 'private-prompt', [cwd], undefined, 'turn-for-report'), error => {
+			assert.ok(error instanceof Error && isCancellationError(error));
+			const reportId = /Devin report ID: (DEVIN-[\da-f-]+)/.exec(error.message)?.[1];
+			assert.ok(reportId);
+			assert.strictEqual(reports.length, 1);
+			const { elapsedMs, ...report } = JSON.parse(reports[0].slice('[Devin Send Report] '.length));
+			assert.ok(elapsedMs >= 0);
+			assert.deepStrictEqual(report, {
+				reportId, turnId: 'turn-for-report', stage: 'prompt', failure: 'cancelled', cancellationReason: 'mcpChanged',
+				mcpChange: { trigger: 'clientUpdated', before: 1, after: 0 }, connectionStage: 'ready', mcpServerCount: 1, agentHostPid: process.pid,
+			});
+			return true;
+		});
+		await prompted.p;
+		handle.customizations = [];
+		await rejected;
+	});
 
 	for (const { materialized, invalidKind } of [
 		{ materialized: false, invalidKind: 'multi-folder' }, { materialized: true, invalidKind: 'multi-folder' },
@@ -355,11 +465,46 @@ suite('Devin Subscription Agent', () => {
 	});
 
 	test('keeps subscription credentials separate from inherited CLI credentials and parses a live catalog shape', () => {
-		const inherited = { WINDSURF_API_KEY: 'other-account', windsurf_api_key: 'case-variant', PATH: 'keep' };
+		const inherited = {
+			WINDSURF_API_KEY: 'other-account',
+			windsurf_api_key: 'case-variant',
+			WINDSURF_EXT_HOST_PID: '79108',
+			windsurf_ext_host_pid: '16684',
+			WINDSURF_API_SERVER_URL: 'https://windsurf.example',
+			DEVIN_API_KEY: 'foreign-key',
+			devin_model: 'swe-2-high',
+			DEVIN_API_URL: 'https://override.example',
+			ACP_BACKEND: 'openai',
+			PATH: 'keep',
+		};
 		assert.deepStrictEqual(devinSubscriptionEnvironment('browser-token', inherited), { PATH: 'keep', WINDSURF_API_KEY: 'devin-session-token$browser-token' });
+		assert.deepStrictEqual(devinSubscriptionEnvironment('browser-token', inherited, 4242), { PATH: 'keep', WINDSURF_API_KEY: 'devin-session-token$browser-token', WINDSURF_EXT_HOST_PID: '4242' });
 		assert.strictEqual(inherited.WINDSURF_API_KEY, 'other-account');
+		assert.strictEqual(inherited.WINDSURF_EXT_HOST_PID, '79108');
 		assert.strictEqual(parseDevinModels(catalog)[0].id, 'swe-2-high');
 		assert.strictEqual(parseDevinModels(catalog)[0].maxContextWindow, 262000);
+	});
+
+	test('isolates ACP child processes from inherited extension-host PIDs and foreign Devin env overrides', async () => {
+		const savedExtHostPid = process.env.WINDSURF_EXT_HOST_PID;
+		const savedDevinModel = process.env.DEVIN_MODEL;
+		const savedAcpBackend = process.env.ACP_BACKEND;
+		process.env.WINDSURF_EXT_HOST_PID = '79108';
+		process.env.DEVIN_MODEL = 'override-model';
+		process.env.ACP_BACKEND = 'openai';
+		try {
+			const f = fixture();
+			await f.agent.authenticate(DEVIN_SUBSCRIPTION_RESOURCE, 'browser-token');
+			await f.agent.chats.createChat(chat, owner, { workingDirectories: [cwd] });
+			await f.agent.chats.sendMessage(chat, 'prompt', [cwd], undefined, 'isolated-env-turn');
+			assert.strictEqual(f.launches[0].env.WINDSURF_EXT_HOST_PID, String(process.pid));
+			assert.strictEqual(f.launches[0].env.DEVIN_MODEL, undefined);
+			assert.strictEqual(f.launches[0].env.ACP_BACKEND, undefined);
+		} finally {
+			if (savedExtHostPid === undefined) { delete process.env.WINDSURF_EXT_HOST_PID; } else { process.env.WINDSURF_EXT_HOST_PID = savedExtHostPid; }
+			if (savedDevinModel === undefined) { delete process.env.DEVIN_MODEL; } else { process.env.DEVIN_MODEL = savedDevinModel; }
+			if (savedAcpBackend === undefined) { delete process.env.ACP_BACKEND; } else { process.env.ACP_BACKEND = savedAcpBackend; }
+		}
 	});
 
 	test('loads models only after the editor forwards a subscription account and clears them on sign-out', async () => {
@@ -407,7 +552,11 @@ suite('Devin Subscription Agent', () => {
 			const listener = f.agent.onDidChatProgress(event => { if (event.kind === 'pending_confirmation') { listener.dispose(); resolve(); } });
 			store.add(listener);
 		});
-		assert.ok(f.events.some(event => event.kind === 'pending_confirmation'));
+		const pending = f.events.find(event => event.kind === 'pending_confirmation');
+		assert.ok(pending?.kind === 'pending_confirmation');
+		assert.strictEqual(pending.state.confirmationTitle, 'Allow Devin to run this tool?');
+		assert.deepStrictEqual(pending.state.options?.map(option => option.id), ['allow-once', 'skip']);
+		assert.ok(!f.events.some(event => event.kind === 'action' && event.action.type === ActionType.ChatToolCallReady), 'The host publishes the ready action after processing the confirmation');
 		const transport = f.transports[0];
 		toolUpdate(transport, { sessionUpdate: 'tool_call_update', toolCallId: 'tool', rawInput: { path: 'README.md', command: 'read' } });
 		assert.ok(!transport.sent.some(message => Object.hasOwn(message, 'result')));

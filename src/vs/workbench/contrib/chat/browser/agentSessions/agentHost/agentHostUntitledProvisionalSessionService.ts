@@ -84,6 +84,7 @@ import { IChatService } from '../../../common/chatService/chatService.js';
 import { IAgentHostNewSessionFolderService, computeDesiredWorkingDirectories, computeWorkingDirectories, hasImmutablePrimaryWorkingDirectory, supportsMultipleWorkingDirectories } from './agentHostNewSessionFolderService.js';
 import { IAgentCustomizationScope, IAgentHostActiveClientService } from './agentHostActiveClientService.js';
 import { type IAgentHostImportConversation, IAgentHostImportConversationStore } from './agentHostImportConversationStore.js';
+import { usesAgentHostMcpGateway } from './agentHostMcpServerSupport.js';
 import { getLocalAgentHostSessionProvider } from './agentHostSessionUri.js';
 import { isAgentHostTargetFolderTrusted } from './agentHostSessionConfigSubscription.js';
 
@@ -456,6 +457,11 @@ export class AgentHostUntitledProvisionalSessionService extends Disposable imple
 	}
 
 	private _updateActiveClientScope(entry: IEntry): void {
+		if (!entry.ownsBackend && usesAgentHostMcpGateway(`agent-host-${entry.provider}`)) {
+			// The live chat publishes a richer snapshot for this same client ID.
+			entry.activeClientBinding.clear();
+			return;
+		}
 		const roots = this._computeEntryWorkingDirectories(entry) ?? [];
 		if (entry.activeClientBinding.value && this._activeClientService.areScopeRootsEqual(entry.activeClientBinding.value.roots, roots)) {
 			return;

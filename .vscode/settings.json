@@ -222,5 +222,6 @@
 		".github/skills/.local": true,
 		".agents/skills/.local": true,
 		".claude/skills/.local": true,
-	}
+	},
+	"chat.byokUtilityModelDefault": "mainAgent"
 }

@@ -31,7 +31,7 @@ import { CopilotAgent } from './copilot/copilotAgent.js';
 import { DevinSubscriptionAgent } from './acp/devinSubscriptionAgent.js';
 import { DevinMcpConfiguration } from './acp/devinMcpConfiguration.js';
 import { DevinClientMcpConfiguration } from './acp/devinClientMcpConfiguration.js';
-import { AgentHostDevinExecutableEnvVar } from '../common/devinAgentConfiguration.js';
+import { AgentHostDevinExecutableEnvVar, getWindowsDevinExecutable } from '../common/devinAgentConfiguration.js';
 import { findExecutable } from '../../../base/node/processes.js';
 import { ClaudeAgent } from './claude/claudeAgent.js';
 import { ClaudeSdkPackage } from './claude/claudeAgentSdkService.js';
@@ -236,11 +236,13 @@ async function startAgentHost(): Promise<void> {
 		}
 		markStartupPhase('providers');
 		providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
-		const devinExecutable = await findExecutable(process.env[AgentHostDevinExecutableEnvVar] || 'devin');
+		const configuredDevin = process.env[AgentHostDevinExecutableEnvVar] || 'devin';
+		const installedDevin = isWindows && configuredDevin === 'devin' ? getWindowsDevinExecutable(process.env) : undefined;
+		const devinExecutable = (installedDevin ? await findExecutable(installedDevin) : undefined) ?? await findExecutable(configuredDevin);
 		if (devinExecutable) {
 			const mcpConfiguration = disposables.add(instantiationService.createInstance(DevinMcpConfiguration));
 			const clientMcpConfiguration = instantiationService.createInstance(DevinClientMcpConfiguration, mcpConfiguration);
-			providerService.registerProvider(new DevinSubscriptionAgent(devinExecutable, undefined, clientMcpConfiguration));
+			providerService.registerProvider(new DevinSubscriptionAgent(devinExecutable, undefined, clientMcpConfiguration, logService, agentConfigurationService));
 		}
 		// Claude and Codex providers are gated on two things:
 		//  1. The user-facing enable toggle (`chat.agentHost.<x>Agent.enabled`,

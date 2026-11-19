@@ -44,6 +44,8 @@ export function disposeSharedFishDefs(targetDocument: Document): void {
 
 export interface IFishOptions {
 	readonly species: FishSpecies;
+	/** Rotate the logo's colored accents while retaining its neutral shading and alpha. */
+	readonly hueRotation?: number;
 	readonly size: number;
 	readonly positionX: number;
 	readonly positionY: number;
@@ -99,6 +101,7 @@ export class Fish {
 		// Inner element receives the directional flip so the body strip animations
 		// (driven by --agents-aquarium-strip-index) are unaffected by direction changes.
 		this.innerElement = $<HTMLDivElement>('.agents-aquarium-fish-inner');
+		this.innerElement.style.filter = `hue-rotate(${opts.hueRotation ?? 0}deg)`;
 		this.innerElement.appendChild(buildFishSvg(targetDocument));
 		this.element.appendChild(this.innerElement);
 

@@ -9,6 +9,7 @@ import { Event } from '../../../base/common/event.js';
 import { join } from '../../../base/common/path.js';
 import { IProcessEnvironment, isLinux, isMacintosh, isWindows } from '../../../base/common/platform.js';
 import { URI } from '../../../base/common/uri.js';
+import type { IOpenAgentsWindowOptions } from '../../native/common/native.js';
 import { IAuxiliaryWindow } from '../../auxiliaryWindow/electron-main/auxiliaryWindow.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { NativeParsedArgs } from '../../environment/common/argv.js';
@@ -42,7 +43,7 @@ export interface IWindowsMainService {
 	openExtensionDevelopmentHostWindow(extensionDevelopmentPath: string[], openConfig: IOpenConfiguration): Promise<ICodeWindow[]>;
 	openExistingWindow(window: ICodeWindow, openConfig: IOpenConfiguration): void;
 
-	openAgentsWindow(openConfig: IOpenConfiguration, folderUri?: URI, reveal?: URI | 'new', source?: AgentsWindowOpenSource, folderUriIsDefault?: boolean, draft?: IAgentsWindowDraft, onboardingSessionResource?: URI, revealRemoteAuthority?: string): Promise<ICodeWindow[]>;
+	openAgentsWindow(openConfig: IOpenConfiguration, folderUri?: URI, reveal?: URI | 'new', source?: AgentsWindowOpenSource, folderUriIsDefault?: boolean, draft?: IAgentsWindowDraft, onboardingSessionResource?: URI, revealRemoteAuthority?: string, preserveEditorHandoff?: boolean, editorWorkspace?: IOpenAgentsWindowOptions['editorWorkspace']): Promise<ICodeWindow[]>;
 
 	sendToFocused(channel: string, ...args: unknown[]): void;
 	sendToOpeningWindow(channel: string, ...args: unknown[]): void;

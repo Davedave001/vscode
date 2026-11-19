@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import './media/openInAgents.css';
-import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
+import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch, WorkspaceModeSwitchGuard, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
 import { $, addDisposableListener, append, EventLike, EventType, getWindow } from '../../../../../base/browser/dom.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IHoverWidget, IManagedHover } from '../../../../../base/browser/ui/hover/hover.js';
@@ -14,6 +14,9 @@ import { isCancellationError } from '../../../../../base/common/errors.js';
 import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../../base/common/lifecycle.js';
 import { ServicesAccessor } from '../../../../../editor/browser/editorExtensions.js';
+import { getCodeEditor, isDiffEditor } from '../../../../../editor/browser/editorBrowser.js';
+import { Range } from '../../../../../editor/common/core/range.js';
+import { ICodeEditorViewState, IDiffEditorViewState } from '../../../../../editor/common/editorCommon.js';
 import { EditorContextKeys } from '../../../../../editor/common/editorContextKeys.js';
 import { IModelService } from '../../../../../editor/common/services/model.js';
 import { localize, localize2 } from '../../../../../nls.js';
@@ -28,12 +31,12 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
-import { INativeHostService, IOpenAgentsWindowOptions } from '../../../../../platform/native/common/native.js';
+import { AGENTS_EDITOR_SELECTION_LIMIT, INativeHostService, IOpenAgentsWindowOptions } from '../../../../../platform/native/common/native.js';
 import { IProductService } from '../../../../../platform/product/common/productService.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { IWorkspaceContextService, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
-import { EditorAreaFocusContext, IsSessionsWindowContext } from '../../../../common/contextkeys.js';
+import { EditorAreaFocusContext, IsSessionsWindowContext, ResourceContextKey } from '../../../../common/contextkeys.js';
 import { ToggleTitleBarConfigAction } from '../../../../browser/parts/titlebar/titlebarActions.js';
 import { IWorkbenchContribution } from '../../../../common/contributions.js';
 import { CHAT_CATEGORY } from '../../browser/actions/chatActions.js';
@@ -52,7 +55,13 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { AgentsWindowOpenSource, isAgentsWindowOpenSource } from '../../../../../platform/window/common/window.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
-import { EditorResourceAccessor, SideBySideEditor } from '../../../../common/editor.js';
+import { IPathService } from '../../../../services/path/common/pathService.js';
+import { ITextFileService } from '../../../../services/textfile/common/textfiles.js';
+import { IViewsService } from '../../../../services/views/common/viewsService.js';
+import { IExplorerService } from '../../../files/browser/files.js';
+import { ExplorerRootContext } from '../../../files/common/files.js';
+import { EditorResourceAccessor, EditorsOrder, SideBySideEditor } from '../../../../common/editor.js';
+import { EditorInput } from '../../../../common/editor/editorInput.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
@@ -60,7 +69,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../../pla
 import { IWorkbenchAssignmentService } from '../../../../services/assignment/common/assignmentService.js';
 import { serializeChatDraft, UnsupportedChatDraftAttachmentError } from '../../common/attachments/chatDraft.js';
 import { ResourceMap } from '../../../../../base/common/map.js';
-import { isEqual } from '../../../../../base/common/resources.js';
+import { isEqual, toLocalResource } from '../../../../../base/common/resources.js';
 import { CopilotHarnessIntroductionButtonVariant, copilotHarnessIntroductionButtonVariants, CopilotHarnessIntroductionCopyVariant, copilotHarnessIntroductionCopyVariants, copilotHarnessIntroductionFeedbackCommandId, copilotHarnessIntroductionLearnMoreCommandId, getCopilotHarnessIntroductionContent } from '../../browser/agentSessions/copilotHarnessIntroduction.js';
 import { isNewConversation } from '../../browser/widget/input/chatInputModelUtils.js';
 import { AgentsWindowUsage } from '../../common/agentsWindowUsage.js';
@@ -68,7 +77,7 @@ import { AgentsWindowGraphicDesign } from '../../browser/agentSessions/agentsWin
 import { AgentsWindowHoverCard } from '../../browser/agentSessions/agentsWindowHoverCard.js';
 import { IAgentHostEditorActivityService } from './agentHostEditorActivity.js';
 
-const OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE = localize2('openWorkspaceInAgentsWindow', "Open in Agents");
+export const OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE = localize2('openWorkspaceInAgentsWindow', "Open in Agents");
 const OPEN_WORKSPACE_IN_AGENTS_WINDOW_CHAT_TITLE_COMMAND_ID = 'workbench.action.chat.openWorkspaceInAgentsWindow.chatTitle';
 const OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE_BAR_COMMAND_ID = 'workbench.action.chat.openWorkspaceInAgentsWindow.titleBar';
 const COPILOT_HARNESS_INTRODUCTION_IGNORED_STORAGE_KEY = 'chat.agentsParallelWork.copilotHarnessIntroductionIgnored';
@@ -79,14 +88,57 @@ function ensureAgentModeEnabled(configurationService: IConfigurationService): vo
 	}
 }
 
-function getInvokingWorkspaceFolder(accessor: ServicesAccessor): URI | undefined {
+function getInvokingWorkspaceFolder(accessor: ServicesAccessor, useRecentWorkspaceEditor = false): URI | undefined {
 	const workspaceContextService = accessor.get(IWorkspaceContextService);
 	const folders = workspaceContextService.getWorkspace().folders;
 	if (folders.length <= 1) {
 		return folders[0]?.uri;
 	}
-	const resource = EditorResourceAccessor.getOriginalUri(accessor.get(IEditorService).activeEditor, { supportSideBySide: SideBySideEditor.PRIMARY });
-	return resource ? workspaceContextService.getWorkspaceFolder(resource)?.uri : undefined;
+	const editorService = accessor.get(IEditorService);
+	const activeEditor = editorService.activeEditor;
+	const getEditorFolder = (editor: EditorInput, preferred?: URI): URI | undefined => {
+		const resource = EditorResourceAccessor.getOriginalUri(editor, { supportSideBySide: SideBySideEditor.BOTH });
+		const candidates = URI.isUri(resource) ? [preferred, resource] : [preferred, resource?.primary, resource?.secondary];
+		for (let candidate of candidates) {
+			if (candidate?.scheme === Schemas.untitled && accessor.get(ITextFileService).untitled.get(candidate)?.hasAssociatedFilePath) {
+				candidate = toLocalResource(candidate, accessor.get(IWorkbenchEnvironmentService).remoteAuthority, accessor.get(IPathService).defaultUriScheme);
+			}
+			const folder = candidate && workspaceContextService.getWorkspaceFolder(candidate);
+			if (folder) {
+				return folder.uri;
+			}
+		}
+		return undefined;
+	};
+	if (activeEditor) {
+		const control = editorService.activeTextEditorControl;
+		const preferred = isDiffEditor(control) ? control.getLastFocusedEditor().getModel()?.uri : undefined;
+		const folder = getEditorFolder(activeEditor, preferred);
+		if (folder) {
+			return folder;
+		}
+	} else {
+		const explorer = accessor.get(IExplorerService);
+		if (accessor.get(IViewsService).isViewVisible(explorer.getViewId())) {
+			const [focusedItem] = explorer.getContext(false);
+			const folder = focusedItem && workspaceContextService.getWorkspaceFolder(focusedItem.resource);
+			if (folder) {
+				return folder.uri;
+			}
+		}
+	}
+	if (useRecentWorkspaceEditor) {
+		for (const { editor } of editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE)) {
+			if (editor === activeEditor) {
+				continue;
+			}
+			const folder = getEditorFolder(editor);
+			if (folder) {
+				return folder;
+			}
+		}
+	}
+	return undefined;
 }
 
 function isChatWidget(widget: IChatWidget | undefined): widget is IChatWidget {
@@ -163,12 +215,20 @@ function isOpenChatSessionInAgentsWindowOptions(value: unknown): value is { read
 		&& isAgentsWindowOpenSource((value as { readonly agentsWindowOpenSource?: unknown }).agentsWindowOpenSource);
 }
 
+const switchToAgents = new WorkspaceModeSwitchGuard();
+
+function copyEditorPositions(state: ICodeEditorViewState | null | undefined): ICodeEditorViewState | null {
+	// Leave contribution state in the IDE's local editor storage.
+	return state ? { cursorState: state.cursorState, viewState: state.viewState, contributionsState: {} } : null;
+}
+
 export class OpenWorkspaceInAgentsWindowAction extends Action2 {
 	constructor() {
 		super({
 			id: OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID,
-			title: OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE,
+			title: localize2('switchToAgents', "Switch to Agents"),
 			category: CHAT_CATEGORY,
+			searchAlias: OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE,
 			precondition: OPEN_AGENTS_WINDOW_PRECONDITION,
 			f1: true,
 			keybinding: { primary: WORKSPACE_MODE_SWITCH_KEYBINDING, weight: KeybindingWeight.WorkbenchContrib },
@@ -178,12 +238,108 @@ export class OpenWorkspaceInAgentsWindowAction extends Action2 {
 	async run(accessor: ServicesAccessor, options?: { readonly source?: AgentsWindowOpenSource; readonly sessionResource?: URI; readonly inputUri?: URI; readonly reveal?: IOpenAgentsWindowOptions['reveal'] }): Promise<void> {
 		ensureAgentModeEnabled(accessor.get(IConfigurationService));
 		const draftOptions = options?.reveal === 'new' ? getDraftHandoffOptions(accessor, options.sessionResource, false, options.inputUri) : {};
-		await accessor.get(INativeHostService).openAgentsWindow({
-			folderUri: getInvokingWorkspaceFolder(accessor) ?? accessor.get(IWorkspaceContextService).getWorkspace().folders[0]?.uri,
+		const workspaceService = accessor.get(IWorkspaceContextService);
+		const folders = workspaceService.getWorkspace().folders;
+		const folderUri = getInvokingWorkspaceFolder(accessor, true) ?? folders[0]?.uri;
+		let editorWorkspace: IOpenAgentsWindowOptions['editorWorkspace'];
+		if (options?.reveal === undefined && folderUri?.scheme === Schemas.file && folders.every(folder => folder.uri.scheme === Schemas.file)) {
+			const editorService = accessor.get(IEditorService);
+			const control = editorService.activeTextEditorControl;
+			const diffEditor = isDiffEditor(control) ? control : undefined;
+			const editor = diffEditor?.getLastFocusedEditor() ?? getCodeEditor(control);
+			const model = editor?.getModel();
+			const resource = model?.uri;
+			const activeFile = resource?.scheme === Schemas.file && workspaceService.getWorkspaceFolder(resource) ? resource : undefined;
+			if (folders.length > 1 || activeFile) {
+				const range = activeFile && editor?.getSelection();
+				const pane = activeFile ? editorService.activeEditorPane : undefined;
+				const groupId = pane?.group.id;
+				const activeEditorTab = pane?.input ? { pinned: pane.group.isPinned(pane.input), sticky: pane.group.isSticky(pane.input) } : undefined;
+				const activeFileViewState = activeFile && !diffEditor ? copyEditorPositions(editor?.saveViewState()) : undefined;
+				editorWorkspace = {
+					folders: folders.map(({ uri, name }) => ({ uri, name })),
+					activeFile,
+					...(activeFileViewState ? { activeFileViewState } : {}),
+					...(groupId !== undefined ? { activeEditorGroupId: groupId } : {}),
+					...(activeEditorTab ? { activeEditorTab } : {}),
+					...(range ? {
+						activeFileSelection: {
+							startLineNumber: range.startLineNumber, startColumn: range.startColumn,
+							endLineNumber: range.endLineNumber, endColumn: range.endColumn,
+						},
+					} : {}),
+				};
+				const diff = diffEditor?.getModel();
+				if (diffEditor && diff && activeFile && [diff.original.uri, diff.modified.uri].every(uri => uri.scheme === Schemas.file && workspaceService.getWorkspaceFolder(uri))) {
+					const state = diffEditor.saveViewState();
+					const viewState: IDiffEditorViewState = {
+						original: copyEditorPositions(state?.original),
+						modified: copyEditorPositions(state?.modified),
+						focusedSide: editor === diffEditor.getOriginalEditor() ? 'original' : 'modified',
+					};
+					editorWorkspace = { ...editorWorkspace, activeDiff: { original: diff.original.uri, modified: diff.modified.uri, viewState } };
+				}
+				if (model && range && !range.isEmpty()) {
+					const truncated = model.getValueLengthInRange(range) > AGENTS_EDITOR_SELECTION_LIMIT;
+					const end = truncated
+						? model.getPositionAt(model.getOffsetAt(range.getStartPosition()) + AGENTS_EDITOR_SELECTION_LIMIT)
+						: range.getEndPosition();
+					const text = model.getValueInRange(Range.fromPositions(range.getStartPosition(), end));
+					const endLine = Math.max(range.startLineNumber, end.lineNumber - (end.column === 1 ? 1 : 0));
+					if (text.trim()) {
+						editorWorkspace = { ...editorWorkspace, selection: { text, startLine: range.startLineNumber, endLine, truncated } };
+					}
+				}
+			}
+		}
+		const nativeHost = accessor.get(INativeHostService);
+		const source = options?.source ?? AgentsWindowOpenSource.CommandPalette;
+		const openAgents = () => nativeHost.openAgentsWindow({
+			folderUri,
+			...(editorWorkspace ? { editorWorkspace } : {}),
+			...(folderUri && options?.reveal === undefined ? { folderUriIsDefault: true } : undefined),
 			reveal: options?.reveal,
-			source: options?.source ?? AgentsWindowOpenSource.CommandPalette,
+			source,
 			...draftOptions,
 		});
+		const isModeSwitch = options?.reveal === undefined && !options?.sessionResource && !options?.inputUri
+			&& (source === AgentsWindowOpenSource.TitleBar || source === AgentsWindowOpenSource.CommandPalette || source === AgentsWindowOpenSource.KeyboardShortcut);
+		await (isModeSwitch ? switchToAgents.run(openAgents) : openAgents());
+	}
+}
+
+export class OpenExplorerRootInAgentsWindowAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.chat.openWorkspaceInAgentsWindow.explorer',
+			title: OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE,
+			precondition: OPEN_AGENTS_WINDOW_PRECONDITION,
+			menu: {
+				id: MenuId.ExplorerContext,
+				group: '5_chat',
+				order: 2,
+				when: ContextKeyExpr.and(
+					OPEN_AGENTS_WINDOW_PRECONDITION,
+					ExplorerRootContext,
+					ContextKeyExpr.or(ResourceContextKey.Scheme.isEqualTo(Schemas.file), ResourceContextKey.Scheme.isEqualTo(Schemas.vscodeRemote)),
+				),
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, resource: unknown): Promise<void> {
+		ensureAgentModeEnabled(accessor.get(IConfigurationService));
+		if (!URI.isUri(resource) || (resource.scheme !== Schemas.file && resource.scheme !== Schemas.vscodeRemote)) {
+			return;
+		}
+		const workspaceFolder = accessor.get(IWorkspaceContextService).getWorkspaceFolder(resource);
+		if (workspaceFolder && isEqual(workspaceFolder.uri, resource)) {
+			await accessor.get(INativeHostService).openAgentsWindow({
+				folderUri: workspaceFolder.uri,
+				reveal: 'new',
+				source: AgentsWindowOpenSource.Explorer,
+			});
+		}
 	}
 }
 
@@ -318,6 +474,7 @@ export class OpenAgentsWindowAction extends Action2 {
 			...args,
 			...(folderUri ? { folderUri, folderUriIsDefault: !draftOptions.draft } : undefined),
 			...draftOptions,
+			...(args?.reveal === undefined ? { preserveEditorHandoff: true } : undefined),
 			source: args?.source ?? AgentsWindowOpenSource.CommandPalette,
 		});
 	}
@@ -689,7 +846,7 @@ export class OpenWorkspaceInAgentsContribution extends Disposable implements IWo
 		this._register(actionViewItemService.register(MenuId.TitleBarAdjacentCenter, OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE_BAR_COMMAND_ID, (action, options) => {
 			return configurationService.getValue<boolean>(WORKSPACE_MODE_SWITCH_SETTING) === false
 				? instantiationService.createInstance(OpenWorkspaceInAgentsTitleBarWidget, action, options)
-				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'ide', OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID);
+				: instantiationService.createInstance(WorkspaceModeSwitch, action, options, 'ide', OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID).trackHandoff(switchToAgents);
 		}, onDidChangeWorkspaceModeSwitch(configurationService)));
 	}
 }

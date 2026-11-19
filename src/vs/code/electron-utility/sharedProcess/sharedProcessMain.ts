@@ -27,6 +27,8 @@ import { IDiagnosticsService } from '../../../platform/diagnostics/common/diagno
 import { DiagnosticsService } from '../../../platform/diagnostics/node/diagnosticsService.js';
 import { IDownloadService } from '../../../platform/download/common/download.js';
 import { DownloadService } from '../../../platform/download/common/downloadService.js';
+import { signalCExtensionDownloadChannel } from '../../../platform/extensionManagement/common/signalCExtensionCatalog.js';
+import { SignalCExtensionDownloadService } from '../../../platform/extensionManagement/node/signalCExtensionDownloadService.js';
 import { INativeEnvironmentService } from '../../../platform/environment/common/environment.js';
 import { GlobalExtensionEnablementService } from '../../../platform/extensionManagement/common/extensionEnablementService.js';
 import { ExtensionGalleryService } from '../../../platform/extensionManagement/common/extensionGalleryService.js';
@@ -447,6 +449,7 @@ class SharedProcessMain extends Disposable implements IClientConnectionFilter {
 	private initChannels(accessor: ServicesAccessor): void {
 
 		const instantiationService = accessor.get(IInstantiationService);
+		this.server.registerChannel(signalCExtensionDownloadChannel, ProxyChannel.fromService(instantiationService.createInstance(SignalCExtensionDownloadService), this._store));
 		this._register(registerGitHubChannel(this.server, accessor.get(IGitHubService)));
 		this.server.registerChannel(agentHostMcpOAuthMetadataChannelName, ProxyChannel.fromService(instantiationService.createInstance(AgentHostMcpOAuthMetadataService), this._store));
 

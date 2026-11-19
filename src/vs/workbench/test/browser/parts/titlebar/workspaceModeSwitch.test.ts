@@ -11,7 +11,7 @@ import { Action, ActionRunner } from '../../../../../base/common/actions.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { toDisposable } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { WorkspaceModeSwitch } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
+import { WorkspaceModeSwitch, WorkspaceModeSwitchGuard } from '../../../../browser/parts/titlebar/workspaceModeSwitch.js';
 import { workbenchInstantiationService } from '../../workbenchTestServices.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { MockKeybindingService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
@@ -83,6 +83,45 @@ suite('Workspace Mode Switch', () => {
 		control.click();
 		await retried;
 		assert.strictEqual(runs, 2);
+	});
+
+	test('shows an externally started handoff on the original and rebuilt title-bar controls', async () => {
+		const instantiation = workbenchInstantiationService(undefined, store);
+		const handoff = new WorkspaceModeSwitchGuard();
+		const pending = new DeferredPromise<void>();
+		let toolbarActivations = 0;
+		const action = store.add(new Action('switchMode', 'Switch Mode', undefined, true, async () => { toolbarActivations++; }));
+		const render = () => {
+			const element = mainWindow.document.body.appendChild(mainWindow.document.createElement('div'));
+			store.add(toDisposable(() => element.remove()));
+			const view = store.add(instantiation.createInstance(WorkspaceModeSwitch, action, undefined, 'agents', action.id)).trackHandoff(handoff);
+			view.render(element);
+			return { element, view };
+		};
+		const state = (element: HTMLElement) => [element.getAttribute('aria-busy'), element.getAttribute('aria-disabled'), element.getAttribute('aria-checked')];
+		const original = render();
+		const completion = assert.rejects(handoff.run(() => pending.p), /Switch failed/);
+		try {
+			assert.deepStrictEqual(state(original.element), ['true', 'true', 'false']);
+			original.element.click();
+			assert.strictEqual(toolbarActivations, 0);
+			assert.strictEqual(action.enabled, true);
+			original.view.dispose();
+			const replacement = render();
+			assert.deepStrictEqual(state(replacement.element), ['true', 'true', 'false']);
+			await pending.error(new Error('Switch failed'));
+			await completion;
+			assert.deepStrictEqual(state(replacement.element), ['false', 'false', 'false']);
+			const activated = Event.toPromise(replacement.view.actionRunner.onDidRun);
+			replacement.element.click();
+			await activated;
+			assert.strictEqual(toolbarActivations, 1);
+		} finally {
+			if (!pending.isSettled) {
+				await pending.error(new Error('Switch failed'));
+			}
+			await completion;
+		}
 	});
 
 	test('keeps an external disabled state after a pending handoff completes', async () => {

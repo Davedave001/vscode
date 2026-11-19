@@ -13,14 +13,15 @@ import { IAuthorizationServerMetadata } from '../../../../base/common/oauth.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { mock } from '../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { ILogger, ILoggerService, NullLogger } from '../../../../platform/log/common/log.js';
+import { ILogger, ILoggerService, NullLogger, NullLogService } from '../../../../platform/log/common/log.js';
 import { INotificationSource } from '../../../../platform/notification/common/notification.js';
 import { Progress } from '../../../../platform/progress/common/progress.js';
-import { IAuthenticationProviderSessionOptions } from '../../../services/authentication/common/authentication.js';
-import { DynamicAuthProvider, IAuthorizationToken, reviveAccountIcon, TokenStore } from '../../common/extHostAuthentication.js';
+import { IAuthenticationProviderSessionOptions, signalCMailOAuth, signalCMailOAuthPrefix } from '../../../services/authentication/common/authentication.js';
+import { DynamicAuthProvider, ExtHostAuthentication, IAuthorizationToken, reviveAccountIcon, TokenStore } from '../../common/extHostAuthentication.js';
 import { IProgressStepDto, MainThreadAuthenticationShape } from '../../common/extHost.protocol.js';
 import { IExtHostInitDataService } from '../../common/extHostInitDataService.js';
 import { IExtHostProgress } from '../../common/extHostProgress.js';
+import { IExtHostRpcService } from '../../common/extHostRpcService.js';
 import { IExtHostUrlsService } from '../../common/extHostUrls.js';
 import { IExtHostWindow } from '../../common/extHostWindow.js';
 import { Proxied } from '../../../services/extensions/common/proxyIdentifier.js';
@@ -58,6 +59,33 @@ suite('TokenStore', () => {
 			store.sessions.map(session => session.scopes),
 			[[], ['menu:read', 'orders:create'], ['read', 'write']]
 		);
+	});
+
+	test('an omitted token list clears a revoked dynamic session and accepts its replacement', async () => {
+		const host = new ExtHostAuthentication(
+			new class extends mock<IExtHostRpcService>() {
+				override getProxy<T>(): T { return {} as T; }
+			}(),
+			new class extends mock<IExtHostInitDataService>() { }(),
+			new class extends mock<IExtHostWindow>() { }(),
+			new class extends mock<IExtHostUrlsService>() { }(),
+			new class extends mock<IExtHostProgress>() { }(),
+			new class extends mock<ILoggerService>() { }(),
+			new NullLogService(),
+		);
+		/* eslint-disable local/code-no-bracket-notation-for-identifiers -- Exercise the notification without exposing test-only APIs. */
+		const emitter = disposables.add(host['_onDidDynamicAuthProviderTokensChange']);
+		disposables.add(host['_onDidChangeSessions']);
+		/* eslint-enable local/code-no-bracket-notation-for-identifiers */
+		const changes = disposables.add(new Emitter<IAuthorizationToken[]>());
+		disposables.add(emitter.event(event => changes.fire(event.tokens)));
+		const initialToken: IAuthorizationToken = { access_token: 'fixture-original', token_type: 'Bearer', created_at: 0 };
+		const store = disposables.add(new TokenStore({ onDidChange: changes.event, set: () => { } }, [initialToken], new NullLogger()));
+
+		await host.$onDidChangeDynamicAuthProviderTokens('fixture', 'client');
+		assert.strictEqual(store.sessions.length, 0);
+		await host.$onDidChangeDynamicAuthProviderTokens('fixture', 'client', [{ ...initialToken, access_token: 'fixture-replacement' }]);
+		assert.deepStrictEqual(store.sessions.map(session => session.accessToken), ['fixture-replacement']);
 	});
 });
 
@@ -360,6 +388,99 @@ suite('DynamicAuthProvider', () => {
 			entraWithForeignTokenEndpoint: { scope: 'api://res/Read offline_access', resource, prompt: null },
 		});
 	});
+
+	test('Google Workspace requires the client secret before opening sign-in and requests refresh access', async () => {
+		const options = {
+			authorizationServer: 'https://accounts.google.com',
+			serverMetadata: {
+				issuer: 'https://accounts.google.com',
+				authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+				token_endpoint: 'https://oauth2.googleapis.com/token',
+				response_types_supported: ['code'],
+			},
+			resource: 'https://gmailmcp.googleapis.com/mcp/v1',
+		};
+		const provider = createProvider({ ...options, onDidOpenUri: () => assert.fail('The client secret is required before opening the browser') });
+		await assert.rejects(provider.createSession(['read'], {}), /Set OAuth Client Secret/);
+
+		const opened: URL[] = [];
+		const requests: RequestInit[] = [];
+		const registered = createProvider({
+			...options,
+			clientSecret: 'fixture-secret',
+			onDidOpenUri: uri => opened.push(new URL(uri)),
+			fetcher: async (_input, init) => {
+				assert.ok(init);
+				requests.push(init);
+				return Response.json({ access_token: 'fixture-token', token_type: 'Bearer', refresh_token: 'fixture-refresh-token' });
+			},
+		});
+		await assert.rejects(registered.createSession(['read'], {}), isCancellationError);
+		assert.strictEqual(opened.length, 1);
+		assert.strictEqual(opened[0].searchParams.get('access_type'), 'offline');
+		assert.strictEqual(opened[0].searchParams.get('prompt'), 'consent');
+		assert.ok(!opened[0].searchParams.has('client_secret'));
+		await registered.exchangeTestCode('fixture-code', 'fixture-verifier', 'http://127.0.0.1:33418/');
+		assert.strictEqual(requests[0].redirect, 'error');
+		assert.strictEqual(new URLSearchParams(String(requests[0].body)).get('client_secret'), 'fixture-secret');
+
+		const refreshes: string[] = [];
+		const expiring = createProvider({
+			...options,
+			clientSecret: 'fixture-secret',
+			initialTokens: [{
+				access_token: 'expired-token', token_type: 'Bearer', scope: 'read',
+				expires_in: 1, created_at: 0, refresh_token: 'original-refresh-token',
+			}],
+			fetcher: async (_input, init) => {
+				const request = new URLSearchParams(String(init?.body));
+				assert.strictEqual(request.get('grant_type'), 'refresh_token');
+				refreshes.push(request.get('refresh_token') ?? '');
+				return Response.json({ access_token: `access-token-${refreshes.length}`, token_type: 'Bearer', scope: 'read', expires_in: 1 });
+			},
+		});
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			const sessions = await expiring.getSessions(['read'], { silent: true });
+			assert.strictEqual(sessions[0]?.accessToken, `access-token-${attempt}`);
+		}
+		assert.deepStrictEqual(refreshes, ['original-refresh-token', 'original-refresh-token']);
+	});
+
+	for (const mail of ['gmail', 'outlook'] as const) {
+		test(`direct ${mail} keeps mailbox identity and renewable authorization when a token is refreshed`, async () => {
+			const { issuer, authorize, token, resource, scope } = signalCMailOAuth[mail];
+			const scopes = [scope, 'openid'];
+			const refreshes: string[] = [];
+			const provider = createProvider({
+				authorizationServer: issuer,
+				serverMetadata: { issuer, authorization_endpoint: authorize, token_endpoint: token, response_types_supported: ['code'] },
+				resource,
+				providerId: `${signalCMailOAuthPrefix}${mail}:isolated`,
+				clientSecret: mail === 'gmail' ? 'fixture-secret' : undefined,
+				onDidOpenUri: () => assert.fail('Direct browser sign-in needs a local desktop host'),
+				initialTokens: [{
+					access_token: 'expired-token', token_type: 'Bearer', scope: scopes.join(' '), id_token: jwt({ sub: 'mail-account' }),
+					expires_in: 1, created_at: 0, refresh_token: 'fixture-refresh',
+				}],
+				fetcher: async (input, init) => {
+					assert.strictEqual(input, token);
+					assert.strictEqual(init?.redirect, 'error');
+					const body = new URLSearchParams(String(init?.body));
+					assert.ok(!body.has('resource'));
+					assert.strictEqual(body.get('client_secret'), mail === 'gmail' ? 'fixture-secret' : null);
+					refreshes.push(body.get('refresh_token') ?? '');
+					return Response.json({ access_token: `fixture-access-${refreshes.length}`, token_type: 'Bearer', expires_in: 1 });
+				},
+			});
+			await assert.rejects(provider.createSession(scopes, {}), /local Signal-C desktop extension host/);
+			for (let attempt = 1; attempt <= 2; attempt++) {
+				const [session] = await provider.getSessions(scopes, { silent: true });
+				assert.strictEqual(session?.account.id, 'mail-account');
+				assert.strictEqual(session?.accessToken, `fixture-access-${attempt}`);
+			}
+			assert.deepStrictEqual(refreshes, ['fixture-refresh', 'fixture-refresh']);
+		});
+	}
 
 	for (const failure of [new CancellationError(), new Error('Browser authorization failed')]) {
 		test(`preserves the final authentication flow error: ${failure.message}`, async () => {

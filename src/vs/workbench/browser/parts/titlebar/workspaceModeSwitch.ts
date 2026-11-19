@@ -8,9 +8,12 @@ import { $, append, EventHelper, EventLike } from '../../../../base/browser/dom.
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IAction, toAction } from '../../../../base/common/actions.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { Event } from '../../../../base/common/event.js';
 import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
-import { localize } from '../../../../nls.js';
+import { autorun, IObservable, observableValue } from '../../../../base/common/observable.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { localize, localize2 } from '../../../../nls.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -19,6 +22,8 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 
 export const WORKSPACE_MODE_SWITCH_SETTING = 'workbench.titleBar.workspaceModeSwitch';
 export const WORKSPACE_MODE_SWITCH_KEYBINDING = KeyChord(KeyMod.CtrlCmd | KeyCode.KeyK, KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyA);
+export const SWITCH_TO_IDE_TITLE = localize2('workspaceModeSwitch.switchToIDE', "Switch to IDE");
+export const OPEN_IN_EDITOR_SEARCH_ALIAS = localize2('workspaceModeSwitch.openInEditor', "Open in Editor");
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'workbench',
@@ -34,9 +39,33 @@ export function onDidChangeWorkspaceModeSwitch(configurationService: IConfigurat
 	return Event.filter(configurationService.onDidChangeConfiguration, event => event.affectsConfiguration(WORKSPACE_MODE_SWITCH_SETTING));
 }
 
+/** Ignores repeat activations while any entry point to the same mode switch is pending. */
+export class WorkspaceModeSwitchGuard {
+	private readonly running = observableValue(this, false);
+	readonly isRunning: IObservable<boolean> = this.running;
+
+	async run(switchMode: () => Promise<void>): Promise<void> {
+		if (this.running.get()) {
+			return;
+		}
+
+		this.running.set(true, undefined);
+		try {
+			await switchMode();
+		} finally {
+			this.running.set(false, undefined);
+		}
+	}
+}
+
 /** A persistent, labelled switch between agent orchestration and the code editor. */
 export class WorkspaceModeSwitch extends BaseActionViewItem {
 	private running = false;
+	private handoffPending = false;
+
+	private get busy(): boolean {
+		return this.running || this.handoffPending;
+	}
 
 	constructor(
 		action: IAction,
@@ -47,6 +76,14 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
 	) {
 		super(undefined, action, options);
+	}
+
+	trackHandoff(guard: WorkspaceModeSwitchGuard): this {
+		this._register(autorun(reader => {
+			this.handoffPending = guard.isRunning.read(reader);
+			this.updateEnabled();
+		}));
+		return this;
 	}
 
 	override render(container: HTMLElement): void {
@@ -70,13 +107,14 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 			const segment = append(container, $('span.workspace-mode-segment', { 'aria-hidden': 'true' }, label));
 			segment.classList.toggle('active-mode', mode === this.mode);
 		}
+		append(container, $(`span.workspace-mode-icon${ThemeIcon.asCSSSelector(Codicon.arrowSwap)}`, { 'aria-hidden': 'true' }));
 		this.updateEnabled();
 	}
 
 	protected override updateEnabled(): void {
-		const disabled = !this.action.enabled || this.running;
+		const disabled = !this.action.enabled || this.busy;
 		this.element?.setAttribute('aria-disabled', String(disabled));
-		this.element?.setAttribute('aria-busy', String(this.running));
+		this.element?.setAttribute('aria-busy', String(this.busy));
 		this.element?.classList.toggle('disabled', disabled);
 	}
 
@@ -85,9 +123,9 @@ export class WorkspaceModeSwitch extends BaseActionViewItem {
 		return toAction({
 			id: action.id,
 			label: action.label,
-			enabled: action.enabled && !this.running,
+			enabled: action.enabled && !this.busy,
 			run: async (context?: unknown) => {
-				if (!action.enabled || this.running || this._store.isDisposed) { return; }
+				if (!action.enabled || this.busy || this._store.isDisposed) { return; }
 				this.running = true;
 				this.updateEnabled();
 				try { await action.run(context); }

@@ -6,7 +6,6 @@
 import { fetchAuthorizationServerMetadata } from '../../../../../../base/common/oauth.js';
 import { compareBy, numberComparator } from '../../../../../../base/common/arrays.js';
 import { findFirstMin } from '../../../../../../base/common/arraysFind.js';
-import { SequencerByKey } from '../../../../../../base/common/async.js';
 import { CancellationError, isCancellationError } from '../../../../../../base/common/errors.js';
 import { match } from '../../../../../../base/common/glob.js';
 import { StringSHA1 } from '../../../../../../base/common/hash.js';
@@ -40,8 +39,8 @@ import { localize } from '../../../../../../nls.js';
 import { IAuthenticationMcpAccessService } from '../../../../../services/authentication/browser/authenticationMcpAccessService.js';
 import { IAuthenticationMcpService } from '../../../../../services/authentication/browser/authenticationMcpService.js';
 import { IAuthenticationMcpUsageService } from '../../../../../services/authentication/browser/authenticationMcpUsageService.js';
-import { AuthenticationSession, getDynamicAuthenticationProviderId, IAuthenticationService } from '../../../../../services/authentication/common/authentication.js';
-import { IDynamicAuthenticationProviderStorageService } from '../../../../../services/authentication/common/dynamicAuthenticationProviderStorage.js';
+import { AuthenticationSession, IAuthenticationService } from '../../../../../services/authentication/common/authentication.js';
+import { getMcpAuthenticationOperations, IDynamicAuthenticationProviderStorageService, resolveDynamicAuthenticationProviderId } from '../../../../../services/authentication/common/dynamicAuthenticationProviderStorage.js';
 import { CHAT_SETUP_ACTION_ID } from '../../actions/chatActions.js';
 import { ChatSetupSource, IChatSetupCommandOptions, IChatSetupResult } from '../../chatSetup/chatSetup.js';
 import { reportAgentHostAuthRecovery, reportAgentHostAuthSignInResult, type AgentHostAuthSignInData, type AgentHostAuthTrigger } from './agentHostAuthTelemetry.js';
@@ -986,6 +985,9 @@ async function authenticateProtectedResourceWithServices(
 	options: IResolvedAgentHostAuthenticationOptions,
 ): Promise<boolean> {
 	throwIfAuthenticationStale(options);
+	if (!resource.authorization_servers?.length) {
+		return false;
+	}
 	const resolution = await resolveSessionForProtectedResource(authenticationService, defaultAccountService, logService, resource, options);
 	throwIfAuthenticationStale(options);
 	if (resolution.kind === 'signedOut' && resolution.accountMismatch) {
@@ -1346,7 +1348,7 @@ export async function resolveMcpServerAuthentication(
 	let providerError: unknown;
 	for (const authorizationServer of protectedResource.authorization_servers ?? []) {
 		const authorizationServerUri = URI.parse(authorizationServer);
-		const providerOperationId = await getMcpAuthenticationProviderId(authorizationServerUri, protectedResource, options.oauthClient, dynamicAuthenticationProviderStorageService);
+		const providerOperationId = await resolveDynamicAuthenticationProviderId(authorizationServerUri, protectedResource, options.oauthClient, dynamicAuthenticationProviderStorageService);
 		const authenticated = await authenticationOperations.queue(providerOperationId, async () => {
 			let providerId: string | undefined;
 			try {
@@ -1422,37 +1424,8 @@ export async function resolveMcpServerAuthentication(
 	return false;
 }
 
-const mcpAuthenticationOperations = new WeakMap<IAuthenticationService, SequencerByKey<string>>();
-
-function getMcpAuthenticationOperations(authenticationService: IAuthenticationService): SequencerByKey<string> {
-	let operations = mcpAuthenticationOperations.get(authenticationService);
-	if (!operations) {
-		operations = new SequencerByKey();
-		mcpAuthenticationOperations.set(authenticationService, operations);
-	}
-	return operations;
-}
-
 function isGitHubMcpResource(resource: ProtectedResourceMetadata): boolean {
 	return resource.resource_name === 'GitHub MCP Server';
-}
-
-/** Reuses matching legacy sign-ins; other static clients get independent registrations and tokens. */
-async function getMcpAuthenticationProviderId(
-	authorizationServer: URI,
-	protectedResource: ProtectedResourceMetadata,
-	oauthClient: McpOAuthClient | undefined,
-	dynamicAuthenticationProviderStorageService: IDynamicAuthenticationProviderStorageService,
-): Promise<string> {
-	const legacyProviderId = getDynamicAuthenticationProviderId(authorizationServer, protectedResource);
-	if (!oauthClient) {
-		return legacyProviderId;
-	}
-	const registeredClient = await dynamicAuthenticationProviderStorageService.getClientRegistration(legacyProviderId);
-	if (registeredClient?.clientId === oauthClient.clientId && registeredClient.clientSecret === oauthClient.clientSecret) {
-		return legacyProviderId;
-	}
-	return `${legacyProviderId} client:${encodeURIComponent(oauthClient.clientId)}`;
 }
 
 async function getOrCreateProviderForMcpResource(

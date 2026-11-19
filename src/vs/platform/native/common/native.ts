@@ -10,6 +10,7 @@ import { MessageBoxOptions, MessageBoxReturnValue, OpenDevToolsOptions, OpenDial
 import { ISerializableCommandAction } from '../../action/common/action.js';
 import { AgentHostEditorUpdate, IAgentHostEditorState, IAgentsWindowInvitation } from '../../chat/common/agentsWindowInvitation.js';
 import { INativeOpenDialogOptions } from '../../dialogs/common/dialogs.js';
+import { IEditorOptions, ITextEditorSelection } from '../../editor/common/editor.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { IV8Profile } from '../../profiling/common/profiling.js';
 import { AuthInfo, Credentials } from '../../request/common/request.js';
@@ -94,12 +95,42 @@ export interface INativeZipResult {
 	readonly skippedFiles: readonly { readonly path: string; readonly error: string }[];
 }
 
+export const AGENTS_EDITOR_SELECTION_LIMIT = 12_000;
+
+export interface IAgentsEditorSelection {
+	readonly text: string;
+	readonly startLine: number;
+	readonly endLine: number;
+	readonly truncated: boolean;
+}
+
+export function isAgentsEditorSelection(value: unknown): value is IAgentsEditorSelection {
+	const selection = value as Partial<IAgentsEditorSelection> | undefined;
+	return !!selection && typeof selection.text === 'string' && selection.text.length > 0 && selection.text.length <= AGENTS_EDITOR_SELECTION_LIMIT
+		&& typeof selection.startLine === 'number' && Number.isSafeInteger(selection.startLine) && selection.startLine > 0
+		&& typeof selection.endLine === 'number' && Number.isSafeInteger(selection.endLine) && selection.endLine >= selection.startLine
+		&& typeof selection.truncated === 'boolean';
+}
+
 export interface IOpenAgentsWindowOptions {
 	readonly folderUri?: UriComponents;
+	/** Local workspace context for a mode switch. The selection is an optional excerpt for explicit attachment. */
+	readonly editorWorkspace?: {
+		readonly folders: readonly { readonly uri: UriComponents; readonly name: string }[];
+		readonly activeFile?: UriComponents;
+		readonly activeFileSelection?: ITextEditorSelection;
+		readonly activeFileViewState?: object;
+		readonly activeEditorGroupId?: number;
+		readonly activeEditorTab?: Readonly<Pick<IEditorOptions, 'pinned' | 'sticky'>>;
+		readonly activeDiff?: IAgentsEditorDiff;
+		readonly selection?: IAgentsEditorSelection;
+	};
 	/** Use the invoking editor's folder only for a fresh composer, without replacing an existing session or user choice. */
 	readonly folderUriIsDefault?: boolean;
 	/** Reveal a session or the new-session composer; otherwise preserve the view of an already-open window. */
 	readonly reveal?: UriComponents | 'new';
+	/** Preserve where the IDE switch returns when this request only focuses an existing Agents window. */
+	readonly preserveEditorHandoff?: boolean;
 	/** The remote authority of the editor window whose own agent host, on that remote machine, owns the revealed session. */
 	readonly revealRemoteAuthority?: string;
 	/** Session to spotlight after a contextual invitation, even when it is not opened. */
@@ -107,6 +138,13 @@ export interface IOpenAgentsWindowOptions {
 	readonly source?: AgentsWindowOpenSource;
 	/** Copy a draft only when explicitly revealing the new-session composer. */
 	readonly draft?: IAgentsWindowDraft;
+}
+
+/** A local text comparison that can be reconstructed when the originating window closes. */
+export interface IAgentsEditorDiff {
+	readonly original: UriComponents;
+	readonly modified: UriComponents;
+	readonly viewState?: object;
 }
 
 export interface ICPUProperties {
@@ -439,6 +477,14 @@ export interface ICommonNativeHostService {
 	 */
 	setApplicationBadge(badge: IApplicationBadge | undefined, options?: INativeHostOptions): Promise<void>;
 	openExternal(url: string, defaultApplication?: string): Promise<boolean>;
+	requestReachAuthentication(request: ReachAuthenticationRequest): Promise<{ status: number; data?: unknown }>;
+	listReachAssistantModels(accessToken: string): Promise<ReachAssistantModel[]>;
+	readAssistantNewsFeeds(scope: AssistantNewsScope): Promise<readonly AssistantNewsFeed[]>;
+	readAssistantWeatherForecast(day: AssistantWeatherDay, location: AssistantWeatherLocation, apiKey: string): Promise<AssistantWeatherForecast>;
+	sendReachAssistantPrompt(accountId: string, accessToken: string, request: ReachAssistantRequest, requestId: string, conversationId: string): Promise<ReachAssistantResponse>;
+	stopReachAssistantPrompt(requestId: string): Promise<void>;
+	/** Incremental reply text while an assistant request streams; keyed by request id. */
+	readonly onDidReceiveReachAssistantChunk: Event<{ readonly requestId: string; readonly delta: string }>;
 	moveItemToTrash(fullPath: string): Promise<void>;
 
 	getMediaAccessStatus(mediaType: 'microphone' | 'camera' | 'screen'): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'>;
@@ -619,3 +665,85 @@ export const INativeHostService = createDecorator<INativeHostService>('nativeHos
  * hosts.
  */
 export interface INativeHostService extends ICommonNativeHostService { }
+
+export type AssistantNewsScope = 'toronto' | 'canada' | 'world';
+
+export type AssistantWeatherDay = 'today' | 'tomorrow';
+
+export interface AssistantWeatherLocation {
+	readonly city: string;
+	readonly country: string;
+	readonly subdivision?: string;
+}
+
+export function normalizeAssistantWeatherLocation(location: AssistantWeatherLocation | undefined): AssistantWeatherLocation | undefined {
+	const city = typeof location?.city === 'string' ? location.city.trim() : '';
+	const country = typeof location?.country === 'string' ? location.country.trim().toUpperCase() : '';
+	const subdivision = typeof location?.subdivision === 'string' ? location.subdivision.trim().toUpperCase() : undefined;
+	if (!/^[\p{L}\p{N}][\p{L}\p{M}\p{N} .’'-]{0,99}$/u.test(city) || !/^[A-Z]{2}$/.test(country) || (subdivision && !/^[A-Z0-9]{1,3}$/.test(subdivision))) {
+		return undefined;
+	}
+	return { city, country, subdivision: subdivision || undefined };
+}
+
+export interface AssistantWeatherForecast {
+	readonly source: 'The Weather Network';
+	readonly sourceUrl: string;
+	readonly location: string;
+	readonly date: string;
+	readonly highC?: number;
+	readonly lowC?: number;
+	readonly precipitationChancePercent?: number;
+	readonly conditions?: string;
+}
+
+export interface AssistantNewsFeed {
+	readonly publisher: string;
+	readonly xml?: string;
+	readonly error?: string;
+}
+
+export const REACH_ACCOUNT_ORIGIN = 'https://unbent-semicolon-hermit.ngrok-free.dev';
+export const REACH_ASSISTANT_PROMPT_LIMIT = 8_000;
+
+export interface ReachAssistantModel {
+	readonly id: string;
+	readonly name: string;
+	readonly supportsTools?: boolean;
+}
+
+export interface ReachAssistantToolCall {
+	readonly id: string;
+	readonly name: string;
+	readonly arguments: string;
+}
+
+export interface ReachAssistantChatMessage {
+	readonly role: 'system' | 'user' | 'assistant' | 'tool';
+	readonly content: string;
+	readonly name?: string;
+	readonly toolCallId?: string;
+	readonly toolCalls?: readonly ReachAssistantToolCall[];
+}
+
+export interface ReachAssistantToolSpec {
+	readonly name: string;
+	readonly description: string;
+	readonly parameters?: unknown;
+}
+
+export interface ReachAssistantRequest {
+	readonly messages: readonly ReachAssistantChatMessage[];
+	readonly modelId?: string;
+	readonly tools?: readonly ReachAssistantToolSpec[];
+	readonly isTask?: boolean;
+}
+
+export type ReachAuthenticationRequest =
+	| { readonly action: 'start'; readonly state: string; readonly codeChallenge: string }
+	| { readonly action: 'exchange'; readonly flowId: string; readonly state: string; readonly codeVerifier: string }
+	| { readonly action: 'logout'; readonly accessToken: string };
+
+export type ReachAssistantResponse =
+	| { readonly kind: 'reply'; readonly text: string; readonly model?: string; readonly toolCalls?: readonly ReachAssistantToolCall[] }
+	| { readonly kind: 'signedOut' | 'subscriptionRequired' | 'allowanceExhausted' | 'noModel' | 'modelUnavailable' | 'busy' | 'stopped' | 'unavailable' };

@@ -1,0 +1,705 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.custom-view-node[data-view-id="sessions.customView.assistant"] .custom-view-header-band {
+	max-width: calc(1040px + 2 * var(--vscode-spacing-size100, 10px));
+}
+
+.custom-view-node[data-view-id="sessions.customView.assistant"] .custom-view-content {
+	padding-inline: 0;
+}
+
+.reach-assistant {
+	display: flex;
+	flex-direction: column;
+	container-type: inline-size;
+}
+
+.reach-assistant [hidden] {
+	display: none !important;
+}
+
+.reach-assistant-chat {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.reach-assistant-thread {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden auto;
+	padding-block: var(--vscode-spacing-size80, 8px) var(--vscode-spacing-size240, 24px);
+	scrollbar-gutter: stable both-edges;
+}
+
+.reach-assistant-thread > *,
+.reach-assistant-dock,
+.reach-assistant-breadcrumb,
+.reach-assistant-apps,
+.reach-assistant-gate,
+.reach-assistant > .reach-assistant-link {
+	box-sizing: border-box;
+	width: min(calc(100cqw - 2 * var(--vscode-spacing-size100, 10px)), 1040px);
+	max-width: 100%;
+	margin-inline: auto;
+}
+
+@media (forced-colors: none) {
+	@supports selector(::-webkit-scrollbar) {
+		.reach-assistant-thread::-webkit-scrollbar {
+			width: var(--vscode-spacing-size100, 10px);
+		}
+
+		.reach-assistant-apps::-webkit-scrollbar {
+			height: var(--vscode-spacing-size80, 8px);
+		}
+
+		.reach-assistant-thread::-webkit-scrollbar-track,
+		.reach-assistant-apps::-webkit-scrollbar-track {
+			background: var(--vscode-scrollbar-background, transparent);
+		}
+
+		.reach-assistant-thread::-webkit-scrollbar-thumb,
+		.reach-assistant-apps::-webkit-scrollbar-thumb {
+			background: var(--vscode-scrollbarSlider-background);
+		}
+
+		.reach-assistant-thread::-webkit-scrollbar-thumb:hover,
+		.reach-assistant-apps::-webkit-scrollbar-thumb:hover {
+			background: var(--vscode-scrollbarSlider-hoverBackground);
+		}
+
+		.reach-assistant-thread::-webkit-scrollbar-thumb:active,
+		.reach-assistant-apps::-webkit-scrollbar-thumb:active {
+			background: var(--vscode-scrollbarSlider-activeBackground);
+		}
+	}
+
+	@supports not selector(::-webkit-scrollbar) {
+		.reach-assistant-thread,
+		.reach-assistant-apps {
+			scrollbar-width: thin;
+			scrollbar-color: var(--vscode-scrollbarSlider-background) var(--vscode-scrollbar-background, transparent);
+		}
+	}
+}
+
+.reach-assistant-breadcrumb,
+.reach-assistant-reply-tools,
+.reach-assistant-task {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 5px 10px;
+}
+
+.reach-assistant-breadcrumb {
+	padding: 4px 0 8px;
+	overflow-wrap: anywhere;
+}
+
+.reach-assistant-welcome {
+	display: grid;
+	place-content: center;
+	justify-items: center;
+	min-height: 100%;
+	text-align: center;
+}
+
+.reach-assistant-welcome .codicon {
+	color: var(--vscode-foreground);
+	font-size: 24px;
+}
+
+.reach-assistant-welcome h2 {
+	margin-block: 12px 0;
+	font-size: 24px;
+	font-weight: 600;
+}
+
+.reach-assistant-transcript article {
+	padding-block: 12px 18px;
+}
+
+.reach-assistant-message {
+	width: fit-content;
+	max-width: 92%;
+	box-sizing: border-box;
+	margin: 0 0 16px auto;
+	padding: 8px 12px;
+	border-radius: 12px;
+	background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
+	color: var(--vscode-foreground);
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+
+.reach-assistant-reply {
+	color: var(--vscode-foreground);
+	overflow-wrap: anywhere;
+	line-height: 1.55;
+}
+
+.reach-assistant-reply pre {
+	overflow-x: auto;
+	padding: 10px;
+	border-radius: 6px;
+	background: var(--vscode-textCodeBlock-background);
+}
+
+.reach-assistant-reply-tools {
+	margin-block-start: 6px;
+}
+
+.reach-assistant-reply-tools .monaco-action-bar .action-label {
+	font-size: 14px;
+	padding: 4px;
+}
+
+.reach-assistant-dock {
+	flex: none;
+}
+
+.reach-assistant-composer {
+	container-type: inline-size;
+}
+
+.reach-assistant .new-chat-input-container.sessions-shared-chat-input {
+	display: block;
+	max-width: none;
+	margin-top: 0;
+}
+
+.reach-assistant-controls {
+	display: flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size20, 2px);
+	min-width: 0;
+}
+
+.reach-assistant-controls .reach-assistant-control {
+	min-height: var(--vscode-spacing-size240, 24px);
+	min-width: var(--vscode-spacing-size240, 24px);
+	color: var(--vscode-icon-foreground);
+}
+
+.reach-assistant-controls .codicon {
+	flex: none;
+}
+
+.reach-assistant-controls .reach-assistant-model-icon {
+	display: none;
+}
+
+.reach-assistant-controls .reach-assistant-control-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+@container (max-width: 400px) {
+	.reach-assistant-controls .reach-assistant-control {
+		justify-content: center;
+	}
+
+	.reach-assistant-controls .reach-assistant-control-label,
+	.reach-assistant-controls .reach-assistant-model .codicon-chevron-down {
+		display: none;
+	}
+
+	.reach-assistant-controls .reach-assistant-model-icon {
+		display: inline-block;
+	}
+}
+
+.reach-assistant-control,
+.reach-assistant-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 100%;
+	padding: 4px 6px;
+	border: 0;
+	border-radius: 4px;
+	color: var(--vscode-foreground);
+	background: transparent;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.reach-assistant-control > span:first-child {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.reach-assistant-control:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.reach-assistant-control:not(:disabled):hover,
+.reach-assistant-link:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.reach-assistant-link {
+	color: var(--vscode-textLink-foreground);
+	width: fit-content;
+	overflow-wrap: anywhere;
+}
+
+.reach-assistant-task-updates {
+	margin-block: 4px 12px;
+	padding: 10px 12px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background);
+}
+
+.reach-assistant-task-updates h3 {
+	margin: 0 0 4px;
+	font-size: inherit;
+}
+
+.reach-assistant-task {
+	padding-block: 4px;
+}
+
+.reach-assistant-task-update {
+	flex-basis: 100%;
+	margin: 0;
+	padding-inline: 6px;
+	overflow-wrap: anywhere;
+}
+
+.reach-assistant-muted,
+.reach-assistant-feedback {
+	color: var(--vscode-descriptionForeground);
+}
+
+.reach-assistant-feedback {
+	margin-block: 4px 0;
+}
+
+.reach-assistant-feedback-action {
+	margin-inline-start: 6px;
+}
+
+.reach-assistant-apps {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 2px 8px;
+	overflow-x: auto;
+	flex-shrink: 0;
+}
+
+.reach-assistant-app {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 9px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 999px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font: inherit;
+	font-size: 0.92em;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.reach-assistant-app:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.reach-assistant-app:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.reach-assistant-app-icon {
+	width: 14px;
+	height: 14px;
+	object-fit: contain;
+}
+
+.reach-assistant-app-name {
+	max-width: 140px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.reach-assistant-app-count {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.85em;
+}
+
+.reach-assistant-app-pin {
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+}
+
+.reach-assistant-app-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--vscode-descriptionForeground);
+}
+
+.reach-assistant-app-dot.running { background: var(--vscode-charts-green); }
+.reach-assistant-app-dot.starting { background: var(--vscode-charts-yellow); }
+.reach-assistant-app-dot.attention { background: var(--vscode-charts-orange); }
+.reach-assistant-app-dot.error { background: var(--vscode-charts-red); }
+.reach-assistant-app-dot.stopped,
+.reach-assistant-app-dot.disabled { opacity: 0.45; }
+
+.reach-assistant-app-disabled {
+	opacity: 0.6;
+}
+
+@keyframes reach-assistant-app-pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.3; }
+}
+
+.reach-assistant-app-starting .reach-assistant-app-dot {
+	animation: reach-assistant-app-pulse 1.2s ease-in-out infinite;
+}
+
+.reach-assistant-app-error {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+.reach-assistant-app-add {
+	border-style: dashed;
+	color: var(--vscode-descriptionForeground);
+}
+
+.reach-assistant-app-add:hover {
+	color: var(--vscode-foreground);
+}
+
+.reach-assistant-suggestions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 8px;
+	margin-block-start: 18px;
+}
+
+.reach-assistant-suggestion {
+	padding: 6px 12px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 999px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font: inherit;
+	cursor: pointer;
+}
+
+.reach-assistant-suggestion:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.reach-assistant-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: 6px 0 2px;
+}
+
+.reach-assistant-attachment {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 2px 8px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 4px;
+	background: var(--vscode-badge-background, transparent);
+	color: var(--vscode-badge-foreground, var(--vscode-foreground));
+	font-size: 11px;
+	max-width: 240px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.reach-assistant-attachment .codicon {
+	font-size: 12px;
+}
+
+.reach-assistant-followups {
+	justify-content: flex-start;
+	margin: 10px 0 4px;
+}
+
+.reach-assistant-commands {
+	margin-block-start: 14px;
+	font-size: 11px;
+}
+
+.reach-assistant-streaming {
+	margin: 8px 0 0;
+}
+
+.reach-assistant-streaming > *:first-child {
+	margin-top: 0;
+}
+
+.reach-assistant-streaming > *:last-child {
+	margin-bottom: 0;
+}
+
+.reach-assistant-plan {
+	margin: 4px 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.reach-assistant-plan-details {
+	margin-block-start: 6px;
+}
+
+.reach-assistant-plan-details > summary {
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.92em;
+	user-select: none;
+}
+
+.reach-assistant-plan-details .reach-assistant-plan {
+	margin-inline-start: 14px;
+}
+
+.reach-assistant-plan-item {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.95em;
+}
+
+.reach-assistant-plan-item.inProgress {
+	color: var(--vscode-foreground);
+}
+
+.reach-assistant-plan-item.inProgress .codicon-sync {
+	animation: reach-assistant-spin 1.2s linear infinite;
+}
+
+.reach-assistant-plan-item.done {
+	text-decoration: line-through;
+	opacity: 0.75;
+}
+
+.reach-assistant-plan-item.done .codicon { color: var(--vscode-charts-green); }
+
+.reach-assistant-activity {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	margin-block-start: 8px;
+}
+
+.reach-assistant-activity-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 3px 9px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 999px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.92em;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+button.reach-assistant-activity-chip {
+	background: none;
+	cursor: pointer;
+	font: inherit;
+}
+
+button.reach-assistant-activity-chip:hover {
+	color: var(--vscode-foreground);
+}
+
+.reach-assistant-activity-duration {
+	font-size: 0.85em;
+	opacity: 0.8;
+}
+
+.reach-assistant-activity-detail {
+	flex-basis: 100%;
+	margin: 4px 0 4px 10px;
+	padding: 6px 10px;
+	border-left: 2px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.92em;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.reach-assistant-activity-more { display: contents; }
+.reach-assistant-activity-more[hidden] { display: none; }
+
+.reach-assistant-activity-chip.status-running {
+	color: var(--vscode-foreground);
+	border-color: var(--vscode-focusBorder);
+}
+
+.reach-assistant-activity-chip.status-running .codicon-sync {
+	animation: reach-assistant-spin 1.2s linear infinite;
+}
+
+.reach-assistant-activity-chip.status-awaitingApproval {
+	color: var(--vscode-foreground);
+	border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
+.reach-assistant-activity-chip.status-failed .codicon:last-child,
+.reach-assistant-activity-chip.status-rejected .codicon:last-child {
+	color: var(--vscode-errorForeground);
+}
+
+.reach-assistant-activity-chip.status-done .codicon:last-child {
+	color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+}
+
+@keyframes reach-assistant-spin {
+	to { transform: rotate(360deg); }
+}
+
+.reach-assistant-queued,
+.reach-assistant-editing {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 6px 0 0;
+	font-size: 0.92em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.reach-assistant-editing {
+	margin-bottom: 4px;
+}
+
+.reach-assistant-counter {
+	display: block;
+	margin-top: 4px;
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	text-align: right;
+}
+
+.reach-assistant-counter.over {
+	color: var(--vscode-errorForeground);
+}
+
+.reach-assistant-queued span:nth-child(2) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.reach-assistant-pending .reach-assistant-activity {
+	margin-block: 8px;
+}
+
+.reach-assistant-approval {
+	margin-block-start: 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 8px;
+	background: var(--vscode-editorWidget-background);
+}
+
+.reach-assistant-approval-text {
+	margin: 0 0 6px;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+}
+
+.reach-assistant-approval-details {
+	margin-block-end: 10px;
+}
+
+.reach-assistant-approval-details > summary {
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.92em;
+	user-select: none;
+}
+
+.reach-assistant-approval-args {
+	margin: 0 0 10px;
+	padding: 8px;
+	border-radius: 6px;
+	background: var(--vscode-textCodeBlock-background);
+	font-size: 0.92em;
+	max-height: 140px;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.reach-assistant-approval-buttons {
+	display: flex;
+	gap: 8px;
+}
+
+.reach-assistant-approval-buttons .reach-assistant-control {
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+}
+
+.reach-assistant-task-update {
+	flex-basis: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.reach-assistant-task-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	visibility: hidden;
+}
+
+.reach-assistant-task:hover .reach-assistant-task-actions,
+.reach-assistant-task-actions:focus-within {
+	visibility: visible;
+}
+
+.reach-assistant-task-action {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.reach-assistant-task-action:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}

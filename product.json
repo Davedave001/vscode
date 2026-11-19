@@ -2,6 +2,7 @@
 	"nameShort": "Signal-C",
 	"nameLong": "Signal-C",
 	"applicationName": "signal-c",
+	"openAgentsWindowByDefault": true,
 	"dataFolderName": ".signal-c",
 	"sharedDataFolderName": ".signal-c-shared",
 	"win32MutexName": "signal-c",

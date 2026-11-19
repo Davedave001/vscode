@@ -76,6 +76,7 @@ interface ILayoutRuntimeState {
 interface IEditorToOpen {
 	readonly editor: IUntypedEditorInput;
 	readonly viewColumn?: number;
+	readonly restoreEditorGroupId?: GroupIdentifier;
 }
 
 interface ILayoutInitializationState {
@@ -939,8 +940,8 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 		// Restore editors based on a set of rules:
 		// - never when running on temporary workspace
 		// - never when `workbench.editor.restoreEditors` is disabled
-		// - not when we have files to open, unless:
-		// - always when `window.restoreWindows: preserve`
+		// - restore before opening recovered Agents editors in their original group
+		// - otherwise only without startup inputs, or with `window.restoreWindows: preserve`
 
 		if (isTemporaryWorkspace(contextService.getWorkspace())) {
 			return false;
@@ -951,7 +952,9 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 		}
 
 		const forceRestoreEditors = this.configurationService.getValue<string>('window.restoreWindows') === 'preserve';
-		return !!forceRestoreEditors || initialEditorsState === undefined;
+		return forceRestoreEditors || initialEditorsState === undefined
+			|| initialEditorsState.filesToOpenOrCreate?.some(path => path.restoreEditorGroupId !== undefined) === true
+			|| initialEditorsState.filesToDiff?.some(path => path.restoreEditorGroupId !== undefined) === true;
 	}
 
 	protected willRestoreEditors(): boolean {
@@ -978,11 +981,14 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 			// Diff editor (single)
 			const filesToDiff = coalesce(await pathsToEditors(initialEditorsState.filesToDiff, fileService, this.logService));
 			if (filesToDiff.length === 2) {
+				const restoreEditorGroupId = initialEditorsState.filesToDiff?.[1].restoreEditorGroupId;
+				const options = filesToDiff[1].options;
 				return [{
+					restoreEditorGroupId,
 					editor: {
 						original: { resource: filesToDiff[0].resource },
 						modified: { resource: filesToDiff[1].resource },
-						options: { pinned: true }
+						options: { pinned: options?.pinned ?? true, viewState: options?.viewState, sticky: restoreEditorGroupId !== undefined ? options?.sticky : undefined }
 					}
 				}];
 			}
@@ -995,6 +1001,7 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 				if (resolvedFileToOpenOrCreate) {
 					filesToOpenOrCreate.push({
 						editor: resolvedFileToOpenOrCreate,
+						restoreEditorGroupId: initialEditorsState.filesToOpenOrCreate?.[i].restoreEditorGroupId,
 						viewColumn: initialEditorsState.filesToOpenOrCreate?.[i].viewColumn // take over `viewColumn` from initial state
 					});
 				}
@@ -1100,11 +1107,14 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 				// by the input. this is important to ensure that we open
 				// the editors in the groups they belong to.
 
-				const editorGroupsInVisualOrder = this.editorGroupService.mainPart.getGroups(GroupsOrder.GRID_APPEARANCE);
+				const editorPart = this.editorGroupService.mainPart;
+				const editorGroupsInVisualOrder = editorPart.getGroups(GroupsOrder.GRID_APPEARANCE);
 				const mapEditorsToGroup = new Map<GroupIdentifier, Set<IUntypedEditorInput>>();
 
 				for (const editor of editors) {
-					const group = editorGroupsInVisualOrder[(editor.viewColumn ?? 1) - 1]; // viewColumn is index+1 based
+					const group = (editor.restoreEditorGroupId !== undefined
+						? editorPart.getGroup(editor.restoreEditorGroupId)
+						: editorGroupsInVisualOrder[(editor.viewColumn ?? 1) - 1]) ?? editorPart.activeGroup; // viewColumn is index+1 based
 
 					let editorsByGroup = mapEditorsToGroup.get(group.id);
 					if (!editorsByGroup) {
@@ -1112,7 +1122,12 @@ export abstract class Layout extends Disposable implements IWorkbenchLayoutServi
 						mapEditorsToGroup.set(group.id, editorsByGroup);
 					}
 
-					editorsByGroup.add(editor.editor);
+					const input = editor.editor;
+					const preview = group.previewEditor;
+					// Keep a different preview that was restored from the last IDE close.
+					editorsByGroup.add(input.options?.pinned === false && preview && !preview.matches(input)
+						? { ...input, options: { ...input.options, pinned: true } }
+						: input);
 				}
 
 				openEditorsPromise = Promise.all(Array.from(mapEditorsToGroup).map(async ([groupId, editors]) => {

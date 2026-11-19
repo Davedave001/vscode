@@ -138,7 +138,8 @@ import { AUTOMATIONS_CUSTOM_VIEW_ID } from '../automationsConstants.js';
 import { IOpenAICustomizationsCommandOptions, OPEN_AI_CUSTOMIZATIONS_COMMAND_ID } from '../customizationsConstants.js';
 import { ChatCustomizationsHover } from '../../../chat/browser/aiCustomization/chatCustomizationsHover.js';
 import { ChatCustomizationsTelemetry } from '../../../chat/browser/aiCustomization/chatCustomizationsTelemetry.js';
-import { NEW_SESSION_ACTION_ID } from '../../common/chatConstants.js';
+import { ASSISTANT_CUSTOM_VIEW_ID, NEW_SESSION_ACTION_ID, OPEN_ASSISTANT_ACTION_ID } from '../../common/chatConstants.js';
+import { IsSessionsWindowContext } from '../../../../common/contextkeys.js';
 import { Menus } from '../menus.js';
 import { getSessionConversationStatusAriaLabel } from '../sessionConversationGroups.js';
 import { getChatCompletedStateIcon, getSessionAgentMergeConfigurationObservable, getSessionCompletedStateIcon, ISessionAgentMergeConfiguration } from '../sessionAgentMerge.js';
@@ -154,6 +155,7 @@ import { IShownChat } from '../../../../services/sessions/common/sessionPane.js'
 const $ = DOM.$;
 
 const NEW_SESSION_SECTION_ID = 'newSession';
+const ASSISTANT_SECTION_ID = 'assistant';
 const AUTOMATIONS_SECTION_ID = 'automations';
 const CUSTOMIZATIONS_SECTION_ID = 'customizations';
 /** Prefixes the navigation rows of canvases pinned to the sidebar. */
@@ -459,6 +461,8 @@ function getSessionSectionIcon(sectionId: string, sessions: readonly ISession[] 
 	switch (sectionId) {
 		case NEW_SESSION_SECTION_ID:
 			return Codicon.plus;
+		case ASSISTANT_SECTION_ID:
+			return Codicon.commentDiscussionSparkle;
 		case QUICK_CHATS_SECTION_ID:
 			return Codicon.commentDiscussion;
 		case 'pinned':
@@ -509,7 +513,7 @@ function getSessionSectionIcon(sectionId: string, sessions: readonly ISession[] 
 }
 
 function isShortcutSection(sectionId: string): boolean {
-	return sectionId === NEW_SESSION_SECTION_ID || sectionId === AUTOMATIONS_SECTION_ID || sectionId === CUSTOMIZATIONS_SECTION_ID || isPinnedCanvasSection(sectionId);
+	return sectionId === NEW_SESSION_SECTION_ID || sectionId === ASSISTANT_SECTION_ID || sectionId === AUTOMATIONS_SECTION_ID || sectionId === CUSTOMIZATIONS_SECTION_ID || isPinnedCanvasSection(sectionId);
 }
 
 function isPinnedCanvasSection(sectionId: string): boolean {
@@ -3102,6 +3106,19 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 
 		this.updateChevron(template, collapsible, collapsed);
 
+		if (element.id === ASSISTANT_SECTION_ID) {
+			template.elementDisposables.add(autorun(reader => {
+				const active = this.customViewService.activeCustomView.read(reader)?.id === ASSISTANT_CUSTOM_VIEW_ID;
+				template.container.classList.toggle('active', active);
+				const row = template.container.closest('.monaco-list-row');
+				if (active) {
+					row?.setAttribute('aria-current', 'page');
+				} else {
+					row?.removeAttribute('aria-current');
+				}
+			}));
+		}
+
 		if (element.id === AUTOMATIONS_SECTION_ID) {
 			template.elementDisposables.add(markOnboardingTarget(template.container, 'sessions.automations.entry'));
 			DOM.clearNode(template.icon);
@@ -5607,6 +5624,10 @@ export class SessionsList extends Disposable implements ISessionsList {
 				await this.commandService.executeCommand('sessionsView.manageAutomations');
 				return;
 			}
+			if (isSessionSection(element) && element.id === ASSISTANT_SECTION_ID) {
+				await this.commandService.executeCommand(OPEN_ASSISTANT_ACTION_ID);
+				return;
+			}
 			if (isSessionSection(element) && element.pinnedCanvas) {
 				await this.options.pinnedCanvases?.show(element.pinnedCanvas);
 				return;
@@ -6539,6 +6560,14 @@ export class SessionsList extends Disposable implements ISessionsList {
 		if (showNavigationShortcuts) {
 			navigationSections.push({ id: NEW_SESSION_SECTION_ID, label: localize('newSession', "New Session"), sessions: [] });
 		}
+		if (this.contextKeyService.contextMatchesRules(IsSessionsWindowContext) && this.contextKeyService.contextMatchesRules(ChatContextKeys.enabled) && !this.options.scoped?.get()) {
+			const assistant: ISessionSection = { id: ASSISTANT_SECTION_ID, label: localize('assistant', "Assistant"), sessions: [] };
+			if (showNavigationShortcuts) {
+				navigationSections.push(assistant);
+			} else {
+				children.push(renderSection(assistant));
+			}
+		}
 		if (this.contextKeyService.getContextKeyValue<boolean>(ChatAutomationsEnabledContext.key)) {
 			const automationsSection: ISessionSection = { id: AUTOMATIONS_SECTION_ID, label: localize('automations', "Automations"), sessions: [] };
 			if (showNavigationShortcuts) {
@@ -6954,6 +6983,9 @@ export class SessionsList extends Disposable implements ISessionsList {
 				break;
 			case AUTOMATIONS_SECTION_ID:
 				await this.commandService.executeCommand('sessionsView.manageAutomations');
+				break;
+			case ASSISTANT_SECTION_ID:
+				await this.commandService.executeCommand(OPEN_ASSISTANT_ACTION_ID);
 				break;
 			case CUSTOMIZATIONS_SECTION_ID:
 				this.instantiationService.createInstance(ChatCustomizationsTelemetry).logInteraction('buttonClicked', 'sessionsHeader');

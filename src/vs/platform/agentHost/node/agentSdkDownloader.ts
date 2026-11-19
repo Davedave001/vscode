@@ -306,7 +306,7 @@ export class AgentSdkDownloader extends Disposable implements IAgentSdkDownloade
 	}
 
 	isAvailable(pkg: IAgentSdkPackage): boolean {
-		if (process.env[pkg.devOverrideEnvVar]) {
+		if (process.env[pkg.devOverrideEnvVar] || this._bundledSdkRoot(pkg)) {
 			return true;
 		}
 		return !!this._productService.agentSdks?.[pkg.id] && resolveSdkTarget(pkg) !== undefined;
@@ -345,7 +345,7 @@ export class AgentSdkDownloader extends Disposable implements IAgentSdkDownloade
 	}
 
 	async resolveInstalledSdkRoot(pkg: IAgentSdkPackage): Promise<string | undefined> {
-		const override = process.env[pkg.devOverrideEnvVar];
+		const override = process.env[pkg.devOverrideEnvVar] || this._bundledSdkRoot(pkg);
 		if (override) {
 			return override;
 		}
@@ -367,6 +367,10 @@ export class AgentSdkDownloader extends Disposable implements IAgentSdkDownloade
 		if (override) {
 			this._logService.info(`[AgentSdkDownloader] ${pkg.id}: using dev override at ${override}`);
 			return override;
+		}
+		const bundled = this._bundledSdkRoot(pkg);
+		if (bundled) {
+			return bundled;
 		}
 
 		// 2. Negative cache: a recent failure short-circuits without I/O. Not for a
@@ -393,6 +397,16 @@ export class AgentSdkDownloader extends Disposable implements IAgentSdkDownloade
 			});
 			throw error;
 		}
+	}
+
+	private _bundledSdkRoot(pkg: IAgentSdkPackage): string | undefined {
+		if (!this._environmentService.appRoot) {
+			return undefined;
+		}
+		const root = path.join(this._environmentService.appRoot, 'agent-sdks', pkg.id);
+		// Registration calls isAvailable synchronously before starting provider work.
+		// eslint-disable-next-line local/code-no-sync-fs
+		return fs.existsSync(path.join(root, AGENT_SDK_CACHE_SENTINEL)) ? root : undefined;
 	}
 
 	private async _resolveOrDownload(pkg: IAgentSdkPackage, token: CancellationToken): Promise<string> {

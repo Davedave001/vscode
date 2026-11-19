@@ -73,7 +73,7 @@ import { mcpWorkspaceRootConfig } from '../common/mcpConfiguration.js';
 import { McpContextKeys } from '../common/mcpContextKeys.js';
 import { IMcpCopilotGlobalConfigurationService } from '../common/mcpCopilotGlobalConfigurationService.js';
 import { IMcpRegistry } from '../common/mcpRegistryTypes.js';
-import { HasInstalledMcpServersContext, IMcpSamplingService, IMcpServer, IMcpServerStartOpts, IMcpService, IMcpWorkbenchService, InstalledMcpServersViewId, LazyCollectionState, McpCapability, McpCollectionDefinition, McpConnectionState, McpDefinitionReference, mcpOAuthClientSecretStorageKey, mcpPromptPrefix, McpServerCacheState, McpStartServerInteraction } from '../common/mcpTypes.js';
+import { HasInstalledMcpServersContext, IMcpSamplingService, IMcpServer, IMcpServerStartOpts, IMcpService, IMcpWorkbenchService, InstalledMcpServersViewId, LazyCollectionState, McpCapability, McpCollectionDefinition, McpConnectionState, McpDefinitionReference, mcpOAuthClientSecretStorageKey, mcpPromptPrefix, McpServerCacheState, McpServerTransportType, McpStartServerInteraction } from '../common/mcpTypes.js';
 import { startServerAndWaitForLiveTools } from '../common/mcpTypesUtils.js';
 import { McpAddConfigurationCommand, type McpAddConfigurationTarget, McpInstallFromManifestCommand } from './mcpCommandsAddConfiguration.js';
 import { isAgentHostSessionResource } from '../../chat/common/chatSessionsService.js';
@@ -617,7 +617,7 @@ export class McpAgentHostServerOptionsCommand extends Action2 {
 }
 
 interface ActionItem extends IQuickPickItem {
-	action: 'start' | 'stop' | 'restart' | 'showOutput' | 'config' | 'configSampling' | 'samplingLog' | 'resources' | 'enable';
+	action: 'start' | 'stop' | 'restart' | 'showOutput' | 'config' | 'configSampling' | 'samplingLog' | 'resources' | 'enable' | 'oauthSecret';
 }
 
 interface AuthActionItem extends IQuickPickItem {
@@ -674,7 +674,7 @@ export class McpServerOptionsCommand extends Action2 {
 		});
 	}
 
-	override async run(accessor: ServicesAccessor, id: string): Promise<void> {
+	override async run(accessor: ServicesAccessor, id: string, target?: { readonly collectionId: string; readonly needsSignIn?: boolean }): Promise<void> {
 		const mcpService = accessor.get(IMcpService);
 		const quickInputService = accessor.get(IQuickInputService);
 		const mcpRegistry = accessor.get(IMcpRegistry);
@@ -683,7 +683,7 @@ export class McpServerOptionsCommand extends Action2 {
 		const samplingService = accessor.get(IMcpSamplingService);
 		const authenticationQueryService = accessor.get(IAuthenticationQueryService);
 		const authenticationService = accessor.get(IAuthenticationService);
-		const server = mcpService.servers.get().find(s => s.definition.id === id);
+		const server = mcpService.servers.get().find(s => s.definition.id === id && (!target || s.collection.id === target.collectionId));
 		if (!server) {
 			return;
 		}
@@ -693,6 +693,7 @@ export class McpServerOptionsCommand extends Action2 {
 
 		const items: (ActionItem | AuthActionItem | IQuickPickSeparator)[] = [];
 		const serverState = server.connectionState.get();
+		const needsSignIn = McpConnectionState.needsSignIn(serverState) || (serverState.state === McpConnectionState.Kind.Stopped && target?.needsSignIn);
 		const disabled = isContributionDisabled(server.enablement.get());
 
 		items.push({ type: 'separator', label: localize('mcp.actions.status', 'Status') });
@@ -705,7 +706,7 @@ export class McpServerOptionsCommand extends Action2 {
 		} else if (McpConnectionState.canBeStarted(serverState.state)) {
 			// Only show start when server is stopped or in error state
 			items.push({
-				label: localize('mcp.start', 'Start Server'),
+				label: needsSignIn ? localize('mcp.signIn', 'Sign In…') : localize('mcp.start', 'Start Server'),
 				action: 'start'
 			});
 		} else {
@@ -720,6 +721,11 @@ export class McpServerOptionsCommand extends Action2 {
 		}
 
 		items.push(...this._getAuthActions(authenticationQueryService, server.definition.id));
+		const launch = serverDefinition?.launch;
+		const clientId = launch?.type === McpServerTransportType.HTTP ? launch.oauth?.clientId : undefined;
+		if (clientId && !clientId.includes('${')) {
+			items.push({ label: localize('mcp.editOAuthClientSecret', 'Set OAuth Client Secret…'), action: 'oauthSecret' });
+		}
 
 		const configTarget = serverDefinition?.presentation?.origin || collection?.presentation?.origin;
 		if (configTarget) {
@@ -775,7 +781,9 @@ export class McpServerOptionsCommand extends Action2 {
 				break;
 			case 'start':
 				await server.start({ promptType: 'all-untrusted' });
-				server.showOutput();
+				if (!needsSignIn) {
+					server.showOutput();
+				}
 				break;
 			case 'stop':
 				await server.stop();
@@ -791,6 +799,11 @@ export class McpServerOptionsCommand extends Action2 {
 			case 'signout':
 				await server.stop();
 				await this._handleAuth(authenticationService, pick.accountQuery, server.definition, true);
+				break;
+			case 'oauthSecret':
+				if (launch?.type === McpServerTransportType.HTTP && clientId) {
+					await commandService.executeCommand(McpCommandIds.SetOAuthClientSecret, clientId, launch.uri.toString(true), server.definition.label);
+				}
 				break;
 			case 'showOutput':
 				server.showOutput();
@@ -1179,7 +1192,7 @@ export class AddConfigurationAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor, configUri?: URI | string, appId?: string): Promise<void> {
+	async run(accessor: ServicesAccessor, configUri?: URI | string, appId?: string, source?: 'assistant'): Promise<void> {
 		const instantiationService = accessor.get(IInstantiationService);
 		const notificationService = accessor.get(INotificationService);
 		try {
@@ -1190,7 +1203,8 @@ export class AddConfigurationAction extends Action2 {
 			if (configUri !== undefined && target === undefined) {
 				return;
 			}
-			await instantiationService.createInstance(McpAddConfigurationCommand, target).run(this.connectApp, appId);
+			const connectInAssistant = this.connectApp && source === 'assistant' && target === undefined;
+			await instantiationService.createInstance(McpAddConfigurationCommand, target).run(this.connectApp, appId, connectInAssistant);
 		} catch (error) {
 			if (!isCancellationError(error)) {
 				notificationService.error(error);

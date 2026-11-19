@@ -9,6 +9,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import type { IAutomationDescriptor, IAutomationSchedule } from '../../../../../workbench/contrib/chat/common/automations/automation.js';
 import { isContributionEnabled } from '../../../../../workbench/contrib/chat/common/enablement.js';
 import { IAgentPlugin } from '../../../../../workbench/contrib/chat/common/plugins/agentPluginService.js';
+import { ASSISTANT_BRIEFINGS } from '../assistantBriefings.js';
 
 export interface IAutomationTemplateSource {
 	readonly label: string;
@@ -48,6 +49,8 @@ export const AUTOMATION_TEMPLATES: readonly IAutomationTemplate[] = [
 		prompt: localize('automationTemplate.findBugs.prompt', "Explore this codebase and find concrete, reproducible bugs.\n\nRead the repository guidance and understand the architecture before choosing a focused area to investigate, such as recent changes, complex state transitions, or error handling. Trace suspected problems through callers and existing tests. Use the smallest relevant tests or a minimal reproduction to verify behavior, and distinguish confirmed bugs from hypotheses. Avoid style-only suggestions and speculative findings.\n\nReport high-confidence, actionable bugs with severity, file and line references, a triggering scenario, expected versus actual behavior, and supporting test or reproduction results. Suggest a focused fix for each finding without modifying repository files or committing changes. State what you explored, any validation limitations, and when no confirmed bugs were found."),
 		schedule: { interval: 'weekly', scheduleHour: 9, scheduleMinute: 0, scheduleDay: 1 },
 	},
+	ASSISTANT_BRIEFINGS.morning,
+	ASSISTANT_BRIEFINGS.evening,
 ];
 
 export function readAutomationTemplates(plugins: readonly IAgentPlugin[], reader?: IReader): readonly IAutomationTemplate[] {

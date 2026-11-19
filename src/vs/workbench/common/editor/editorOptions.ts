@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { hasKey } from '../../../base/common/types.js';
 import { IRange } from '../../../editor/common/core/range.js';
 import { ICodeEditorViewState, IDiffEditorViewState, IEditor, ScrollType } from '../../../editor/common/editorCommon.js';
 import { ITextEditorOptions, TextEditorSelectionRevealType, TextEditorSelectionSource } from '../../../platform/editor/common/editor.js';
@@ -14,7 +15,12 @@ export function applyTextEditorOptions(options: ITextEditorOptions, editor: IEdi
 	// Restore view state if any
 	const viewState = massageEditorViewState(options);
 	if (isTextEditorViewState(viewState)) {
-		editor.restoreViewState(viewState);
+		const currentState = options.preserveViewStateContributions && hasKey(viewState, { contributionsState: true })
+			? editor.saveViewState()
+			: undefined;
+		editor.restoreViewState(currentState && hasKey(currentState, { contributionsState: true })
+			? { ...viewState, contributionsState: currentState.contributionsState }
+			: viewState);
 
 		applied = true;
 	}

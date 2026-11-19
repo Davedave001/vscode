@@ -212,4 +212,40 @@ suite('Devin Subscription Connection', () => {
 		assert.strictEqual(await signedOut, '');
 		assert.deepStrictEqual(f.tokens, ['browser-token', 'browser-token', '']);
 	});
+
+	test('waits silently during startup before rootState hydrates and connects once Devin registers', async () => {
+		const rootChanges = store.add(new Emitter<RootState>());
+		const warnings: string[] = [];
+		const tokens: string[] = [];
+		const agent: RootState['agents'][number] = { provider: DevinSubscriptionProviderId, displayName: 'Devin Subscription', description: '', models: [{ id: 'model-0', name: 'Model 0', provider: DevinSubscriptionProviderId }], protectedResources: [{ resource: DevinSubscriptionResource }] };
+		let currentRoot: RootState | undefined = undefined;
+		const authentication = upcastPartial<IAuthenticationService>({
+			onDidChangeSessions: Event.None,
+			getSessions: async () => [{ id: 'browser-session', accessToken: 'browser-token', scopes: [], account: { id: 'account', label: 'Devin account' } }],
+		});
+		const host = upcastPartial<IAgentHostService>({
+			onAgentHostStart: Event.None,
+			rootState: upcastPartial<IAgentHostService['rootState']>({ get value() { return currentRoot; }, onDidChange: rootChanges.event }),
+			authenticate: async request => { tokens.push(request.token); return { authenticated: true }; },
+		});
+		const log = new class extends NullLogService {
+			override warn(message: string | Error): void { warnings.push(String(message)); }
+		}();
+		const connection = store.add(new DevinSubscriptionConnection(authentication, host, upcastPartial<IExtensionService>({ whenInstalledExtensionsRegistered: async () => true }), log));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.deepStrictEqual(warnings, []);
+		assert.deepStrictEqual(tokens, []);
+		const ready = new DeferredPromise<void>();
+		store.add(autorun(reader => {
+			if (connection.status.read(reader).kind === 'ready') {
+				void ready.complete();
+			}
+		}));
+		currentRoot = { agents: [agent] };
+		rootChanges.fire(currentRoot);
+		await ready.p;
+		assert.deepStrictEqual(warnings, []);
+		assert.deepStrictEqual(tokens, ['browser-token']);
+		assert.deepStrictEqual(connection.status.get(), { kind: 'ready', modelCount: 1 });
+	});
 });

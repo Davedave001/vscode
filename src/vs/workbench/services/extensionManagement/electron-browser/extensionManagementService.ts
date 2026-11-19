@@ -27,6 +27,10 @@ import { IExtensionsScannerService } from '../../../../platform/extensionManagem
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IUserDataProfilesService } from '../../../../platform/userDataProfile/common/userDataProfile.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { ISignalCExtensionDownloadService, signalCExtensionDownloadChannel } from '../../../../platform/extensionManagement/common/signalCExtensionCatalog.js';
+import { registerSharedProcessRemoteService } from '../../../../platform/ipc/electron-browser/services.js';
+
+registerSharedProcessRemoteService(ISignalCExtensionDownloadService, signalCExtensionDownloadChannel);
 
 export class ExtensionManagementService extends BaseExtensionManagementService {
 

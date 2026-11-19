@@ -73,6 +73,7 @@ test('keeps workspace arguments separate from the three isolated editor storage 
 	for (const ide of [false, true]) {
 		const launch = createLaunchOptions(root, workspace, ide, {});
 		assert.strictEqual(launch.args.includes('--agents'), !ide);
+		assert.ok(launch.args.includes('--agent-workspace-preview'));
 		assert.ok(launch.args.includes(workspace));
 		for (const [flag, directory] of [['--user-data-dir', 'agent-workspace-profile'], ['--shared-data-dir', 'agent-workspace-shared'], ['--extensions-dir', 'agent-workspace-extensions']]) {
 			assert.strictEqual(launch.args[launch.args.indexOf(flag) + 1], path.join(root, '.build', directory));

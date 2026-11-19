@@ -10,7 +10,7 @@ import { MainContext, MainThreadAuthenticationShape, ExtHostAuthenticationShape 
 import { Proxied } from '../../services/extensions/common/proxyIdentifier.js';
 import { Disposable, ProgressLocation } from './extHostTypes.js';
 import { IExtensionDescription, ExtensionIdentifier } from '../../../platform/extensions/common/extensions.js';
-import { getAuthenticationSessionRequestKey, IAuthenticationGetSessionsOptions, IAuthenticationProviderSessionOptions, INTERNAL_AUTH_PROVIDER_PREFIX } from '../../services/authentication/common/authentication.js';
+import { getAuthenticationSessionRequestKey, IAuthenticationGetSessionsOptions, IAuthenticationProviderSessionOptions, INTERNAL_AUTH_PROVIDER_PREFIX, isGoogleWorkspaceOAuth, isSignalCMailOAuth } from '../../services/authentication/common/authentication.js';
 import { createDecorator } from '../../../platform/instantiation/common/instantiation.js';
 import { IExtHostRpcService } from './extHostRpcService.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
@@ -433,8 +433,9 @@ export class ExtHostAuthentication implements ExtHostAuthenticationShape {
 		return provider.id;
 	}
 
-	async $onDidChangeDynamicAuthProviderTokens(authProviderId: string, clientId: string, tokens: IAuthorizationToken[]): Promise<void> {
-		this._onDidDynamicAuthProviderTokensChange.fire({ authProviderId, clientId, tokens });
+	async $onDidChangeDynamicAuthProviderTokens(authProviderId: string, clientId: string, tokens?: IAuthorizationToken[]): Promise<void> {
+		// Deleting the storage entry clears the provider's token array.
+		this._onDidDynamicAuthProviderTokensChange.fire({ authProviderId, clientId, tokens: tokens ?? [] });
 	}
 }
 
@@ -497,6 +498,8 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 
 	protected readonly _logger: ILogger;
 	protected readonly _isMicrosoftAuth: boolean;
+	protected readonly _isSignalCMailOAuth: boolean;
+	protected readonly _isGoogleLoopbackOAuth: boolean;
 	private readonly _disposable: DisposableStore;
 
 	constructor(
@@ -526,6 +529,9 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		// Metadata is untrusted, so the token endpoint must also be Microsoft to earn Microsoft-specific treatment.
 		this._isMicrosoftAuth = (isMicrosoftAuthUrl(stringifiedServer) || isMicrosoftAuthUrl(_serverMetadata.authorization_endpoint))
 			&& isMicrosoftAuthUrl(_serverMetadata.token_endpoint);
+		this._isSignalCMailOAuth = isSignalCMailOAuth(this.id, authorizationServer, _serverMetadata, _resourceMetadata?.resource);
+		this._isGoogleLoopbackOAuth = (this._isSignalCMailOAuth && !this._isMicrosoftAuth)
+			|| isGoogleWorkspaceOAuth(authorizationServer, _serverMetadata, _resourceMetadata?.resource ? URI.parse(_resourceMetadata.resource) : undefined);
 
 		this._logger = loggerService.createLogger(this.id, { name: `Auth: ${this.label}` });
 		this._disposable = new DisposableStore();
@@ -546,7 +552,7 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		this._disposable.add(this._tokenStore.onDidChangeSessions(e => this._onDidChangeSessions.fire(e)));
 		// Will be extended later to support other flows
 		this._createFlows = [];
-		if (_serverMetadata.authorization_endpoint) {
+		if (_serverMetadata.authorization_endpoint && !this._isSignalCMailOAuth) {
 			this._createFlows.push({
 				label: nls.localize('url handler', "URL Handler"),
 				handler: (scopes, progress, token) => this._createWithUrlHandler(scopes, progress, token)
@@ -566,7 +572,7 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 	 * The RFC 8707 resource indicator to send in requests. Omitted for Microsoft auth.
 	 */
 	protected get _resourceIndicator(): string | undefined {
-		return this._isMicrosoftAuth ? undefined : this._resourceMetadata?.resource;
+		return this._isMicrosoftAuth || this._isSignalCMailOAuth ? undefined : this._resourceMetadata?.resource;
 	}
 
 	/**
@@ -612,6 +618,9 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 						}
 						try {
 							const newToken = await this.exchangeRefreshTokenForToken(token.refresh_token, session.scopes, options.silent !== true);
+							if (this._isSignalCMailOAuth) {
+								newToken.id_token ??= token.id_token;
+							}
 							// TODO@TylerLeonhardt: When the core scope handling doesn't care about order, this check should be
 							// updated to not care about order
 							if (newToken.scope !== scopeStr) {
@@ -640,6 +649,14 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 	}
 
 	async createSession(scopes: string[], _options: vscode.AuthenticationProviderSessionOptions): Promise<vscode.AuthenticationSession> {
+		if (this._isSignalCMailOAuth && !this._createFlows.length) {
+			throw new Error(nls.localize('directMailOAuth.localRequired', "Direct mail sign-in requires a local Signal-C desktop extension host."));
+		}
+		if (this._isGoogleLoopbackOAuth && !this._clientSecret) {
+			throw new Error(this._isSignalCMailOAuth
+				? nls.localize('gmailDirectOAuth.secretRequired', "Enter the secret from your Google Desktop OAuth client in the Gmail connection setup.")
+				: nls.localize('googleWorkspaceOAuth.secretRequired', "Google Workspace requires an OAuth client secret. Use Set OAuth Client Secret on the MCP server, then connect again."));
+		}
 		this._logger.info(`Creating session for scopes: ${scopes.join(' ')}`);
 		let token: IAuthorizationTokenResponse | undefined;
 		for (let i = 0; i < this._createFlows.length; i++) {
@@ -682,7 +699,10 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		}
 
 		// Store session for later retrieval
-		this._tokenStore.update({ added: [{ ...token, created_at: Date.now() }], removed: [] });
+		const persisted = this._tokenStore.update({ added: [{ ...token, created_at: Date.now() }], removed: [] });
+		if (this._isSignalCMailOAuth) {
+			await persisted;
+		}
 		const session = this._tokenStore.sessions.find(t => t.accessToken === token.access_token)!;
 		this._logger.info(`Created ${token.refresh_token ? 'refreshable' : 'non-refreshable'} session for scopes: ${token.scope}${token.expires_in ? ` that expires in ${token.expires_in} seconds` : ''}`);
 		return session;
@@ -737,6 +757,7 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		authorizationUrl.searchParams.append('state', state.toString());
 		authorizationUrl.searchParams.append('code_challenge', codeChallenge);
 		authorizationUrl.searchParams.append('code_challenge_method', 'S256');
+		this._configureAuthorizationUrl(authorizationUrl);
 		const scopeString = scopes.join(' ');
 		const requestScopeString = this._getRequestScopes(scopes).join(' ');
 		if (requestScopeString) {
@@ -819,6 +840,16 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		return { code: codeMatch[1] };
 	}
 
+	protected _configureAuthorizationUrl(url: URL): void {
+		if (this._isGoogleLoopbackOAuth) {
+			url.searchParams.set('access_type', 'offline');
+			// A previous online-only grant may otherwise keep Google from issuing a refresh token.
+			url.searchParams.set('prompt', 'consent');
+		} else if (this._isSignalCMailOAuth) {
+			url.searchParams.set('prompt', 'select_account');
+		}
+	}
+
 	private _tokenRequestInit(tokenEndpoint: string, body: URLSearchParams): RequestInit {
 		const headers: Record<string, string> = {
 			'Content-Type': 'application/x-www-form-urlencoded',
@@ -839,7 +870,7 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		if (this._clientSecret) {
 			body.append('client_secret', this._clientSecret);
 		}
-		return { method: 'POST', headers, body: body.toString() };
+		return { method: 'POST', headers, body: body.toString(), ...(this._isGoogleLoopbackOAuth || this._isSignalCMailOAuth ? { redirect: 'error' } : {}) };
 	}
 
 	protected async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string): Promise<IAuthorizationTokenResponse> {
@@ -915,6 +946,8 @@ export class DynamicAuthProvider implements vscode.AuthenticationProvider {
 		if (isAuthorizationTokenResponse(result)) {
 			return {
 				...result,
+				// Google normally returns only a new access token when refreshing.
+				...(this._isGoogleLoopbackOAuth || this._isSignalCMailOAuth ? { refresh_token: result.refresh_token ?? refreshToken } : {}),
 				created_at: Date.now(),
 			};
 		} else if (isAuthorizationErrorResponse(result) && result.error === AuthorizationErrorType.InvalidClient) {
@@ -979,7 +1012,7 @@ export class TokenStore implements Disposable {
 	private readonly _disposable: DisposableStore;
 
 	constructor(
-		private readonly _persistence: { onDidChange: Event<IAuthorizationToken[]>; set: (tokens: IAuthorizationToken[]) => void },
+		private readonly _persistence: { onDidChange: Event<IAuthorizationToken[]>; set: (tokens: IAuthorizationToken[]) => void | Promise<void> },
 		initialTokens: IAuthorizationToken[],
 		private readonly _logger: ILogger
 	) {
@@ -1005,7 +1038,7 @@ export class TokenStore implements Disposable {
 		this._disposable.dispose();
 	}
 
-	update({ added, removed }: { added: IAuthorizationToken[]; removed: IAuthorizationToken[] }): void {
+	update({ added, removed }: { added: IAuthorizationToken[]; removed: IAuthorizationToken[] }): void | Promise<void> {
 		this._logger.trace(`Updating tokens: added ${added.length}, removed ${removed.length}`);
 		const currentTokens = [...this._tokensObservable.get()];
 		for (const token of removed) {
@@ -1022,11 +1055,13 @@ export class TokenStore implements Disposable {
 				currentTokens[index] = token;
 			}
 		}
+		let persisted: void | Promise<void> = undefined;
 		if (added.length || removed.length) {
 			this._tokensObservable.set(currentTokens, undefined);
-			void this._persistence.set(currentTokens);
+			persisted = this._persistence.set(currentTokens);
 		}
 		this._logger.trace(`Tokens updated: ${currentTokens.length} tokens stored.`);
+		return persisted;
 	}
 
 	private _registerChangeEventAutorun(): IDisposable {

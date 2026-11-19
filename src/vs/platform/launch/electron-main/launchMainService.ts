@@ -11,9 +11,10 @@ import { whenDeleted } from '../../../base/node/pfs.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { NativeParsedArgs } from '../../environment/common/argv.js';
 import { IEnvironmentMainService } from '../../environment/electron-main/environmentMainService.js';
-import { isLaunchedFromCli } from '../../environment/node/argvHelper.js';
+import { isLaunchedFromCli, isUnqualifiedWindowLaunch } from '../../environment/node/argvHelper.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { ILogService } from '../../log/common/log.js';
+import { IProductService } from '../../product/common/productService.js';
 import { IURLService } from '../../url/common/url.js';
 import { ICodeWindow } from '../../window/electron-main/window.js';
 import { IWindowSettings } from '../../window/common/window.js';
@@ -47,6 +48,7 @@ export class LaunchMainService implements ILaunchMainService {
 		@IURLService private readonly urlService: IURLService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IEnvironmentMainService private readonly environmentMainService: IEnvironmentMainService,
+		@IProductService private readonly productService: IProductService,
 	) { }
 
 	async start(args: NativeParsedArgs, userEnv: IProcessEnvironment): Promise<void> {
@@ -147,7 +149,7 @@ export class LaunchMainService implements ILaunchMainService {
 		}
 
 		// Agents window
-		else if (args['agents']) {
+		else if (args['agents'] || (this.productService.openAgentsWindowByDefault && context === OpenContext.DESKTOP && isUnqualifiedWindowLaunch(args))) {
 			usedWindows = await this.windowsMainService.openAgentsWindow(baseConfig);
 		}
 

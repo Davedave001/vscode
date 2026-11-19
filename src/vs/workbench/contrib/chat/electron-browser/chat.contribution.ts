@@ -12,7 +12,7 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
 import { localize } from '../../../../nls.js';
-import { registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -46,7 +46,7 @@ import { IAgentHostService } from '../../../../platform/agentHost/common/agentSe
 import { type AgentInfo, type RootState } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { ChatContextKeys } from '../common/actions/chatContextKeys.js';
 import { IChatService } from '../common/chatService/chatService.js';
-import { ChatModeKind } from '../common/constants.js';
+import { ChatModeKind, OPEN_AGENTS_WINDOW_PRECONDITION, OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID } from '../common/constants.js';
 import { IPluginGitService } from '../common/plugins/pluginGitService.js';
 import { registerChatDeveloperActions } from './actions/chatDeveloperActions.js';
 import { registerChatExportZipAction } from './actions/chatExportZip.js';
@@ -54,7 +54,7 @@ import { registerExportAgentTracesDbAction } from './actions/exportAgentTracesDb
 import { registerInstallDictationModelAction } from './actions/installDictationModelAction.js';
 import { confirmSessionShutdown, getChatUnattendedRestartBlocker, getEffectiveSessionShutdownReason, shouldWarnForInFlightSessionShutdown, shouldWarnForSessionShutdown } from './chatLifecycle.js';
 import { HoldToVoiceChatInChatViewAction, InlineVoiceChatAction, KeywordActivationContribution, QuickVoiceChatAction, ReadChatResponseAloud, StartVoiceChatAction, StopListeningAction, StopListeningAndSubmitAction, StopReadAloud, StopReadChatItemAloud, VoiceChatInChatViewAction } from './actions/voiceChatActions.js';
-import { AgentsLauncherAction, OpenWorkspaceInAgentsWindowAction, OpenWorkspaceInAgentsContribution, OpenAgentsWindowAction, OpenChatSessionInAgentsWindowAction, CopilotHarnessIntroductionContribution, ToggleOpenInAgentsWindowTitleBarAction, OpenWorkspaceInAgentsWindowChatTitleAction, OpenWorkspaceInAgentsWindowTitleBarAction, ResetCopilotHarnessIntroductionAction } from './agentSessions/agentSessionsActions.js';
+import { AgentsLauncherAction, OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE, OpenWorkspaceInAgentsWindowAction, OpenExplorerRootInAgentsWindowAction, OpenWorkspaceInAgentsContribution, OpenAgentsWindowAction, OpenChatSessionInAgentsWindowAction, CopilotHarnessIntroductionContribution, ToggleOpenInAgentsWindowTitleBarAction, OpenWorkspaceInAgentsWindowChatTitleAction, OpenWorkspaceInAgentsWindowTitleBarAction, ResetCopilotHarnessIntroductionAction } from './agentSessions/agentSessionsActions.js';
 import { AgentsWindowInvitationContribution } from './agentSessions/agentsWindowInvitation.js';
 import { AgentHostEditorActivity, IAgentHostEditorActivityService } from './agentSessions/agentHostEditorActivity.js';
 import { NativeBuiltinToolsContribution } from './builtInTools/tools.js';
@@ -240,6 +240,17 @@ class ChatLifecycleHandler extends Disposable {
 }
 
 registerAction2(OpenWorkspaceInAgentsWindowAction);
+MenuRegistry.appendMenuItem(MenuId.MenubarViewMenu, {
+	command: {
+		id: OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID,
+		title: OPEN_WORKSPACE_IN_AGENTS_WINDOW_TITLE,
+		precondition: OPEN_AGENTS_WINDOW_PRECONDITION,
+	},
+	when: OPEN_AGENTS_WINDOW_PRECONDITION,
+	group: '1_open',
+	order: 3,
+});
+registerAction2(OpenExplorerRootInAgentsWindowAction);
 registerAction2(OpenWorkspaceInAgentsWindowChatTitleAction);
 registerAction2(OpenWorkspaceInAgentsWindowTitleBarAction);
 registerAction2(ToggleOpenInAgentsWindowTitleBarAction);

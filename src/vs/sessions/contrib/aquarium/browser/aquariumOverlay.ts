@@ -511,6 +511,8 @@ function createActiveAquarium(mainContainer: HTMLElement, layoutService: IWorkbe
 		const speed = randomBetween(BASE_SPEED * 0.6, BASE_SPEED * 1.2);
 		const f = new Fish({
 			species: pickRandomSpecies(),
+			// Evenly cover the full color wheel instead of randomly repeating blue accents.
+			hueRotation: i * 360 / FISH_COUNT,
 			size,
 			positionX: randomBetween(0, Math.max(1, bounds.width - size)),
 			positionY: randomBetween(0, Math.max(1, bounds.height - size)),

@@ -3,22 +3,27 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { execFile, spawn } from 'child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { DeferredPromise } from '../../../../base/common/async.js';
 import { Disposable, DisposableStore, type IDisposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { CancellationError } from '../../../../base/common/errors.js';
+import { CancellationError, getErrorMessage, isCancellationError } from '../../../../base/common/errors.js';
 import { observableValue } from '../../../../base/common/observable.js';
 import { deepClone, equals } from '../../../../base/common/objects.js';
 import { URI } from '../../../../base/common/uri.js';
 import { isEqual, basename } from '../../../../base/common/resources.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
+import type { ILogService } from '../../../log/common/log.js';
 import { DevinSubscriptionProviderId, DevinSubscriptionResource } from '../../common/devinAgentConfiguration.js';
 import { type IAgent, type IAgentChats, type AgentSignal, type IAgentChatContext, type IAgentChatMetadata, type IAgentMaterializeChatEvent, type IActiveClient, type IAgentModelInfo, resolveAgentChatContext } from '../../common/agent.js';
+import { AgentHostAutoApprovePolicyRestrictedConfigKey, platformRootSchema, platformSessionSchema } from '../../common/agentHostSchema.js';
+import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
+import { ConfirmationOptionKind } from '../../common/state/protocol/state.js';
 import { ActionType, type ChatAction } from '../../common/state/sessionActions.js';
 import { type ModelSelection, type Turn, type MarkdownResponsePart, type ToolCallResponsePart, type ToolCallPendingConfirmationState, type ToolResultContent, TurnState, MessageKind, ResponsePartKind, ToolCallStatus, ToolCallConfirmationReason, ToolCallCancellationReason, ToolResultContentType } from '../../common/state/sessionState.js';
-import { AcpClient, initializeAcp, isAcpRecord as isObject } from './acpClient.js';
+import type { IAgentConfigurationService } from '../agentConfigurationService.js';
+import { AcpClient, AcpRpcError, initializeAcp, isAcpRecord as isObject } from './acpClient.js';
 import { AcpStdioTransport } from './acpStdioTransport.js';
 import { resolveAcpPrompt, type IAcpPromptCapabilities } from './acpPromptResolver.js';
 import { applyDevinModelConfiguration, DevinModelConfigurationError, readDevinConfigOptions, type IDevinSelectConfig } from './devinModelConfiguration.js';
@@ -27,6 +32,7 @@ import { type AcpMcpServer, type IDevinMcpConfiguration, validateAcpMcpCapabilit
 
 export const DEVIN_SUBSCRIPTION_PROVIDER = DevinSubscriptionProviderId;
 export const DEVIN_SUBSCRIPTION_RESOURCE = DevinSubscriptionResource;
+const DEVIN_BYPASS_MODE = 'bypass';
 
 interface IDevinAcpToolMetadata {
 	readonly 'cognition.ai/toolName'?: unknown;
@@ -61,6 +67,19 @@ interface ISendOperation {
 	readonly finished: DeferredPromise<void>;
 	cancelled: boolean;
 	waiting: boolean;
+	stage: 'queued' | 'workspace' | 'sessionSetup' | 'approvalMode' | 'preparePrompt' | 'prompt';
+	cancellationReason?: 'userStop' | 'accountChanged' | 'chatReleased' | 'chatDisposed' | 'shutdown' | 'mcpChanged' | 'mcpUnavailable' | 'approvalRevoked';
+	mcpChange?: { readonly trigger: McpRefreshTrigger; readonly before: number; readonly after?: number };
+}
+
+type McpRefreshTrigger = 'configuration' | 'owner' | 'clientUpdated' | 'clientRemoved';
+
+interface IDevinConnectionDiagnostics {
+	readonly mcpServerCount: number;
+	stage: 'launch' | 'initialize' | 'session/new' | 'session/load' | 'model' | 'ready';
+	acpPid?: number;
+	acpExitCode?: number;
+	acpSignal?: NodeJS.Signals;
 }
 
 interface IChat {
@@ -73,6 +92,7 @@ interface IChat {
 	model?: ModelSelection;
 	nativeId?: string;
 	client?: AcpClient;
+	connectionDiagnostics?: IDevinConnectionDiagnostics;
 	initializing?: Promise<void>;
 	readonly store: DisposableStore;
 	readonly history: Turn[];
@@ -87,6 +107,7 @@ interface IChat {
 	modelConfigId?: string;
 	legacyModels: boolean;
 	configOptions: readonly IDevinSelectConfig[];
+	previousApprovalMode?: string;
 	modelNeedsReconciliation?: boolean;
 	promptCapabilities?: IAcpPromptCapabilities;
 	forceStop?: ReturnType<typeof setTimeout>;
@@ -134,13 +155,19 @@ class DevinActiveClient implements IActiveClient {
 	}
 }
 
-/** The official client understands this prefix as a Devin account, not a Windsurf API key. */
-export function devinSubscriptionEnvironment(token: string, inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/**
+ * Isolate `devin` from outer Windsurf/Devin IDE state (API keys, backend overrides,
+ * and external extension-host watchdogs that shut ACP down mid-turn when that host exits).
+ */
+export function devinSubscriptionEnvironment(token: string, inherited: NodeJS.ProcessEnv, parentPid?: number): NodeJS.ProcessEnv {
 	const env = { ...inherited };
 	for (const key of Object.keys(env)) {
-		if (/^WINDSURF_API_KEY$/i.test(key)) { delete env[key]; }
+		if (/^(?:WINDSURF_.*|DEVIN_.*|ACP_BACKEND)$/i.test(key)) { delete env[key]; }
 	}
 	env.WINDSURF_API_KEY = token.startsWith('devin-session-token$') ? token : `devin-session-token$${token}`;
+	if (parentPid !== undefined) {
+		env.WINDSURF_EXT_HOST_PID = String(parentPid);
+	}
 	return env;
 }
 
@@ -182,13 +209,24 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 	private catalogIds: ReadonlySet<string> = new Set();
 	private readonly clients = new Map<string, Map<string, DevinActiveClient>>();
 
-	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter, private readonly mcpConfiguration?: IDevinMcpConfiguration) {
+	constructor(private readonly executable: string, private readonly adapter?: IDevinClientAdapter, private readonly mcpConfiguration?: IDevinMcpConfiguration, private readonly logService?: ILogService, private readonly configuration?: Pick<IAgentConfigurationService, 'getRootValue' | 'getChatEffectiveValue' | 'onDidChatConfigChange' | 'onDidRootConfigChange'>) {
 		super();
+		if (configuration) {
+			this._register(configuration.onDidChatConfigChange(event => {
+				if (Object.hasOwn(event.config, SessionConfigKey.AutoApprove)) {
+					const record = this.records.get(event.chat);
+					if (record) { this.stopIfApprovalRevoked(record); }
+				}
+			}));
+			this._register(configuration.onDidRootConfigChange(() => {
+				for (const record of this.records.values()) { this.stopIfApprovalRevoked(record); }
+			}));
+		}
 		if (mcpConfiguration) {
 			this._register(mcpConfiguration.onDidChange(owners => {
 				for (const record of this.records.values()) {
 					if (record.context && (!owners || owners.includes(record.context.owner.get().toString()))) {
-						void this.refreshMcpConfiguration(record);
+						void this.refreshMcpConfiguration(record, 'configuration');
 					}
 				}
 			}));
@@ -205,7 +243,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (resource !== DEVIN_SUBSCRIPTION_RESOURCE) { return false; }
 		if (this.token !== (token || undefined)) {
 			this.authRevision++;
-			for (const chat of this.records.values()) { this.cancelSendAndRelease(chat); }
+			for (const chat of this.records.values()) { this.cancelSendAndRelease(chat, 'accountChanged'); }
 			this.token = token || undefined;
 			this.models.set([], undefined);
 			this.catalogIds = new Set();
@@ -237,12 +275,13 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			this.setRecordContext(this.createRecord(chat, directories[0], options?.model), resolveAgentChatContext(context, chat));
 			return { provisional: true, resolvedWorkingDirectory: directories[0] };
 		},
-		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); this.records.delete(chat.toString()); } this.clients.delete(chat.toString()); },
-		releaseChat: async chat => { this.cancelSendAndRelease(this.record(chat)); },
+		disposeChat: async chat => { const record = this.records.get(chat.toString()); if (record) { this.cancelSendAndRelease(record, 'chatDisposed'); record.ownerListener?.dispose(); record.store.dispose(); this.records.delete(chat.toString()); } this.clients.delete(chat.toString()); },
+		releaseChat: async chat => { this.cancelSendAndRelease(this.record(chat), 'chatReleased'); },
 		sendMessage: async (chat, prompt, directories, attachments, turnId, _sender, clientTypeOrContext, context) => {
 			if (!turnId) { throw new Error('A host turn id is required.'); }
 			const record = this.record(chat);
-			return this.runSend(record, async () => {
+			return this.runSend(record, turnId, async send => {
+				send.stage = 'workspace';
 				if (record.activeTurn || record.preparing) { throw new Error('A Devin turn is already running.'); }
 				const folders = URI.isUri(directories) ? [directories] : directories;
 				// Reject unsupported workspace shapes before changing the chat's directory or MCP owner.
@@ -255,10 +294,16 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 					if (record.aborting) { throw new CancellationError(); }
 					// A rejected directory change must not replace the owner used to resolve MCP tools.
 					if (operation) { this.setRecordContext(record, resolveAgentChatContext(operation, chat)); }
+					send.stage = 'sessionSetup';
+					if (!record.client && !record.initializing) { record.connectionDiagnostics = undefined; }
 					await this.ensureSession(record);
 					if (record.aborting) { throw new CancellationError(); }
 					if (record.modelNeedsReconciliation) { throw new Error(localize('devin.modelUnconfirmed', "Devin could not confirm the model after a failed change. Select a model again before sending another message.")); }
+					send.stage = 'approvalMode';
+					await this.syncApprovalMode(record);
+					if (record.aborting) { throw new CancellationError(); }
 				} finally { record.preparing = false; }
+				send.stage = 'preparePrompt';
 				const instructions = operation && !URI.isUri(operation) ? operation.hostInstructions : undefined;
 				const text = instructions?.length ? `${instructions.join('\n\n')}\n\n${prompt}` : prompt;
 				const content = resolveAcpPrompt(text, attachments, record.promptCapabilities ?? {});
@@ -269,6 +314,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 				record.textPart = undefined;
 				const started = Date.now();
 				try {
+					send.stage = 'prompt';
 					const result = await record.client!.request('session/prompt', { sessionId: record.nativeId, prompt: content }, { timeoutMs: 0 });
 					const cancelled = record.aborting || isObject(result) && result.stopReason === 'cancelled';
 					turn.state = cancelled ? TurnState.Cancelled : TurnState.Complete;
@@ -294,6 +340,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			const record = this.record(chat);
 			const send = record.send;
 			if (!send || send.cancelled) { return; }
+			send.cancellationReason = 'userStop';
 			send.cancelled = true;
 			if (send.waiting) { return; }
 			record.aborting = true;
@@ -330,21 +377,45 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		},
 	};
 
-	private async runSend(record: IChat, run: () => Promise<void>): Promise<void> {
+	private async runSend(record: IChat, turnId: string, run: (send: ISendOperation) => Promise<void>): Promise<void> {
 		const previous = record.send;
 		if (previous && !previous.cancelled) { throw new Error('A Devin turn is already running.'); }
-		const send: ISendOperation = { finished: new DeferredPromise<void>(), cancelled: false, waiting: true };
+		const send: ISendOperation = { finished: new DeferredPromise<void>(), cancelled: false, waiting: true, stage: 'queued' };
+		const startedAt = Date.now();
 		record.send = send;
 		try {
 			if (previous) { await previous.finished.p; }
 			if (send.cancelled || this._store.isDisposed || record.store.isDisposed || this.records.get(record.chat.toString()) !== record) { throw new CancellationError(); }
 			send.waiting = false;
-			await run();
+			await run(send);
+		} catch (error) {
+			throw this.reportSendFailure(record, turnId, send, startedAt, error);
 		} finally {
 			// A newer explicitly submitted turn can already own this slot.
 			if (record.send === send) { record.send = undefined; }
 			void send.finished.complete();
 		}
+	}
+
+	private reportSendFailure(record: IChat, turnId: string, send: ISendOperation, startedAt: number, error: unknown): unknown {
+		if (!this.logService || send.cancellationReason === 'userStop') { return error; }
+		const reportId = `DEVIN-${generateUuid()}`;
+		const connection = record.connectionDiagnostics;
+		const code = error instanceof AcpRpcError ? error.code : undefined;
+		// Keep the report searchable without recording ACP payloads, stderr, or tool definitions.
+		this.logService.error(`[Devin Send Report] ${JSON.stringify({
+			reportId, turnId, stage: send.stage, elapsedMs: Date.now() - startedAt,
+			failure: code !== undefined ? 'acpRpcError' : isCancellationError(error) ? 'cancelled' : 'error',
+			acpCode: code, cancellationReason: send.cancellationReason, mcpChange: send.mcpChange,
+			connectionStage: connection?.stage, mcpServerCount: connection?.mcpServerCount,
+			agentHostPid: process.pid, acpPid: connection?.acpPid,
+			acpExitCode: connection?.acpExitCode, acpSignal: connection?.acpSignal,
+		})}`);
+		const message = localize('devin.sendReport', "{0} (Devin report ID: {1})", getErrorMessage(error), reportId);
+		if (isCancellationError(error)) {
+			return Object.assign(new CancellationError(), { message, cause: error });
+		}
+		return code !== undefined ? new AcpRpcError(code, message) : new Error(message, { cause: error });
 	}
 
 	private createRecord(chat: URI, cwd: URI, model?: ModelSelection, createdAt = Date.now(), modifiedAt = createdAt): IChat {
@@ -364,11 +435,11 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const previousOwner = record.context?.owner.get();
 		if (record.context?.owner !== context.owner) {
 			record.ownerListener?.dispose();
-			record.ownerListener = this.mcpConfiguration ? context.owner.onDidChange(() => { void this.refreshMcpConfiguration(record); }) : undefined;
+			record.ownerListener = this.mcpConfiguration ? context.owner.onDidChange(() => { void this.refreshMcpConfiguration(record, 'owner'); }) : undefined;
 		}
 		record.context = context;
 		if (this.mcpConfiguration && !isEqual(previousOwner, context.owner.get()) && (record.client || record.initializing)) {
-			void this.refreshMcpConfiguration(record);
+			void this.refreshMcpConfiguration(record, 'owner');
 		}
 	}
 
@@ -419,20 +490,24 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		}
 	}
 
-	private async refreshMcpConfiguration(record: IChat): Promise<void> {
+	private async refreshMcpConfiguration(record: IChat, trigger: McpRefreshTrigger): Promise<void> {
 		const revision = record.clientRevision;
 		const owner = record.context?.owner.get();
 		try {
 			const servers = await this.readMcpConfiguration(record);
 			if (this._store.isDisposed || record.store.isDisposed || this.records.get(record.chat.toString()) !== record) { return; }
 			if (!equals(record.mcpServers ?? [], servers)) {
-				if (record.client || record.initializing && record.mcpServers !== undefined) { this.cancelSendAndRelease(record); }
+				if (record.client || record.initializing && record.mcpServers !== undefined) {
+					this.cancelSendAndRelease(record, 'mcpChanged', { trigger, before: record.mcpServers?.length ?? 0, after: servers.length });
+				}
 				else { record.mcpServers = servers; }
 			}
 		} catch {
 			if (revision !== record.clientRevision || !isEqual(owner, record.context?.owner.get())) { return; }
 			// A removed/disabled/invalid definition must not leave the previous tool connection usable.
-			if (!this._store.isDisposed && !record.store.isDisposed && (record.client || record.initializing)) { this.cancelSendAndRelease(record); }
+			if (!this._store.isDisposed && !record.store.isDisposed && (record.client || record.initializing)) {
+				this.cancelSendAndRelease(record, 'mcpUnavailable', { trigger, before: record.mcpServers?.length ?? 0 });
+			}
 		}
 	}
 
@@ -451,11 +526,25 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (!token) { throw new Error(localize('devin.signInRequired', "Connect Devin Subscription from Agent Subscriptions before starting a session.")); }
 		const args = ['acp', ...(record.model ? ['--model', record.model.id] : [])];
 		record.store.clear();
-		const environment = devinSubscriptionEnvironment(token, process.env);
-		const client = this.adapter?.createClient(record.cwd.fsPath, args, environment) ?? new AcpClient(new AcpStdioTransport(spawn(this.executable, args, { cwd: record.cwd.fsPath, env: environment, windowsHide: true, stdio: 'pipe' })));
+		const environment = devinSubscriptionEnvironment(token, process.env, process.pid);
+		const diagnostics: IDevinConnectionDiagnostics = { mcpServerCount: mcpServers.length, stage: 'launch' };
+		record.connectionDiagnostics = diagnostics;
+		let child: ChildProcessWithoutNullStreams | undefined;
+		let client: AcpClient;
+		if (this.adapter) {
+			client = this.adapter.createClient(record.cwd.fsPath, args, environment);
+		} else {
+			child = spawn(this.executable, args, { cwd: record.cwd.fsPath, env: environment, windowsHide: true, stdio: 'pipe' });
+			diagnostics.acpPid = child.pid;
+			client = new AcpClient(new AcpStdioTransport(child));
+		}
 		record.client = client;
 		record.store.add(client);
-		record.store.add(client.onClose(() => { if (record.client === client) { record.client = undefined; this.cancelPermissions(record); } }));
+		record.store.add(client.onClose(() => {
+			diagnostics.acpExitCode = child?.exitCode ?? undefined;
+			diagnostics.acpSignal = child?.signalCode ?? undefined;
+			if (record.client === client) { record.client = undefined; this.cancelPermissions(record); }
+		}));
 		record.store.add(client.onNotification(notification => {
 			if (notification.method !== 'session/update' || !isObject(notification.params)) { return; }
 			if (record.nativeId && notification.params.sessionId !== record.nativeId) { return; }
@@ -464,6 +553,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		record.store.add(client.registerRequestHandler('session/request_permission', params => this.permission(record, params)));
 		const previousHistory = [...record.history];
 		try {
+			diagnostics.stage = 'initialize';
 			const initialized = await initializeAcp(client, { name: 'agent-workspace', version: '0.1.0' });
 			validateAcpMcpCapabilities(mcpServers, isObject(initialized.agentCapabilities) ? initialized.agentCapabilities.mcpCapabilities : undefined);
 			if (this.mcpConfiguration) {
@@ -476,7 +566,8 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			if (loading && (!isObject(initialized.agentCapabilities) || initialized.agentCapabilities.loadSession !== true)) { throw new Error('Devin does not support restoring this session.'); }
 			record.replaying = loading;
 			if (loading) { record.history.length = 0; record.lastReplayUserId = undefined; record.textPart = undefined; record.tools.clear(); }
-			const result = await client.request(loading ? 'session/load' : 'session/new', { ...(loading ? { sessionId: record.nativeId } : {}), cwd: record.cwd.fsPath, mcpServers });
+			diagnostics.stage = loading ? 'session/load' : 'session/new';
+			const result = await client.request(diagnostics.stage, { ...(loading ? { sessionId: record.nativeId } : {}), cwd: record.cwd.fsPath, mcpServers });
 			record.replaying = false;
 			if (!isObject(result)) { throw new Error('Invalid Devin session response.'); }
 			if (!loading) {
@@ -489,7 +580,8 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 			record.configOptions = readDevinConfigOptions(result.configOptions);
 			// session/load restores the native model and its separate reasoning/speed
 			// selectors. Catalog variant ids are not necessarily model-selector values.
-			if (reconcileModel && record.modelNeedsReconciliation && record.model) { await this.applyModel(record, record.model); record.modelNeedsReconciliation = false; }
+			if (reconcileModel && record.modelNeedsReconciliation && record.model) { diagnostics.stage = 'model'; await this.applyModel(record, record.model); record.modelNeedsReconciliation = false; }
+			diagnostics.stage = 'ready';
 			this.materialized.fire({ chat: record.chat, result: { providerData: this.providerData(record), resolvedWorkingDirectory: record.cwd }, workingDirectories: [record.cwd], project: undefined });
 		} catch (error) {
 			this.release(record);
@@ -519,6 +611,49 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		} else if (record.modelConfigId) { throw new Error(localize('devin.invalidModelSelector', "Devin returned an unsupported model selector. Update the official client and reconnect.")); }
 		else if (record.legacyModels) { await record.client!.request('session/set_model', { sessionId: record.nativeId, modelId: model.id }); }
 		else { throw new Error('Devin did not advertise model selection for this session.'); }
+	}
+
+	private bypassAllowed(): boolean {
+		return this.configuration?.getRootValue(platformRootSchema, AgentHostAutoApprovePolicyRestrictedConfigKey) !== true;
+	}
+
+	private wantsBypass(record: IChat): boolean {
+		return !!record.context && this.bypassAllowed() && this.configuration?.getChatEffectiveValue({
+			session: record.context.owner.get().toString(), chat: record.chat.toString(),
+		}, platformSessionSchema, SessionConfigKey.AutoApprove) === 'autoApprove';
+	}
+
+	private stopIfApprovalRevoked(record: IChat): void {
+		if (record.activeTurn && record.configOptions.some(option => option.category === 'mode' && option.currentValue === DEVIN_BYPASS_MODE) && !this.wantsBypass(record)) {
+			this.cancelSendAndRelease(record, 'approvalRevoked');
+		}
+	}
+
+	/** Ask the native agent to apply the selected permissions before it can run any tools. */
+	private async syncApprovalMode(record: IChat): Promise<void> {
+		const client = record.client;
+		if (!client) { throw new CancellationError(); }
+		for (;;) {
+			const bypass = this.wantsBypass(record);
+			const mode = record.configOptions.find(option => option.category === 'mode');
+			if (bypass === (mode?.currentValue === DEVIN_BYPASS_MODE)) { return; }
+			const value = bypass ? DEVIN_BYPASS_MODE : [record.previousApprovalMode, 'accept-edits', 'ask'].find(candidate => candidate !== undefined && mode?.values.includes(candidate));
+			if (!mode || !value || !mode.values.includes(value)) {
+				throw new Error(localize('devin.approvalModeUnavailable', "This Devin session does not offer the selected approval mode."));
+			}
+			if (bypass) { record.previousApprovalMode = mode.currentValue; }
+			try {
+				const result = await client.request('session/set_config_option', { sessionId: record.nativeId, configId: mode.id, value });
+				if (record.client !== client || record.aborting) { throw new CancellationError(); }
+				record.configOptions = readDevinConfigOptions(isObject(result) ? result.configOptions : undefined);
+				if (record.configOptions.find(option => option.id === mode.id)?.currentValue !== value) {
+					throw new Error(localize('devin.approvalModeUnconfirmed', "Devin did not confirm the requested approval mode. Try again before sending another message."));
+				}
+			} catch (error) {
+				if (record.client === client) { this.release(record); }
+				throw error;
+			}
+		}
 	}
 
 	private update(record: IChat, update: Record<string, unknown>): void {
@@ -624,12 +759,23 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		// A repeated request must not leave the earlier RPC waiting forever.
 		const previous = this.permissions.get(tool.id);
 		previous?.resolve(cancelled);
-		const state: ToolCallPendingConfirmationState = { toolCallId: tool.id, toolName: tool.name, displayName: tool.title, status: ToolCallStatus.PendingConfirmation, invocationMessage: tool.title, toolInput: tool.input };
+		const state: ToolCallPendingConfirmationState = {
+			toolCallId: tool.id,
+			toolName: tool.name,
+			displayName: tool.title,
+			status: ToolCallStatus.PendingConfirmation,
+			invocationMessage: tool.title,
+			toolInput: tool.input,
+			confirmationTitle: localize('devin.toolConfirmationTitle', "Allow Devin to run this tool?"),
+			options: [
+				...(allow ? [{ id: 'allow-once', label: localize('devin.allowOnce', "Allow Once"), kind: ConfirmationOptionKind.Approve }] : []),
+				{ id: 'skip', label: localize('devin.skip', "Skip"), kind: ConfirmationOptionKind.Deny, group: 2 },
+			],
+		};
 		tool.part.toolCall = state;
 		return new Promise(resolve => {
 			this.permissions.set(tool.id, { chat: record, tool, resolve, allow: isObject(allow) ? allow.optionId as string : undefined, deny: isObject(deny) ? deny.optionId as string : undefined });
 			tool.ready = true;
-			this.fire(record, { type: ActionType.ChatToolCallReady, turnId: record.activeTurn!.id, toolCallId: tool.id, invocationMessage: state.invocationMessage, toolInput: state.toolInput });
 			this.progress.fire({ kind: 'pending_confirmation', chat: record.chat, state });
 		});
 	}
@@ -666,15 +812,29 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const pending = this.permissions.get(id);
 		if (!pending) { return; }
 		this.permissions.delete(id);
-		this.cancelTool(pending.tool, ToolCallCancellationReason.Skipped);
 		if (pending.chat.activeTurn && !pending.chat.replaying) {
-			this.fire(pending.chat, { type: ActionType.ChatToolCallConfirmed, turnId: pending.chat.activeTurn.id, toolCallId: pending.tool.id, approved: false, reason: ToolCallCancellationReason.Skipped, ...(reasonMessage ? { reasonMessage } : {}) });
+			const turnId = pending.chat.activeTurn.id;
+			const state = pending.tool.part.toolCall;
+			// The host may still be evaluating the permission when Devin changes the input.
+			// A cancellation needs a pending state in the reducer even in that case.
+			if (state.status === ToolCallStatus.PendingConfirmation) {
+				this.fire(pending.chat, { type: ActionType.ChatToolCallReady, turnId, toolCallId: pending.tool.id, invocationMessage: state.invocationMessage, toolInput: state.toolInput, options: [] });
+			}
+			this.fire(pending.chat, { type: ActionType.ChatToolCallConfirmed, turnId, toolCallId: pending.tool.id, approved: false, reason: ToolCallCancellationReason.Skipped, ...(reasonMessage ? { reasonMessage } : {}) });
 		}
+		this.cancelTool(pending.tool, ToolCallCancellationReason.Skipped);
 		pending.resolve({ outcome: { outcome: 'cancelled' } });
 	}
 	private fire(record: IChat, action: ChatAction): void { this.progress.fire({ kind: 'action', resource: record.chat, action }); }
-	private cancelSendAndRelease(record: IChat): void {
-		if (record.send) { record.send.cancelled = true; record.aborting = true; }
+	private cancelSendAndRelease(record: IChat, reason: NonNullable<ISendOperation['cancellationReason']>, mcpChange?: ISendOperation['mcpChange']): void {
+		if (record.send) {
+			if (!record.send.cancellationReason) {
+				record.send.cancellationReason = reason;
+				record.send.mcpChange = mcpChange;
+			}
+			record.send.cancelled = true;
+			record.aborting = true;
+		}
 		this.release(record);
 	}
 	private release(record: IChat): void { this.cancelPermissions(record); clearTimeout(record.forceStop); record.forceStop = undefined; record.store.clear(); record.client = undefined; record.replaying = false; }
@@ -688,7 +848,7 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const handle = new DevinActiveClient(client.clientId, client.displayName, () => {
 			if (this.clients.get(chat.toString())?.get(client.clientId) !== handle) { return; }
 			const current = this.records.get(chat.toString());
-			if (current) { current.clientRevision++; void this.refreshMcpConfiguration(current); }
+			if (current) { current.clientRevision++; void this.refreshMcpConfiguration(current, 'clientUpdated'); }
 		});
 		clients.set(client.clientId, handle);
 		return handle;
@@ -697,11 +857,25 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		if (!this.clients.get(chat.toString())?.delete(clientId)) { return; }
 		if (this.clients.get(chat.toString())?.size === 0) { this.clients.delete(chat.toString()); }
 		const record = this.records.get(chat.toString());
-		if (record) { this.setRecordContext(record, resolveAgentChatContext(context, chat)); record.clientRevision++; void this.refreshMcpConfiguration(record); }
+		if (record) { this.setRecordContext(record, resolveAgentChatContext(context, chat)); record.clientRevision++; void this.refreshMcpConfiguration(record, 'clientRemoved'); }
 	}
 	onClientToolCallComplete(): void { throw new Error('Devin does not advertise client-side tools.'); }
 	respondToUserInputRequest(): void { }
-	async resolveChatConfig(params: Parameters<IAgent['resolveChatConfig']>[0]) { return { schema: { type: 'object' as const, properties: {} }, values: params.config ?? {} }; }
+	async resolveChatConfig(params: Parameters<IAgent['resolveChatConfig']>[0]) {
+		const bypassAllowed = this.bypassAllowed();
+		const approval = platformSessionSchema.definition[SessionConfigKey.AutoApprove].protocol;
+		return {
+			schema: { type: 'object' as const, properties: {
+				[SessionConfigKey.AutoApprove]: {
+					...approval,
+					enum: bypassAllowed ? ['default', 'autoApprove'] : ['default'],
+					enumLabels: [localize('devin.defaultApprovals', "Default Approvals"), ...(bypassAllowed ? [localize('devin.bypassApprovals', "Bypass Approvals")] : [])],
+					enumDescriptions: [localize('devin.defaultApprovalsDescription', "Devin handles permissions in its standard mode."), ...(bypassAllowed ? [localize('devin.bypassApprovalsDescription', "Devin runs tools without asking starting with the next message.")] : [])],
+				},
+			} },
+			values: { ...params.config, [SessionConfigKey.AutoApprove]: bypassAllowed && params.config?.[SessionConfigKey.AutoApprove] === 'autoApprove' ? 'autoApprove' : 'default' },
+		};
+	}
 	getInheritedChatConfig(): undefined { return undefined; }
 	async chatConfigCompletions() { return { items: [] }; }
 	async getChatCustomizations() { return []; }
@@ -710,6 +884,6 @@ export class DevinSubscriptionAgent extends Disposable implements IAgent {
 		const record = this.records.get(chat.toString()) ?? readPersistedChat(providerData);
 		return record ? { chat, startTime: record.createdAt, modifiedTime: record.modifiedAt, model: record.model, workingDirectories: [record.cwd], project: { uri: record.cwd, displayName: basename(record.cwd) } } : undefined;
 	}
-	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.cancelSendAndRelease(record); } }
-	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record); record.ownerListener?.dispose(); record.store.dispose(); } this.records.clear(); this.clients.clear(); this.token = undefined; super.dispose(); }
+	async shutdown(): Promise<void> { for (const record of this.records.values()) { this.cancelSendAndRelease(record, 'shutdown'); } }
+	override dispose(): void { for (const record of this.records.values()) { this.cancelSendAndRelease(record, 'shutdown'); record.ownerListener?.dispose(); record.store.dispose(); } this.records.clear(); this.clients.clear(); this.token = undefined; super.dispose(); }
 }

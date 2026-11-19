@@ -42,6 +42,8 @@ export const AgentsWindowMenus = {
 
 	/** Header actions of the Automations custom view. */
 	CustomViewAutomations: new MenuId('SessionsCustomViewAutomations'),
+	/** Header actions of the Assistant custom view. */
+	CustomViewAssistant: new MenuId('SessionsCustomViewAssistant'),
 	/** Header actions of the pinned canvas page. */
 	CustomViewCanvas: new MenuId('SessionsCustomViewCanvas'),
 	/** Context menu actions for an Automation definition card. */

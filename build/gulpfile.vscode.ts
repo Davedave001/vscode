@@ -275,6 +275,7 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				'**/@devcontainers/cli/**',
 				'**/node-pty/build/Release/*',
 				'**/node-pty/build/Release/conpty/*',
+				'**/node-pty/prebuilds/win32-*/conpty/*',
 				'**/node-pty/lib/worker/conoutSocketWorker.js',
 				'**/node-pty/lib/shared/conout.js',
 				// node-pty spawns `conoutSocketWorker.js` as a Worker from the unpacked

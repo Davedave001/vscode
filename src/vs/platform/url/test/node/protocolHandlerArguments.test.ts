@@ -6,7 +6,7 @@
 import assert from 'assert';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { getWindowsProtocolHandlerArguments } from '../../node/protocolHandlerArguments.js';
+import { getWindowsPreviewProtocol, getWindowsProtocolHandlerArguments } from '../../node/protocolHandlerArguments.js';
 
 suite('Windows protocol handler arguments', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -31,5 +31,22 @@ suite('Windows protocol handler arguments', () => {
 	}
 	test('excludes startup modes, test flags, and old URL arguments', () => {
 		assert.deepStrictEqual(getWindowsProtocolHandlerArguments({ isBuilt: true, appRoot: '/source', userDataPath: '/profile', extensionsPath: '/extensions', appSharedDataHome: URI.file('/shared'), args: { _: ['workspace'], agents: true, 'hidden-window': true, extensionTestsPath: '/runner', 'open-url': true, _urls: ['signal-c://old'], 'user-data-dir': 'relative-profile' } }), ['--user-data-dir', '/profile', '--open-url', '--']);
+	});
+
+	test('gives each Windows preview profile its own case-insensitive protocol', () => {
+		const first = getWindowsPreviewProtocol('D:\\Signal C\\Preview 1');
+		assert.match(first, /^signal-c-preview-[0-9a-f]{16}$/);
+		assert.strictEqual(first, getWindowsPreviewProtocol('d:/signal c/preview 1/'));
+		assert.notStrictEqual(first, getWindowsPreviewProtocol('D:\\Signal C\\Preview 2'));
+	});
+
+	test('recreates the preview profile on an OS launch, even when its original startup used a default path', () => {
+		const userDataPath = 'D:\\Signal C\\Preview 1';
+		assert.deepStrictEqual(getWindowsProtocolHandlerArguments({
+			isBuilt: false, appRoot: '/source', userDataPath, extensionsPath: '/extensions',
+			appSharedDataHome: URI.file('/shared'), args: { _: [] },
+		}, getWindowsPreviewProtocol(userDataPath)), [
+			'/source', '--agent-workspace-preview', '--user-data-dir', userDataPath, '--open-url', '--',
+		]);
 	});
 });

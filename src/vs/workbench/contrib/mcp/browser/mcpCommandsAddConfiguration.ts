@@ -5,6 +5,8 @@
 
 import { assertNever } from '../../../../base/common/assert.js';
 import { disposableTimeout } from '../../../../base/common/async.js';
+import { CancellationError } from '../../../../base/common/errors.js';
+import { escapeIcons } from '../../../../base/common/iconLabels.js';
 import { parse as parseJsonc } from '../../../../base/common/jsonc.js';
 import { mnemonicButtonLabel } from '../../../../base/common/labels.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
@@ -28,6 +30,7 @@ import { McpResourceFormat } from '../../../../platform/mcp/common/mcpWorkspaceC
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IQuickInputService, IQuickPickItem, QuickPickInput } from '../../../../platform/quickinput/common/quickInput.js';
+import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { isWorkspaceFolder, IWorkspaceContextService, IWorkspaceFolder, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -39,15 +42,17 @@ import { IMcpWorkspaceInstallTargetService } from '../../../services/mcp/common/
 import { IAgentHostCustomizationService } from '../../chat/browser/agentSessions/agentHost/agentHostCustomizationService.js';
 import { IChatWidgetService } from '../../chat/browser/chat.js';
 import { ICustomizationHarnessService } from '../../chat/common/customizationHarnessService.js';
+import { isContributionDisabled } from '../../chat/common/enablement.js';
 import { isAgentHostTarget } from '../../chat/common/chatSessionsService.js';
 import { getChatSessionType } from '../../chat/common/model/chatUri.js';
 import { McpCommandIds } from '../common/mcpCommandIds.js';
 import { allDiscoverySources, ExternalDiscoverySource, mcpDiscoverySection, mcpWorkspaceRootConfig } from '../common/mcpConfiguration.js';
 import { getMcpGenerationSchema, McpGeneratedConfiguration, normalizeMcpGeneratedConfiguration } from '../common/mcpConfigurationGeneration.js';
 import { IMcpRegistry } from '../common/mcpRegistryTypes.js';
-import { IMcpService, McpConnectionState } from '../common/mcpTypes.js';
+import { IMcpServer, IMcpService, McpConnectionState, mcpOAuthClientSecretStorageKey, McpServerTransportType } from '../common/mcpTypes.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { signalCAppConnections } from '../common/signalCAppConnections.js';
+import { getSignalCDirectMailProvider, ISignalCAppConnection, signalCAppConnections, signalCDirectMailConnections } from '../common/signalCAppConnections.js';
+import { ISignalCDirectMail } from './signalCDirectMail.js';
 import { IWorkspaceMcpConfigurationTarget, McpConfigurationDestination } from './mcpConfigurationDestination.js';
 import { IMcpCopilotGlobalConfigurationService } from '../common/mcpCopilotGlobalConfigurationService.js';
 
@@ -171,6 +176,7 @@ export class McpAddConfigurationCommand {
 		@IMcpWorkspaceInstallTargetService private readonly _workspaceInstallTargetService: IMcpWorkspaceInstallTargetService,
 		@IDialogService private readonly _dialogService: IDialogService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
+		@ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
 	) { }
 
 	private async getServerType(): Promise<AddConfigurationType | undefined> {
@@ -243,8 +249,42 @@ export class McpAddConfigurationCommand {
 		return result?.kind;
 	}
 
-	private async getAppConfig(appId?: string): Promise<{ name: string; config: IMcpServerConfiguration; localOnly?: boolean } | undefined> {
-		const connection = appId !== undefined ? signalCAppConnections.find(app => app.id === appId) : (await this._quickInputService.pick(signalCAppConnections.map(app => ({
+	private async pickAssistantAppConnection(app: ISignalCAppConnection): Promise<IMcpServer | 'new' | undefined> {
+		const endpoint = app.url && new URL(app.url).href;
+		const existing = this._mcpService.servers.get().filter(server => {
+			const launch = server.readDefinitions().get().server?.launch;
+			if (app.local) {
+				return launch?.type === McpServerTransportType.Stdio && launch.command === app.local.command && !!launch.env[app.local.tokenStoreVariable];
+			}
+			if (!endpoint || launch?.type !== McpServerTransportType.HTTP) {
+				return false;
+			}
+			const url = launch.uri.toString(true);
+			return URL.canParse(url) && new URL(url).href === endpoint;
+		});
+		if (!existing.length) { return 'new'; }
+
+		const items: (IQuickPickItem & { connection: IMcpServer | 'new' })[] = existing.map(server => {
+			const state = server.connectionState.get();
+			const description = isContributionDisabled(server.enablement.get()) ? localize('mcp.app.connectionDisabled', "Disabled")
+				: state.state === McpConnectionState.Kind.Error ? localize('mcp.app.connectionNeedsAttention', "Needs attention") : McpConnectionState.toString(state);
+			return { label: escapeIcons(server.definition.label), description, detail: escapeIcons(server.collection.label), connection: server };
+		});
+		if (!app.blocked) {
+			items.push({ label: localize('mcp.app.addAnotherConnection', "Add another {0} connection", app.name), connection: 'new' });
+		}
+		return (await this._quickInputService.pick(items, {
+			title: localize('mcp.app.existingConnections', "{0} connections", app.name),
+			placeHolder: localize('mcp.app.pickExistingConnection', "Choose a connection to manage or select a new connection"),
+			matchOnDescription: true,
+			matchOnDetail: true,
+			ignoreFocusLost: true,
+		}))?.connection;
+	}
+
+	private async getAppConfig(appId?: string, connectInAssistant = false): Promise<{ app: ISignalCAppConnection; config: IMcpServerConfiguration } | undefined> {
+		const catalog: readonly ISignalCAppConnection[] = connectInAssistant ? [...Object.values(signalCDirectMailConnections), ...signalCAppConnections] : signalCAppConnections;
+		const connection = appId !== undefined ? catalog.find(app => app.id === appId) : (await this._quickInputService.pick(catalog.map(app => ({
 			label: app.name,
 			description: app.blocked ? localize('mcp.app.setupOnly', "Setup guide · connection unavailable") : app.local ? localize('mcp.app.localOAuth', "Local server · existing OAuth setup") : app.clientIdRequired ? localize('mcp.app.registeredOAuth', "OAuth · app registration required") : localize('mcp.app.oauth', "OAuth"),
 			detail: app.description,
@@ -255,10 +295,23 @@ export class McpAddConfigurationCommand {
 			matchOnDescription: true, matchOnDetail: true, ignoreFocusLost: true,
 		}))?.app;
 		if (!connection) { return undefined; }
+		const directMail = getSignalCDirectMailProvider(connection.id);
+		if (directMail) {
+			await this._instantiationService.invokeFunction(accessor => accessor.get(ISignalCDirectMail)).manage(directMail);
+			return undefined;
+		}
+		if (connectInAssistant) {
+			const selection = await this.pickAssistantAppConnection(connection);
+			if (!selection) { return undefined; }
+			if (selection !== 'new') {
+				await this._commandService.executeCommand(McpCommandIds.ServerOptions, selection.definition.id);
+				return undefined;
+			}
+		}
 		const { result } = await this._dialogService.prompt({
 			type: 'info', custom: true,
 			message: localize('mcp.app.review', "Connect {0}", connection.name),
-			detail: [connection.setup ?? localize('mcp.app.defaultSetup', "Add the official remote MCP server. Your browser opens for authorization when the server starts; permissions and availability are controlled by the app."), connection.blocked, connection.url].filter(Boolean).join('\n\n'),
+			detail: [connection.setup ?? localize('mcp.app.defaultSetup', "Add the official remote MCP server. Your browser opens for authorization when the server starts; permissions and availability are controlled by the app."), connection.blocked, connectInAssistant && !connection.blocked && localize('mcp.app.assistantProfile', "This connection will be available to Assistant in your current Signal-C profile."), connection.url].filter(Boolean).join('\n\n'),
 			buttons: [
 				...(!connection.blocked ? [{ label: connection.local ? localize('mcp.app.localConnect', "Connect Local Server") : localize('mcp.app.connect', "Connect with OAuth"), run: () => 'connect' as const }] : []),
 				{ label: localize('mcp.app.guide', "Open Setup Guide"), run: () => 'guide' as const },
@@ -276,10 +329,10 @@ export class McpAddConfigurationCommand {
 			if (entrypoint?.length !== 1 || entrypoint[0].scheme !== Schemas.file) { return undefined; }
 			const tokenStore = await this._fileDialogService.showOpenDialog({ title: localize('mcp.app.localTokenStore', "Select the private OAuth token-store file (its contents stay with the MCP server)"), canSelectFiles: true, canSelectFolders: false, canSelectMany: false, availableFileSystems: [Schemas.file] });
 			if (tokenStore?.length !== 1 || tokenStore[0].scheme !== Schemas.file) { return undefined; }
-			return { name: connection.id, localOnly: true, config: { type: McpServerType.LOCAL, command: connection.local.command, args: [entrypoint[0].fsPath], env: { [connection.local.tokenStoreVariable]: tokenStore[0].fsPath } } };
+			return { app: connection, config: { type: McpServerType.LOCAL, command: connection.local.command, args: [entrypoint[0].fsPath], env: { [connection.local.tokenStoreVariable]: tokenStore[0].fsPath } } };
 		}
 		if (!connection.url) { throw new Error(localize('mcp.app.missingUrl', "This app has no published MCP server endpoint.")); }
-		let clientId: string | undefined;
+		let clientId = connection.publicClientId;
 		if (connection.clientIdRequired) {
 			clientId = await this._quickInputService.input({
 				title: localize('mcp.app.clientId.title', "{0} OAuth App Client ID", connection.name),
@@ -290,9 +343,32 @@ export class McpAddConfigurationCommand {
 			if (!clientId?.trim()) { return undefined; }
 		}
 		return {
-			name: connection.id,
+			app: connection,
 			config: { type: McpServerType.REMOTE, transport: 'http', url: connection.url, ...(connection.headers ? { headers: { ...connection.headers } } : {}), ...(clientId ? { oauth: { clientId: clientId.trim() } } : {}) },
 		};
+	}
+
+	private async getAppClientSecret(connection: ISignalCAppConnection | undefined, config: IMcpServerConfiguration): Promise<{ key: string; value: string } | undefined> {
+		if (!connection?.supportsClientSecret || config.type !== McpServerType.REMOTE || !config.oauth?.clientId) {
+			return undefined;
+		}
+		const key = mcpOAuthClientSecretStorageKey(URI.parse(config.url).toString(true), config.oauth.clientId);
+		if (await this._secretStorageService.get(key)) {
+			return undefined;
+		}
+		const value = (await this._quickInputService.input({
+			title: localize('mcp.app.clientSecret.title', "{0} OAuth Client Secret", connection.name),
+			prompt: connection.clientSecretRequired
+				? localize('mcp.app.clientSecret.required', "Enter the client secret from the same OAuth app as your client ID.")
+				: localize('mcp.app.clientSecret.prompt', "For a confidential app, enter its client secret. Leave blank for a public app with PKCE enabled."),
+			password: true,
+			ignoreFocusLost: true,
+			validateInput: async value => connection.clientSecretRequired && !value.trim() ? localize('mcp.app.clientSecret.empty', "Enter the client secret to continue.") : undefined,
+		}))?.trim();
+		if (value === undefined || (connection.clientSecretRequired && !value)) {
+			throw new CancellationError();
+		}
+		return value ? { key, value } : undefined;
 	}
 
 	private async getStdioConfig(): Promise<IMcpStdioServerConfiguration | undefined> {
@@ -566,8 +642,8 @@ export class McpAddConfigurationCommand {
 		return config;
 	}
 
-	/** Shows the location of a server config once it's discovered. */
-	private showOnceDiscovered(installed: IWorkbenchLocalMcpServer) {
+	/** Starts an installed server once it's discovered and optionally reveals its configuration. */
+	private showOnceDiscovered(installed: IWorkbenchLocalMcpServer, revealConfiguration = true) {
 		const store = new DisposableStore();
 		store.add(disposableTimeout(() => store.dispose(), 5000));
 		const observer = autorunSelfDisposable(reader => {
@@ -575,15 +651,17 @@ export class McpAddConfigurationCommand {
 			const server = servers.find(s => s.definition.id === installed.id);
 
 			if (server) {
-				const collection = this._mcpRegistry.collections.read(reader).find(collection => collection.id === server.collection.id);
-				const definition = collection?.serverDefinitions.read(reader).find(definition => definition.id === installed.id);
-				this._editorService.openEditor({
-					resource: installed.mcpResource,
-					options: {
-						selection: definition?.presentation?.origin?.range,
-						preserveFocus: true,
-					}
-				});
+				if (revealConfiguration) {
+					const collection = this._mcpRegistry.collections.read(reader).find(collection => collection.id === server.collection.id);
+					const definition = collection?.serverDefinitions.read(reader).find(definition => definition.id === installed.id);
+					this._editorService.openEditor({
+						resource: installed.mcpResource,
+						options: {
+							selection: definition?.presentation?.origin?.range,
+							preserveFocus: true,
+						}
+					});
+				}
 
 				server.start({ promptType: 'all-untrusted' }).then(state => {
 					if (state.state === McpConnectionState.Kind.Error) {
@@ -600,7 +678,7 @@ export class McpAddConfigurationCommand {
 		}
 	}
 
-	public async run(connectApp = false, appId?: string): Promise<void> {
+	public async run(connectApp = false, appId?: string, connectInAssistant = false): Promise<void> {
 		// Step 1: Choose server type
 		const serverType = connectApp ? AddConfigurationType.App : await this.getServerType();
 		if (serverType === undefined) {
@@ -609,16 +687,18 @@ export class McpAddConfigurationCommand {
 
 		// Step 2: Get server details based on type
 		let config: IMcpServerConfiguration | undefined;
+		let connection: ISignalCAppConnection | undefined;
 		let suggestedName: string | undefined;
 		let inputs: IMcpServerVariable[] | undefined;
 		let inputValues: Record<string, string> | undefined;
 		let destination: McpSetupDestination | undefined;
 		switch (serverType) {
 			case AddConfigurationType.App: {
-				const app = await this.getAppConfig(connectApp ? appId : undefined);
-				config = app?.config;
-				suggestedName = app?.name;
-				if (app?.localOnly) { destination = { installTarget: { kind: 'local', target: ConfigurationTarget.USER_LOCAL }, format: McpResourceFormat.Vscode }; }
+				const details = await this.getAppConfig(connectApp ? appId : undefined, connectInAssistant);
+				config = details?.config;
+				connection = details?.app;
+				suggestedName = connection?.id;
+				if (connection?.local || connectInAssistant) { destination = { installTarget: { kind: 'local', target: ConfigurationTarget.USER_LOCAL }, format: McpResourceFormat.Vscode }; }
 				break;
 			}
 			case AddConfigurationType.Stdio:
@@ -707,11 +787,15 @@ export class McpAddConfigurationCommand {
 				if (allowed !== true) {
 					throw new Error(allowed.value);
 				}
+				const credential = await this.getAppClientSecret(connection, config);
 				const configurationProvider = this._customizationHarnessService.getActiveDescriptor().mcpConfigurationProvider;
 				if (configurationProvider) {
 					await configurationProvider.addGlobal(name, config);
 				} else {
 					await this._mcpResourceScannerService.addMcpServers([installable], resource, undefined, McpResourceFormat.CopilotGlobal);
+				}
+				if (credential) {
+					await this._secretStorageService.set(credential.key, credential.value);
 				}
 				await this._editorService.openEditor({ resource });
 				this._notificationService.info(localize('mcp.copilotGlobal.added', "Added MCP server '{0}' to {1}. Set any referenced environment variables on the agent-host machine before starting a new Copilot session. VS Code input variables are not supported in this file.", name, this._label.getUriLabel(resource)));
@@ -726,7 +810,11 @@ export class McpAddConfigurationCommand {
 		if (isWorkspaceFolder(target) && workspaceConfig === undefined) {
 			return;
 		}
+		const credential = await this.getAppClientSecret(connection, config);
 		const installed = await this._mcpManagementService.install(installable, { target, workspaceConfig });
+		if (credential) {
+			await this._secretStorageService.set(credential.key, credential.value);
+		}
 
 		if (inputValues) {
 			for (const [key, value] of Object.entries(inputValues)) {
@@ -743,7 +831,7 @@ export class McpAddConfigurationCommand {
 			});
 		}
 
-		this.showOnceDiscovered(installed);
+		this.showOnceDiscovered(installed, !connectInAssistant);
 	}
 
 	public async pickForUrlHandler(resource: URI, showIsPrimary = false): Promise<void> {

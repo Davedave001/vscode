@@ -47,11 +47,58 @@ suite('Agents window reveal intent', () => {
 		const harness = createHarness();
 		const config = { context: OpenContext.API, cli };
 		sendAgentsWindowOpenIntent(harness.window, false, config, { reveal: session });
-		sendAgentsWindowOpenIntent(harness.window, true, config, { folderUri: folder });
+		sendAgentsWindowOpenIntent(harness.window, true, config, { folderUri: folder, folderUriIsDefault: true, preserveEditorHandoff: true });
 		assert.deepStrictEqual(harness.messages, [{
 			channel: 'vscode:selectAgentsFolder',
 			args: [undefined, session.toJSON(), AgentsWindowOpenSource.Unknown, false, undefined, undefined, undefined],
 		}]);
+	});
+
+	test('a desktop launch preserves a pending reveal in an existing Agents window', () => {
+		const harness = createHarness();
+		sendAgentsWindowOpenIntent(harness.window, false, { context: OpenContext.LINK, cli }, { reveal: session });
+		sendAgentsWindowOpenIntent(harness.window, true, { context: OpenContext.DESKTOP, cli }, {});
+		assert.deepStrictEqual(harness.messages, [{
+			channel: 'vscode:selectAgentsFolder',
+			args: [undefined, session.toJSON(), AgentsWindowOpenSource.Unknown, false, undefined, undefined, undefined],
+		}]);
+	});
+
+	test('a workspace switch can offer a default to an open Agents window', () => {
+		const harness = createHarness();
+		sendAgentsWindowOpenIntent(harness.window, true, { context: OpenContext.API, cli }, { folderUri: folder, folderUriIsDefault: true, source: AgentsWindowOpenSource.TitleBar });
+		assert.deepStrictEqual(harness.messages, [{
+			channel: 'vscode:selectAgentsFolder',
+			args: [folder.toJSON(), undefined, AgentsWindowOpenSource.TitleBar, true, undefined, undefined, undefined, 'warm'],
+		}]);
+	});
+
+	test('the first workspace switch carries an explicit startup choice', () => {
+		const harness = createHarness();
+		sendAgentsWindowOpenIntent(harness.window, false, { context: OpenContext.API, cli }, { folderUri: folder, folderUriIsDefault: true, source: AgentsWindowOpenSource.TitleBar });
+		assert.deepStrictEqual(harness.messages, [{
+			channel: 'vscode:selectAgentsFolder',
+			args: [folder.toJSON(), undefined, AgentsWindowOpenSource.TitleBar, false, undefined, undefined, undefined, 'cold'],
+		}]);
+	});
+
+	test('forwards local IDE roots with a mode switch and leaves explicit reveals scoped to their destination', () => {
+		const harness = createHarness();
+		const second = URI.file('/second');
+		const folders = [{ uri: folder, name: 'UI source' }, { uri: second, name: 'Service source' }];
+		const activeFile = URI.joinPath(second, 'main.ts');
+		const selection = { text: 'selected excerpt', startLine: 4, endLine: 4, truncated: false };
+		const editorWorkspace = { folders, activeFile, selection };
+		sendAgentsWindowOpenIntent(harness.window, false, { context: OpenContext.API, cli }, {
+			folderUri: second, folderUriIsDefault: true, source: AgentsWindowOpenSource.TitleBar, editorWorkspace,
+		});
+		sendAgentsWindowOpenIntent(harness.window, true, { context: OpenContext.API, cli }, {
+			folderUri: second, reveal: 'new', source: AgentsWindowOpenSource.Explorer, editorWorkspace,
+		});
+		assert.deepStrictEqual(harness.messages[0].args.slice(7), ['cold', {
+			folders: folders.map(({ uri, name }) => ({ uri: uri.toJSON(), name })), activeFile: activeFile.toJSON(), selection,
+		}]);
+		assert.deepStrictEqual(harness.messages[1].args.slice(7), []);
 	});
 
 	for (const context of [OpenContext.CLI, OpenContext.LINK]) {

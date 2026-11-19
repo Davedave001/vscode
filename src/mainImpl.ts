@@ -14,6 +14,7 @@ import minimist from 'minimist';
 import { product } from './bootstrap-meta.js';
 import { parse } from './vs/base/common/jsonc.js';
 import { getUserDataPath } from './vs/platform/environment/node/userDataPath.js';
+import { getWindowsPreviewProtocol, SIGNAL_C_PROTOCOL } from './vs/platform/url/node/protocolHandlerArguments.js';
 import * as perf from './vs/base/common/performance.js';
 import { resolveNLSConfiguration } from './vs/base/node/nls.js';
 import { getUNCHost, addUNCHostToAllowlist } from './vs/base/node/unc.js';
@@ -238,7 +239,10 @@ async function startup(codeCachePath: string | undefined, nlsConfig: INLSConfigu
 
 	// Bootstrap ESM
 	perf.mark('code/willBootstrapESM');
-	await bootstrapESM();
+	const previewProtocol = process.platform === 'win32' && product.urlProtocol === SIGNAL_C_PROTOCOL && (args['agent-workspace-preview'] || process.env['VSCODE_DEV'])
+		? getWindowsPreviewProtocol(userDataPath)
+		: undefined;
+	await bootstrapESM(previewProtocol);
 	perf.mark('code/didBootstrapESM');
 
 	// Load Main
@@ -601,6 +605,7 @@ function parseCLIArgs(): NativeParsedArgs {
 		],
 		boolean: [
 			'disable-chromium-sandbox',
+			'agent-workspace-preview',
 		],
 		default: {
 			'sandbox': true

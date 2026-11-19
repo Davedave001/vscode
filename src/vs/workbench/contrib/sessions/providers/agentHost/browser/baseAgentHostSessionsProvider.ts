@@ -86,6 +86,7 @@ import { IWorkspaceTrustManagementService } from '../../../../../../platform/wor
 import { AgentHostDownloadProgress } from '../../../../chat/browser/agentSessions/agentHost/agentHostDownloadProgress.js';
 import { composeSessionActiveClient, IAgentCustomizationScope, IAgentHostActiveClientService } from '../../../../chat/browser/agentSessions/agentHost/agentHostActiveClientService.js';
 import { IAgentHostMcpAppToolsService } from '../../../../chat/browser/agentSessions/agentHost/agentHostMcpAppToolsService.js';
+import { usesAgentHostMcpGateway } from '../../../../chat/browser/agentSessions/agentHost/agentHostMcpServerSupport.js';
 import { getAgentHostEffectiveChatConfig, hostAppliesSessionConfigToDefaultChat, hostPublishesCompleteChatConfig } from '../../../../chat/browser/agentSessions/agentHost/applyAgentHostSessionConfig.js';
 import { AgentHostBackgroundShellOutputs } from '../../../../chat/browser/agentSessions/agentHost/agentHostBackgroundShells.js';
 import { IChatWidgetService } from '../../../../chat/browser/chat.js';
@@ -4309,6 +4310,11 @@ class NewSession extends Disposable {
 				});
 			}
 
+			// The chat handler is the sole live publisher for per-chat MCP gateways.
+			if (usesAgentHostMcpGateway(this.session.resource.scheme)) {
+				return;
+			}
+
 			// Republishes this draft's contribution whenever the customization
 			// scope changes. Without it a client-owned decision made before the
 			// first send — notably disabling a standalone MCP server — would
@@ -5484,6 +5490,11 @@ export abstract class BaseAgentHostSessionsProvider extends Disposable implement
 		}
 
 		const sessionType = this.resourceSchemeForProvider(cached.agentProvider);
+		if (usesAgentHostMcpGateway(sessionType)) {
+			// The chat handler's active-client snapshot contains the per-chat gateway.
+			this._clearActiveSessionScope();
+			return;
+		}
 		const scopeRoots = cached.isQuickChat.get() ? [] : cached.userWorkingDirectories;
 		let scope = this._activeSessionScope.value;
 		if (!scope || this._activeSessionScopeSessionType !== sessionType || !this._activeClientService.areScopeRootsEqual(this._activeSessionScopeRoots, scopeRoots)) {

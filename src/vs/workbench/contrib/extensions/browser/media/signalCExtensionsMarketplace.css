@@ -1,0 +1,82 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.signal-c-extensions-marketplace {
+	box-sizing: border-box;
+	min-height: 0;
+	padding: 12px;
+	overflow: auto;
+	color: var(--vscode-foreground);
+	font-size: var(--vscode-font-size);
+}
+
+.signal-c-extensions-marketplace h3 {
+	margin: 0 0 6px;
+	font-size: inherit;
+}
+
+.signal-c-marketplace-description,
+.signal-c-extension-description,
+.signal-c-extension-error {
+	margin: 6px 0;
+	line-height: 1.5;
+}
+
+.signal-c-marketplace-description,
+.signal-c-extension-details,
+.signal-c-marketplace-empty {
+	color: var(--vscode-descriptionForeground);
+}
+
+.signal-c-extension-listing {
+	padding: 12px 0;
+	border-bottom: 1px solid var(--vscode-widget-border, transparent);
+}
+
+.signal-c-extension-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.signal-c-extension-title strong {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.signal-c-extension-title > .monaco-button {
+	width: auto;
+	flex-shrink: 0;
+}
+
+.signal-c-extension-details {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 12px;
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+
+.signal-c-extension-details a {
+	color: var(--vscode-textLink-foreground);
+}
+
+.signal-c-extension-error {
+	color: var(--vscode-errorForeground);
+	overflow-wrap: anywhere;
+}
+
+.agents-window-extensions > .signal-c-extensions-marketplace {
+	flex: 0 1 auto;
+	max-height: 45%;
+	margin-bottom: 12px;
+	border: 1px solid var(--vscode-widget-border, transparent);
+	border-radius: var(--vscode-cornerRadius-small);
+}
+
+.agents-window-extensions.shows-extension-page > .signal-c-extensions-marketplace {
+	display: none;
+}

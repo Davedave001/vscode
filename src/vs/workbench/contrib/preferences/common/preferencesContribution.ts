@@ -13,6 +13,7 @@ import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/w
 import { workbenchConfigurationNodeBase } from '../../../common/configuration.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { EditorInputWithOptions } from '../../../common/editor.js';
+import { ASSISTANT_WEATHER_LOCATION_SETTING } from '../../sessions/common/sessionConfig.js';
 import { RegisteredEditorPriority, IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
 import { ITextEditorService } from '../../../services/textfile/common/textEditorService.js';
 import { DEFAULT_SETTINGS_EDITOR_SETTING, FOLDER_SETTINGS_PATH, IPreferencesService, ISettingsEditorOptions, USE_SPLIT_JSON_SETTING } from '../../../services/preferences/common/preferences.js';
@@ -111,6 +112,18 @@ export class PreferencesContribution extends Disposable implements IWorkbenchCon
 
 
 const registry = Registry.as<IConfigurationRegistry>(Extensions.Configuration);
+registry.registerConfiguration({
+	id: 'assistant',
+	title: nls.localize('assistantSettings', "Assistant"),
+	properties: {
+		[ASSISTANT_WEATHER_LOCATION_SETTING]: {
+			type: 'string',
+			default: '',
+			scope: ConfigurationScope.APPLICATION,
+			markdownDescription: nls.localize('sessions.assistant.weatherLocation', "The default city for The Weather Network forecasts and Assistant briefings. Use `Vancouver, BC, CA` or `Paris, FR`. You can also ask Assistant to change this setting. Run `/weather` in Assistant to manage the Pelmorex API key."),
+		},
+	},
+});
 registry.registerConfiguration({
 	...workbenchConfigurationNodeBase,
 	'properties': {

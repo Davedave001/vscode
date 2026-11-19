@@ -94,7 +94,7 @@ export interface IOpenNewSessionOptions extends ICreateNewSessionOptions {
 	readonly folderUri?: URI;
 	/** Cancel startup session restoration so this new-session navigation wins. */
 	readonly cancelRestore?: boolean;
-	/** Keep the current navigation intent when the composer creates or updates its own draft. */
+	/** Keep the current navigation and any visible custom view when the composer updates its own draft. */
 	readonly preserveNavigation?: boolean;
 	/** Prepare a draft without changing the Sessions grid or navigation, or hiding its hosting custom view. */
 	readonly preserveCustomView?: boolean;
@@ -2043,7 +2043,9 @@ export class SessionsService extends Disposable implements ISessionsService {
 			if (token.isCancellationRequested) {
 				return { session: undefined, trustDeclined: false };
 			}
-			if (!preserveCustomView) {
+			// The underlying composer can restore or refresh its draft while a custom view is visible.
+			const updatingCoveredDraft = !preserveCustomView && !!options?.preserveNavigation && !!this.customViewService.activeCustomViewOpen.get();
+			if (!preserveCustomView && !updatingCoveredDraft) {
 				this._beginNavigation(intent, token, options?.preserveNavigation);
 				this._startOpenSession();
 			}
@@ -2064,13 +2066,16 @@ export class SessionsService extends Disposable implements ISessionsService {
 					}
 				}
 				if (!preserveCustomView) {
-					this._activateOrInsert(session, options?.toSide, intent);
+					this._activateOrInsert(session, options?.toSide, updatingCoveredDraft ? 'automatic' : intent, updatingCoveredDraft || undefined);
 				}
 				if (intent === 'explicit' && !options?.preserveNavigation) {
 					this._navigation.recordNewSessionOpened();
 				}
 				return { session, trustDeclined: false };
 			} catch (e) {
+				if (updatingCoveredDraft) {
+					return { session: undefined, trustDeclined: false };
+				}
 				// When the folder cannot be resolved (e.g. the active session's
 				// workspace uses an unsupported scheme like 'unknown:/'), fall
 				// through to the folder-less composer view.

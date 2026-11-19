@@ -20,6 +20,7 @@ import { ExtensionIdentifier } from '../../../platform/extensions/common/extensi
 import { LogLevel } from '../../../platform/log/common/log.js';
 import { IAllowedMcpServersService } from '../../../platform/mcp/common/mcpManagement.js';
 import { McpServerPolicyValues } from '../../../platform/mcp/common/allowedMcpServers.js';
+import { IQuickInputService } from '../../../platform/quickinput/common/quickInput.js';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry.js';
 import { ISecretStorageService } from '../../../platform/secrets/common/secrets.js';
 import { IWorkbenchMcpGatewayService } from '../../contrib/mcp/common/mcpGatewayService.js';
@@ -30,8 +31,8 @@ import { MCP } from '../../contrib/mcp/common/modelContextProtocol.js';
 import { IAuthenticationMcpAccessService } from '../../services/authentication/browser/authenticationMcpAccessService.js';
 import { IAuthenticationMcpService } from '../../services/authentication/browser/authenticationMcpService.js';
 import { IAuthenticationMcpUsageService } from '../../services/authentication/browser/authenticationMcpUsageService.js';
-import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../services/authentication/common/authentication.js';
-import { IDynamicAuthenticationProviderStorageService } from '../../services/authentication/common/dynamicAuthenticationProviderStorage.js';
+import { AuthenticationSession, AuthenticationSessionAccount, getDynamicAuthenticationProviderId, IAuthenticationService, isGoogleWorkspaceOAuth } from '../../services/authentication/common/authentication.js';
+import { getMcpAuthenticationOperations, IDynamicAuthenticationProviderStorageService, resolveDynamicAuthenticationProviderId } from '../../services/authentication/common/dynamicAuthenticationProviderStorage.js';
 import { ExtensionHostKind, extensionHostKindToString } from '../../services/extensions/common/extensionHostKind.js';
 import { IExtensionService } from '../../services/extensions/common/extensions.js';
 import { IExtHostContext, extHostNamedCustomer } from '../../services/extensions/common/extHostCustomers.js';
@@ -71,6 +72,7 @@ export class MainThreadMcp extends Disposable implements MainThreadMcpShape {
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
 		@IAllowedMcpServersService private readonly _allowedMcpServersService: IAllowedMcpServersService,
+		@IQuickInputService private readonly _quickInputService: IQuickInputService,
 	) {
 		super();
 		this._register(_authenticationService.onDidChangeSessions(e => this._onDidChangeAuthSessions(e.providerId, e.label)));
@@ -345,8 +347,6 @@ export class MainThreadMcp extends Disposable implements MainThreadMcpShape {
 			}, errorOnUserInteraction, resourceClientSecret);
 		}
 
-		let providerId = await this._authenticationService.getOrActivateProviderIdForServer(authorizationServer, resourceServer);
-
 		const resolvedClientId = clientId ?? authDetails.clientId;
 		const mcpServerUrl = server.launch.type === McpServerTransportType.HTTP ? server.launch.uri.toString(true) : undefined;
 		let clientSecretStorageKey: string | undefined;
@@ -362,34 +362,63 @@ export class MainThreadMcp extends Disposable implements MainThreadMcpShape {
 			}
 		}
 
-		// If the user explicitly configured an OAuth client_id in mcp.json and the stored
-		// client secret differs from what the existing provider was registered with, force a
-		// re-registration so the new secret takes effect on subsequent token exchanges.
-		// Without this, the user can never replace a cached client secret in the extension
-		// host's DynamicAuthProvider after the provider has been registered.
-		if (didLookupClientSecret && providerId && !forceNewRegistration && this._authenticationService.isDynamicAuthenticationProvider(providerId)) {
-			const registered = await this._dynamicAuthenticationProviderStorageService.getClientRegistration(providerId);
-			if (registered && registered.clientSecret !== clientSecret) {
-				forceNewRegistration = true;
+		const sharedProviderId = await this._authenticationService.getOrActivateProviderIdForServer(authorizationServer, resourceServer);
+		const resourceMetadata = authDetails.resourceMetadata;
+		const operations = getMcpAuthenticationOperations(this._authenticationService);
+		if (clientSecretStorageKey && !clientSecret
+			&& (!sharedProviderId || this._authenticationService.isDynamicAuthenticationProvider(sharedProviderId))
+			&& server.launch.type === McpServerTransportType.HTTP
+			&& isGoogleWorkspaceOAuth(authorizationServer, authDetails.authorizationServerMetadata, server.launch.uri)
+			&& isGoogleWorkspaceOAuth(authorizationServer, authDetails.authorizationServerMetadata, resourceServer)) {
+			if (errorOnUserInteraction) {
+				throw new UserInteractionRequiredError('authentication');
 			}
+			const key = clientSecretStorageKey;
+			clientSecret = await operations.queue(key, async () => {
+				const stored = await this._secretStorageService.get(key);
+				if (stored) { return stored; }
+				const secret = (await this._quickInputService.input({
+					title: nls.localize('mcp.googleClientSecret.title', "OAuth Client Secret for {0}", server.label),
+					prompt: nls.localize('mcp.googleClientSecret.prompt', "Enter the client secret from the Google Auth Platform OAuth client configured for this MCP server."),
+					password: true,
+					ignoreFocusLost: true,
+					validateInput: async value => value.trim() ? undefined : nls.localize('mcp.googleClientSecret.required', "Enter the Google OAuth client secret to continue."),
+				}))?.trim();
+				if (!secret) { throw new CancellationError(); }
+				await this._secretStorageService.set(key, secret);
+				return secret;
+			});
+			didLookupClientSecret = true;
 		}
-
-		if (forceNewRegistration && providerId) {
-			if (!this._authenticationService.isDynamicAuthenticationProvider(providerId)) {
-				throw new Error('Cannot force new registration for a non-dynamic authentication provider.');
+		// Extension providers handle their own client selection. A dynamic OAuth provider
+		// holds one registration and must match the configured client before reusing tokens.
+		const explicitProviderId = resolvedClientId && (!sharedProviderId || this._authenticationService.isDynamicAuthenticationProvider(sharedProviderId))
+			? await resolveDynamicAuthenticationProviderId(authorizationServer, resourceMetadata, { clientId: resolvedClientId, clientSecret }, this._dynamicAuthenticationProviderStorageService)
+			: undefined;
+		const registrationId = explicitProviderId ?? sharedProviderId ?? getDynamicAuthenticationProviderId(authorizationServer, resourceMetadata);
+		const providerId = await operations.queue(registrationId, async () => {
+			const dynamic = this._authenticationService.isDynamicAuthenticationProvider(registrationId);
+			const active = dynamic || (!explicitProviderId && this._authenticationService.isAuthenticationProviderRegistered(registrationId));
+			let replace = forceNewRegistration;
+			if (dynamic && explicitProviderId && !replace) {
+				const registered = await this._dynamicAuthenticationProviderStorageService.getClientRegistration(registrationId);
+				replace = !!registered && (registered.clientId !== resolvedClientId || (didLookupClientSecret && registered.clientSecret !== clientSecret));
 			}
-			this._authenticationService.unregisterAuthenticationProvider(providerId);
-			// TODO: Encapsulate this and the unregister in one call in the auth service
-			await this._dynamicAuthenticationProviderStorageService.removeDynamicProvider(providerId);
-			providerId = undefined;
-		}
-
+			if (active && !replace) {
+				return registrationId;
+			}
+			if (active) {
+				if (!dynamic) {
+					throw new Error('Cannot force new registration for a non-dynamic authentication provider.');
+				}
+				this._authenticationService.unregisterAuthenticationProvider(registrationId);
+				await this._dynamicAuthenticationProviderStorageService.removeDynamicProvider(registrationId);
+			}
+			const provider = await this._authenticationService.createDynamicAuthenticationProvider(authorizationServer, authDetails.authorizationServerMetadata, resourceMetadata, resolvedClientId, clientSecret, explicitProviderId);
+			return provider?.id;
+		});
 		if (!providerId) {
-			const provider = await this._authenticationService.createDynamicAuthenticationProvider(authorizationServer, authDetails.authorizationServerMetadata, authDetails.resourceMetadata, resolvedClientId, clientSecret);
-			if (!provider) {
-				return undefined;
-			}
-			providerId = provider.id;
+			return undefined;
 		}
 
 		return this._getSessionForProvider(id, server, providerId, resolvedScopes, {
@@ -462,7 +491,7 @@ export class MainThreadMcp extends Disposable implements MainThreadMcpShape {
 
 		const isAllowed = await this.loginPrompt(server.label, provider.label, false);
 		if (!isAllowed) {
-			throw new Error('User did not consent to login.');
+			throw new CancellationError();
 		}
 
 		if (sessions.length) {

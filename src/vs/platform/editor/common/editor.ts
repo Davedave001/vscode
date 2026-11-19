@@ -316,6 +316,11 @@ export interface IEditorOptions {
 	viewState?: object;
 
 	/**
+	 * Apply the supplied cursor and scroll positions while retaining locally restored text editor contributions.
+	 */
+	preserveViewStateContributions?: boolean;
+
+	/**
 	 * A transient editor will attempt to appear as preview and certain components
 	 * (such as history tracking) may decide to ignore the editor when it becomes
 	 * active.

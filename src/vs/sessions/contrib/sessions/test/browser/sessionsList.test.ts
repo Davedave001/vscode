@@ -113,7 +113,8 @@ import { AUTOMATIONS_CUSTOM_VIEW_ID } from '../../../../../workbench/contrib/ses
 import { OPEN_AI_CUSTOMIZATIONS_COMMAND_ID } from '../../../../../workbench/contrib/sessions/browser/customizationsConstants.js';
 import { OPEN_SESSION_COMPARISON_COMMAND_ID } from '../../../../../workbench/contrib/sessions/common/sessionComparisonConstants.js';
 import { BlockedSessionReason, BlockedSessions } from '../../../../../workbench/contrib/sessions/browser/blockedSessions.js';
-import { NEW_SESSION_ACTION_ID } from '../../../../../workbench/contrib/sessions/common/chatConstants.js';
+import { NEW_SESSION_ACTION_ID, OPEN_ASSISTANT_ACTION_ID } from '../../../../../workbench/contrib/sessions/common/chatConstants.js';
+import { IsSessionsWindowContext } from '../../../../../workbench/common/contextkeys.js';
 import { Menus } from '../../../../../workbench/contrib/sessions/browser/menus.js';
 import { buildTestSession } from '../../../../../workbench/contrib/sessions/test/common/testSessionBuilder.js';
 import { TestSessionsList } from '../../../../../workbench/contrib/sessions/test/browser/views/testSessionsList.js';
@@ -1044,10 +1045,12 @@ suite('Sessions - SessionsList', () => {
 		});
 
 		for (const navigationShortcuts of [false, true]) {
-			test(`keeps navigation placement unchanged in Inbox (separate navigation: ${navigationShortcuts})`, async () => {
+			test(`keeps Assistant above Automations in Workspace and Inbox (separate navigation: ${navigationShortcuts})`, async () => {
 				const harness = createListHarness(disposables, [], instantiationService => {
 					const contextKeyService = disposables.add(new ContextKeyService(new TestConfigurationService()));
 					instantiationService.stub(IContextKeyService, contextKeyService);
+					IsSessionsWindowContext.bindTo(contextKeyService).set(true);
+					ChatContextKeys.enabled.bindTo(contextKeyService).set(true);
 					ChatAutomationsEnabledContext.bindTo(contextKeyService).set(true);
 					instantiationService.stub(IAutomationService, new class extends mock<IAutomationService>() {
 						override readonly automations = constObservable([]);
@@ -1070,7 +1073,7 @@ suite('Sessions - SessionsList', () => {
 				list.layout(300, 400);
 				const snapshot = () => ({
 					navigation: Array.from(navigationContainer.querySelectorAll('.session-section-label')).map(element => element.textContent),
-					treeStartsWithAutomations: listContainer.querySelector('.monaco-list-row .session-section-label')?.textContent === 'Automations',
+					firstTreeShortcuts: Array.from(listContainer.querySelectorAll('.monaco-list-row .session-section-label')).slice(0, 2).map(element => element.textContent).filter(label => label === 'Assistant' || label === 'Automations'),
 					categoriesContainAutomations: !!listContainer.querySelector('.sessions-list-inbox-footer')?.textContent?.includes('Automations'),
 				});
 				const regular = snapshot();
@@ -1079,6 +1082,9 @@ suite('Sessions - SessionsList', () => {
 				const inbox = snapshot();
 				list.focusAutomations();
 				const focused = list.isAutomationsFocused();
+				const assistantRow = Array.from(container.querySelectorAll<HTMLElement>('.monaco-list-row'))
+					.find(row => row.querySelector('.session-section-label')?.textContent === 'Assistant')!;
+				assistantRow.click();
 				const automationsRow = Array.from(container.querySelectorAll<HTMLElement>('.monaco-list-row'))
 					.find(row => row.querySelector('.session-section-label')?.textContent === 'Automations')!;
 				automationsRow.click();
@@ -1090,13 +1096,13 @@ suite('Sessions - SessionsList', () => {
 				await timeout(0);
 				assert.deepStrictEqual({ regular, inboxUnchanged: inbox, focused, commands: harness.commandService.calls, restored, disabled: container.textContent?.includes('Automations') }, {
 					regular: {
-						navigation: navigationShortcuts ? ['New Session', 'Automations', 'Customizations'] : [],
-						treeStartsWithAutomations: !navigationShortcuts,
+						navigation: navigationShortcuts ? ['New Session', 'Assistant', 'Automations', 'Customizations'] : [],
+						firstTreeShortcuts: navigationShortcuts ? [] : ['Assistant', 'Automations'],
 						categoriesContainAutomations: false,
 					},
 					inboxUnchanged: regular,
 					focused: true,
-					commands: [{ commandId: 'sessionsView.manageAutomations', args: [] }],
+					commands: [{ commandId: OPEN_ASSISTANT_ACTION_ID, args: [] }, { commandId: 'sessionsView.manageAutomations', args: [] }],
 					restored: regular,
 					disabled: false,
 				});

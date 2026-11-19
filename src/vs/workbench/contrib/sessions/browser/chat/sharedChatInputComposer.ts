@@ -8,6 +8,7 @@ import './media/sharedChatInputComposer.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import { ActionViewItem } from '../../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { IAction, Separator } from '../../../../../base/common/actions.js';
+import { Codicon } from '../../../../../base/common/codicons.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { isCancellationError } from '../../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
@@ -18,10 +19,13 @@ import { autorun, constObservable, derived, IObservable, IReader, observableValu
 import { isEqual } from '../../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { CompletionItemKind } from '../../../../../editor/common/languages.js';
+import { ILanguageFeaturesService } from '../../../../../editor/common/services/languageFeatures.js';
 import { localize } from '../../../../../nls.js';
 import { MenuEntryActionViewItem } from '../../../../../platform/actions/browser/menuEntryActionViewItem.js';
 import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../../platform/actions/browser/toolbar.js';
-import { MenuId, MenuItemAction } from '../../../../../platform/actions/common/actions.js';
+import { MenuId, MenuItemAction, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
+import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
@@ -34,12 +38,13 @@ import { IChatSubmitRequestHandlerService } from '../../../chat/browser/chatSubm
 import { combineVoiceInput } from '../../../chat/browser/voiceClient/voiceInputUtils.js';
 import { ChatDynamicVariableModel } from '../../../chat/browser/attachments/chatDynamicVariables.js';
 import { getDynamicVariablesForWidget, getSelectedToolAndToolSetsForWidget } from '../../../chat/browser/attachments/chatVariables.js';
-import { createChatInputToolbarContext } from '../../../chat/browser/actions/chatExecuteActions.js';
+import { ChatSubmitAction, createChatInputToolbarContext, IChatExecuteActionContext } from '../../../chat/browser/actions/chatExecuteActions.js';
 import { IChatWidget } from '../../../chat/browser/chat.js';
 import { compactCodiconsIn } from '../../../chat/browser/chatIcons.js';
 import { ChatWidget } from '../../../chat/browser/widget/chatWidget.js';
 import { ChatInputNoticeHost } from '../../../chat/browser/widget/input/chatInputNoticeHost.js';
 import { IChatInputHostModelSelection } from '../../../chat/browser/widget/input/chatInputPart.js';
+import { computeCompletionRanges, isEmptyUpToCompletionWord } from '../../../chat/browser/widget/input/editor/chatInputCompletionUtils.js';
 import { ModelComparisonAvailableContext } from '../../../chat/browser/widget/input/modelPicker/modelPickerComparison.js';
 import { ChatContextKeys } from '../../../chat/common/actions/chatContextKeys.js';
 import { IChatDraft } from '../../../chat/common/attachments/chatDraft.js';
@@ -65,7 +70,7 @@ import { WorkbenchHoverDelegate } from '../../../../../platform/hover/browser/ho
 import { HoverStyle } from '../../../../../base/browser/ui/hover/hover.js';
 import { readNewChatDraftState, writeNewChatDraftState } from '../../common/newChatDraftState.js';
 import { MobileSessionTypePicker } from './mobile/mobileSessionTypePicker.js';
-import { getLabeledPickerResponsiveItems, hasSendableNewChatContent, IComposerRepositoryControls, INewChatComposerInputOptions, syncInputGitHubContextAttachments } from './newChatComposerInput.js';
+import { getLabeledPickerResponsiveItems, hasSendableNewChatContent, IComposerRepositoryControls, IComposerSlashCommand, INewChatComposerInputOptions, syncInputGitHubContextAttachments } from './newChatComposerInput.js';
 import { createSessionModelCommands, INewChatModelPickerService, NewChatModelPickerService } from './newChatModelPicker.js';
 import { INewChatVoiceComposer, INewChatVoiceTargetService, NEW_CHAT_VOICE_SENTINEL, NewChatVoiceInputDecorations } from './newChatVoice.js';
 import { INewSessionComposer, INewSessionComposerPicker, INewSessionPromptOptionsController, INewSessionTargetLabels, NewSessionPromptOptionsState, NewSessionWorkspacePreselectionSource } from '../newSessionComposerService.js';
@@ -90,6 +95,26 @@ const COMPOSER_INPUT_MAX_HEIGHT = COMPOSER_LAYOUT_HEIGHT + 50 + 72;
 const BUSY_INDICATOR_DELAY_MS = 500;
 /** How long a send waits for the session to get ready to send, such as while its provider starts. */
 const SEND_READINESS_TIMEOUT_MS = 15_000;
+const textComposerExecuteMenu = MenuId.for('AgentSessionsTextComposerExecute');
+const textComposerRequestRunning = new RawContextKey<boolean>('sessionsTextComposerRequestRunning', false, true);
+const stopTextComposerRequest = 'workbench.action.sessions.stopTextComposerRequest';
+const textComposerRequests = new WeakMap<IChatWidget, NonNullable<INewChatComposerInputOptions['hostRequest']>>();
+MenuRegistry.appendMenuItem(textComposerExecuteMenu, {
+	command: { id: ChatSubmitAction.ID, title: localize('sessionsTextComposer.send', "Send"), icon: Codicon.arrowUpCompact, precondition: ChatContextKeys.inputHasSendableContent },
+	when: textComposerRequestRunning.negate(),
+	group: 'navigation',
+});
+MenuRegistry.appendMenuItem(textComposerExecuteMenu, {
+	command: { id: stopTextComposerRequest, title: localize('sessionsTextComposer.stop', "Stop"), icon: Codicon.stopCircle },
+	when: textComposerRequestRunning,
+	group: 'navigation',
+});
+CommandsRegistry.registerCommand(stopTextComposerRequest, (_accessor, context?: IChatExecuteActionContext) => {
+	const request = context?.widget && textComposerRequests.get(context.widget);
+	if (request?.isRunning.get()) {
+		request.stop();
+	}
+});
 
 export type ComposerBusyState = '' | 'initializing' | 'sending';
 
@@ -105,6 +130,7 @@ interface IClientSlashCommand {
 
 /** The input editor's padding, matching the composer's text inset and minimum height. */
 const COMPOSER_INPUT_EDITOR_PADDING = { top: 8, bottom: 2 };
+const HOST_SLASH_COMMAND_WORD = /\/[\w-]*/g;
 
 /** A status indicator in the composer's controls row; icon-only items use the compact control box. */
 class ComposerStatusActionViewItem extends MenuEntryActionViewItem {
@@ -241,6 +267,7 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 		@ISessionHost parentHost: ISessionHost,
 		@ISessionHostService sessionHostService: ISessionHostService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@ILanguageFeaturesService private readonly languageFeaturesService: ILanguageFeaturesService,
 	) {
 		super();
 		this.host = parentHost;
@@ -281,12 +308,14 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 
 	// #region Rendering
 
-	render(parent: HTMLElement, root: HTMLElement): void {
+	/** Optional host controls share the toolbar row with the execute action. */
+	render(parent: HTMLElement, root: HTMLElement, inlineControls?: HTMLElement): void {
 		const container = this._container = dom.append(parent, dom.$('.new-chat-input-container.sessions-shared-chat-input'));
 		this._register(toDisposable(() => container.remove()));
 
 		const widgetContainer = dom.append(container, dom.$('.sessions-shared-chat-widget'));
 		const widgetContextKeyService = this._widgetContextKeyService = this._register(this.contextKeyService.createScoped(widgetContainer));
+		if (this.options.textOnly) { ChatContextKeys.hostOnlyInput.bindTo(widgetContextKeyService).set(true); }
 		const busyContextKey = SharedChatInputComposerBusyContext.bindTo(widgetContextKeyService);
 		ChatInputSupportsBackgroundContext.bindTo(widgetContextKeyService).set(!!this.options.supportsBackground);
 		const comparisonAvailable = ModelComparisonAvailableContext.bindTo(widgetContextKeyService);
@@ -313,7 +342,7 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 				// Status indicators share the composer's controls row instead.
 				renderStatusToolbar: false,
 				renderGettingStartedTip: false,
-				supportsFileReferences: true,
+				supportsFileReferences: !this.options.textOnly,
 				enableImplicitContext: false,
 				supportsChangingModes: false,
 				isSessionsWindow: true,
@@ -325,7 +354,8 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 				// No editorOverflowWidgetsDomNode: the composer renders before its view is attached, possibly to another window
 				// such as the Agents Launcher's, and the widget's own one follows the widget into the window it lays out in.
 				menus: {
-					inputToolbar: Menus.NewSessionChatInputToolbar,
+					inputToolbar: this.options.textOnly ? MenuId.for('AgentSessionsTextComposer') : Menus.NewSessionChatInputToolbar,
+					executeToolbar: this.options.textOnly ? textComposerExecuteMenu : undefined,
 					telemetrySource: 'sessions.newChatComposer',
 				},
 				// The input sits flush with the composer's picker rows.
@@ -355,6 +385,18 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 			},
 		));
 		widget.render(widgetContainer, root, this.options.petHostPreferred, this.options.setChatPetPlatformOccupation);
+		if (inlineControls) {
+			// Leaving focus with a host control lets its picker stay open after the click.
+			this._register(dom.addDisposableListener(inlineControls, dom.EventType.CLICK, event => event.stopPropagation()));
+			widget.input.inputToolbarElement.appendChild(inlineControls);
+		}
+		const hostRequest = this.options.hostRequest;
+		if (hostRequest && this.options.textOnly) {
+			const requestRunning = textComposerRequestRunning.bindTo(widget.scopedContextKeyService);
+			textComposerRequests.set(widget, hostRequest);
+			this._register(toDisposable(() => textComposerRequests.delete(widget)));
+			this._register(autorun(reader => requestRunning.set(hostRequest.isRunning.read(reader))));
+		}
 		if (this.options.hideChatWidgetWhileHidden) {
 			// The widget is a foreground chat only while its composer is visible, rather than for as long as it is rendered.
 			this._register(autorun(reader => widget.setVisible((this.options.hostVisible?.read(reader) ?? true) && (this.options.inputVisible?.read(reader) ?? true))));
@@ -372,7 +414,11 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 			this._onDidChangeAttachments.fire();
 			this._onDidChangeInput.fire();
 		}));
-		this._register(this.instantiationService.createInstance(SessionReferenceCompletions, widget, () => this.options.session.get()));
+		if (!this.options.textOnly) {
+			this._register(this.instantiationService.createInstance(SessionReferenceCompletions, widget, () => this.options.session.get()));
+		} else if (this.options.slashCommands?.length) {
+			this._registerHostSlashCommands(widget, this.options.slashCommands);
+		}
 		if (this.options.supportsBackground) {
 			SharedChatInputComposer._backgroundComposers.set(widget, this);
 			this._register(toDisposable(() => SharedChatInputComposer._backgroundComposers.delete(widget)));
@@ -407,7 +453,7 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 			getJumpGameElement: this.options.getChatPetJumpGameElement,
 		}));
 
-		this._renderSessionControls(parent);
+		if (!this.options.textOnly) { this._renderSessionControls(parent); }
 		this._restoreInput(widget);
 		this._bindChatModel();
 
@@ -436,6 +482,30 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 			parent.style.removeProperty('top');
 		}));
 		update();
+	}
+
+	private _registerHostSlashCommands(widget: ChatWidget, commands: readonly IComposerSlashCommand[]): void {
+		const input = widget.inputEditor.getModel();
+		if (!input) { return; }
+		// These commands are executed by this host. Match only its editor and avoid offering other providers' commands.
+		this._register(this.languageFeaturesService.completionProvider.register({ scheme: input.uri.scheme, pattern: input.uri.fsPath, exclusive: true, hasAccessToAllModels: true }, {
+			_debugDisplayName: 'hostSlashCommands',
+			triggerCharacters: ['/'],
+			provideCompletionItems: (model, position) => {
+				const range = computeCompletionRanges(model, position, HOST_SLASH_COMMAND_WORD);
+				if (!range?.varWord || !isEmptyUpToCompletionWord(model, range)) { return; }
+				const following = model.getLineContent(position.lineNumber).slice(range.replace.endColumn - 1);
+				return {
+					suggestions: commands.map(({ label, description, acceptsArguments }, index) => ({
+						label: { label, description },
+						kind: CompletionItemKind.Text,
+						insertText: acceptsArguments && !/^\s/.test(following) ? `${label} ` : label,
+						sortText: String(index).padStart(3, '0'),
+						range: range.replace,
+					})),
+				};
+			},
+		}));
 	}
 
 	private _createHostModelSelection(): IChatInputHostModelSelection {
@@ -701,6 +771,10 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 		return this._widget?.attachmentModel.attachments ?? this._pendingAttachments;
 	}
 
+	get inputUri(): URI | undefined {
+		return this._widget?.inputPart.inputUri;
+	}
+
 	get hasInput(): boolean {
 		return !!this.getInputValue() || this.attachments.length > 0 || !!this.options.hasAdditionalSendContent?.get();
 	}
@@ -836,7 +910,7 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 			// A send whose input was cleared but that has not ended restores what was sent.
 			const state = this.options.inputSnapshot.get();
 			draft = state.attempt?.input ?? state.input;
-		} else {
+		} else if (!this.options.textOnly) {
 			try {
 				draft = readNewChatDraftState(this.storageService);
 			} catch {

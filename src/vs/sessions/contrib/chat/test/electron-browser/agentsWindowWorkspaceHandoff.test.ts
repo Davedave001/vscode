@@ -23,7 +23,8 @@ import { IChat, ISession } from '../../../../../workbench/services/sessions/comm
 import { InMemoryStorageService } from '../../../../../platform/storage/common/storage.js';
 import { IAgentsWindowWorkspaceHandoff } from '../../browser/agentsWindowWorkspaceHandoff.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
-import { AGENT_HOST_SCHEME } from '../../../../../platform/agentHost/common/agentHostUri.js';
+import { AGENT_HOST_SCHEME, agentHostAuthority, toAgentHostUri } from '../../../../../platform/agentHost/common/agentHostUri.js';
+import { RemoteAgentHostEntryType } from '../../../../../platform/agentHost/common/remoteAgentHostService.js';
 import { DevContainerAgentHostEnabledSettingId } from '../../../../../workbench/contrib/sessions/common/devContainerAgentHostService.js';
 import { IOpenNewSessionOptions } from '../../../../../workbench/contrib/sessions/browser/sessionsService.js';
 import { SessionsManagementService } from '../../../../../workbench/contrib/sessions/browser/sessionsManagementService.js';
@@ -35,7 +36,8 @@ import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { extUri } from '../../../../../base/common/resources.js';
 import { remoteAgentHostSessionTypeId } from '../../../../../platform/agentHost/common/agentHostSessionType.js';
 import { RemoteAgentHostHandoffResult } from '../../../../common/remoteWorkspaceHandoff.js';
-import { observableValue } from '../../../../../base/common/observable.js';
+import { constObservable, observableValue } from '../../../../../base/common/observable.js';
+import { ASSISTANT_CUSTOM_VIEW_ID } from '../../../../../workbench/contrib/sessions/common/chatConstants.js';
 import { buildOpenSessionLinkUri } from '../../../../../platform/agentHost/common/openSessionLink.js';
 import { IChatWindow, IChatWindowOpenOptions } from '../../../../../workbench/contrib/chatWindow/browser/chatWindow.js';
 import { CHAT_WINDOWS_ENABLED_SETTING } from '../../../chatWindow/common/chatWindows.js';
@@ -158,6 +160,65 @@ suite('Agents Window workspace handoff telemetry', () => {
 				events: cancelBeforeRestore ? [] : ['navigation', 'newSession'],
 				calls: cancelBeforeRestore ? [] : [{ options: { cancelRestore: true }, usesHandoffToken: true }],
 			});
+		});
+	}
+
+	test('returning from the selected Assistant checkout preserves the open conversation', async () => {
+		const project = URI.file('/project');
+		const checkout = URI.file('/project-feature');
+		const configurationService = new TestConfigurationService();
+		disposables.add(configurationService.onDidChangeConfigurationEmitter);
+		const handedOff: URI[] = [];
+		const harness = {
+			configurationService,
+			customViews: { activeCustomView: constObservable({ id: ASSISTANT_CUSTOM_VIEW_ID }) },
+			assistantChats: { target: { workspace: project, fileRoots: [project], worktree: { uri: checkout, label: 'feature' } }, editorSelection: observableValue('editorSelection', undefined) },
+			_workspaceHandoff: { selectWorkspace: async ({ folderUri }: IAgentsWindowWorkspaceHandoff) => { if (folderUri) { handedOff.push(folderUri); } } },
+			handleOpenIntent: Reflect.get(SelectAgentsFolderContribution.prototype, 'handleOpenIntent') as (
+				workspace: URI, session: undefined, isDefault: boolean, token: CancellationToken, telemetry: undefined, draft: undefined,
+				noWorkspace: boolean, showNewSession: boolean, remoteAuthority: undefined, source: AgentsWindowOpenSource, workspaceSwitch: 'warm'
+			) => Promise<void>,
+		};
+		const switchFrom = (folder: URI) => harness.handleOpenIntent(folder, undefined, true, CancellationToken.None, undefined, undefined, false, false, undefined, AgentsWindowOpenSource.CommandPalette, 'warm');
+		await switchFrom(checkout);
+		assert.deepStrictEqual(handedOff, []);
+		await switchFrom(project);
+		assert.deepStrictEqual(handedOff, [project]);
+	});
+
+	for (const remote of [false, true]) {
+		test(`returning from a second Assistant workspace folder keeps the current task (${remote ? 'SSH' : 'local'})`, async () => {
+			const address = 'fixture:1234';
+			const providerId = 'agenthost-fixture';
+			const [first, second] = [URI.file('/fixture/ui'), URI.file('/fixture/service')];
+			const roots = remote ? [first, second].map(uri => toAgentHostUri(uri, agentHostAuthority(address))) : [first, second];
+			const editorFolder = remote ? second.with({ scheme: Schemas.vscodeRemote, authority: 'ssh-remote+fixture' }) : second;
+			const outside = remote ? editorFolder.with({ authority: 'ssh-remote+different' }) : URI.file('/different');
+			const configurationService = new TestConfigurationService();
+			disposables.add(configurationService.onDidChangeConfigurationEmitter);
+			const handedOff: IAgentsWindowWorkspaceHandoff[] = [];
+			const harness = {
+				configurationService,
+				customViews: { activeCustomView: constObservable({ id: ASSISTANT_CUSTOM_VIEW_ID }) },
+				assistantChats: { target: { workspace: roots[0], fileRoots: roots, ...(remote ? { providerId } : {}) }, editorSelection: observableValue('editorSelection', undefined) },
+				sessionsProvidersService: { getProvider: (id: string) => id === providerId ? { id, remoteAddress: address } : undefined },
+				remoteAgentHostService: { getEntryByAddress: (value: string) => value === address ? { connection: { type: RemoteAgentHostEntryType.SSH, address, hostName: 'fixture' } } : undefined },
+				_workspaceHandoff: { selectWorkspace: async (intent: IAgentsWindowWorkspaceHandoff) => { handedOff.push(intent); } },
+				handleOpenIntent: Reflect.get(SelectAgentsFolderContribution.prototype, 'handleOpenIntent') as (
+					workspace: URI, session: undefined, isDefault: boolean, token: CancellationToken, telemetry: undefined, draft: undefined,
+					noWorkspace: boolean, showNewSession: boolean, remoteAuthority: undefined, source: AgentsWindowOpenSource, workspaceSwitch: 'warm'
+				) => Promise<void>,
+			};
+			const switchFrom = (folder: URI) => harness.handleOpenIntent(folder, undefined, true, CancellationToken.None, undefined, undefined, false, false, undefined, AgentsWindowOpenSource.TitleBar, 'warm');
+			await switchFrom(editorFolder);
+			assert.strictEqual(handedOff.length, 0);
+			await switchFrom(outside);
+			assert.strictEqual(handedOff.length, 1);
+			if (remote) {
+				assert.strictEqual(handedOff[0].remote?.folder?.remoteAuthority, outside.authority);
+			} else {
+				assert.deepStrictEqual(handedOff[0].folderUri, outside);
+			}
 		});
 	}
 

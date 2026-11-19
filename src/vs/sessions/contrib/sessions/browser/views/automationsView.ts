@@ -3216,7 +3216,7 @@ registerAction2(class NewAutomationAction extends Action2 {
 			precondition: ChatAutomationsEnabledContext,
 		});
 	}
-	override async run(accessor: ServicesAccessor): Promise<void> {
+	override async run(accessor: ServicesAccessor, initialValues?: AutomationDialogCreateInitialValues): Promise<void> {
 		const automationDialogService = accessor.get(IAutomationDialogService);
 		const automationService = accessor.get(IAutomationService);
 		const configurationService = accessor.get(IConfigurationService);
@@ -3228,6 +3228,7 @@ registerAction2(class NewAutomationAction extends Action2 {
 			return;
 		}
 		await automationDialogService.showAutomationDialog({
+			...(initialValues ? { initialValues } : {}),
 			commit: async result => {
 				if (result.kind === 'create') {
 					await withAutomationDialogPersistenceTelemetry(telemetryService, 'create', () =>

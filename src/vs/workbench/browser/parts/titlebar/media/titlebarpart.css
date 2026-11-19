@@ -468,6 +468,10 @@
 	display: none;
 }
 
+.monaco-workbench .part.titlebar .center-adjacent-toolbar-container.switch-only:has(.workspace-mode-switch) .actions-container > .action-item:not(.workspace-mode-switch) {
+	display: none;
+}
+
 /* Action Tool Bar Controls */
 .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-right > .action-toolbar-container {
 	display: none;

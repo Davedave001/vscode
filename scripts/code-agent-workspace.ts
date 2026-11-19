@@ -65,6 +65,7 @@ function createLaunchOptions(repoRoot: string, workspace: string, ide: boolean, 
 		// Existing development runtimes remain usable until native assets are rebuilt.
 		executable: optimized ? path.join(optimizedBuild ? path.resolve(optimizedBuild) : path.join(path.dirname(repoRoot), `VSCode-win32-${process.arch}`), `${product.nameShort}.exe`) : fs.existsSync(executable) || !fs.existsSync(previousExecutable) ? executable : previousExecutable,
 		args: [...(!optimized ? [repoRoot] : []), ...(ide ? [] : ['--agents']), workspace,
+			'--agent-workspace-preview',
 			'--user-data-dir', profile,
 			'--shared-data-dir', path.join(buildRoot, 'agent-workspace-shared'),
 			'--extensions-dir', path.join(buildRoot, 'agent-workspace-extensions'),

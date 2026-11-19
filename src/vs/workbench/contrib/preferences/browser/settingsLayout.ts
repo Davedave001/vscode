@@ -7,6 +7,7 @@ import { isWeb, isWindows } from '../../../../base/common/platform.js';
 import { localize } from '../../../../nls.js';
 import { ISetting, ISettingsGroup } from '../../../services/preferences/common/preferences.js';
 import { ChatAIDisabledSettingId } from '../../../../platform/chat/common/chatSettings.js';
+import { ASSISTANT_WEATHER_LOCATION_SETTING } from '../../sessions/common/sessionConfig.js';
 
 export interface ITOCFilter {
 	include?: {
@@ -181,6 +182,11 @@ export const tocData: ITOCEntry<string> = {
 			id: 'chat',
 			label: localize('chat', "Chat"),
 			children: [
+				{
+					id: 'chat/assistant',
+					label: localize('chatAssistant', "Assistant"),
+					settings: [ASSISTANT_WEATHER_LOCATION_SETTING],
+				},
 				{
 					id: 'chat/agent',
 					label: localize('chatAgent', "Agent"),

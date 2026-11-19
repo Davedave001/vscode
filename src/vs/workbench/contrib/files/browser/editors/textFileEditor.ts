@@ -128,15 +128,13 @@ export class TextFileEditor extends AbstractTextCodeEditor<ICodeEditorViewState>
 			const control = assertReturnsDefined(this.editorControl);
 			control.setModel(textFileModel.textEditorModel);
 
-			// Restore view state (unless provided by options)
-			if (!isTextEditorViewState(options?.viewState)) {
+			// Load local view state for contributions when the supplied state contains only positions.
+			if (!isTextEditorViewState(options?.viewState) || options?.preserveViewStateContributions) {
 				const editorViewState = this.loadEditorViewState(input, context);
 				if (editorViewState) {
-					if (options?.selection) {
-						editorViewState.cursorState = []; // prevent duplicate selections via options
-					}
-
-					control.restoreViewState(editorViewState);
+					control.restoreViewState(options?.selection || options?.preserveViewStateContributions
+						? { ...editorViewState, cursorState: [] }
+						: editorViewState);
 				}
 			}
 

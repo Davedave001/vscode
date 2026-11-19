@@ -12,7 +12,7 @@ import { InstantiationType, registerSingleton } from '../../../../platform/insta
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IAuthenticationAccessService } from './authenticationAccessService.js';
-import { AuthenticationProviderInformation, AuthenticationSession, AuthenticationSessionAccount, AuthenticationSessionsChangeEvent, IAuthenticationCreateSessionOptions, IAuthenticationGetSessionsOptions, IAuthenticationProvider, IAuthenticationProviderHostDelegate, IAuthenticationService, IAuthenticationWwwAuthenticateRequest, isAuthenticationWwwAuthenticateRequest } from '../common/authentication.js';
+import { AuthenticationProviderInformation, AuthenticationSession, AuthenticationSessionAccount, AuthenticationSessionsChangeEvent, IAuthenticationCreateSessionOptions, IAuthenticationGetSessionsOptions, IAuthenticationProvider, IAuthenticationProviderHostDelegate, IAuthenticationService, IAuthenticationWwwAuthenticateRequest, isAuthenticationWwwAuthenticateRequest, isClientScopedDynamicAuthenticationProviderId } from '../common/authentication.js';
 import { IBrowserWorkbenchEnvironmentService } from '../../environment/browser/environmentService.js';
 import { ActivationKind, IExtensionService } from '../../extensions/common/extensions.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -342,7 +342,7 @@ export class AuthenticationService extends Disposable implements IAuthentication
 
 	async getOrActivateProviderIdForServer(authorizationServer: URI, resourceServer?: URI): Promise<string | undefined> {
 		for (const provider of this._authenticationProviders.values()) {
-			if (this.matchesProvider(provider, authorizationServer, resourceServer)) {
+			if (!isClientScopedDynamicAuthenticationProviderId(provider.id) && this.matchesProvider(provider, authorizationServer, resourceServer)) {
 				return provider.id;
 			}
 		}
@@ -350,7 +350,7 @@ export class AuthenticationService extends Disposable implements IAuthentication
 		const authServerStr = authorizationServer.toString(true);
 		const providers = this._declaredProviders
 			// Only consider providers that are not already registered since we already checked them
-			.filter(p => !this._authenticationProviders.has(p.id))
+			.filter(p => !this._authenticationProviders.has(p.id) && !isClientScopedDynamicAuthenticationProviderId(p.id))
 			.filter(p => !!p.authorizationServerGlobs?.some(i => match(i, authServerStr, { ignoreCase: true })));
 
 		// TODO:@TylerLeonhardt fan out?

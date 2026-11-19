@@ -172,7 +172,7 @@ export class DynamicAuthenticationProviderStorageService extends Disposable impl
 		if (value) {
 			const parsed = JSON.parse(value);
 			if (!Array.isArray(parsed) || !parsed.every((t) => typeof t.created_at === 'number' && isAuthorizationTokenResponse(t))) {
-				this.logService.error(`Invalid session data for ${authProviderId} (${clientId}) in secret storage:`, parsed);
+				this.logService.error(`Invalid session data for ${authProviderId} (${clientId}) in secret storage.`);
 				await this.secretStorageService.delete(key);
 				return undefined;
 			}
@@ -185,7 +185,7 @@ export class DynamicAuthenticationProviderStorageService extends Disposable impl
 		const key = JSON.stringify({ isDynamicAuthProvider: true, authProviderId, clientId });
 		const value = JSON.stringify(sessions);
 		await this.secretStorageService.set(key, value);
-		this.logService.trace(`Set session data for ${authProviderId} (${clientId}) in secret storage:`, sessions);
+		this.logService.trace(`Stored ${sessions.length} session(s) for ${authProviderId} (${clientId}).`);
 	}
 }
 

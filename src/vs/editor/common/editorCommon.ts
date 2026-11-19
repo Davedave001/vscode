@@ -206,6 +206,7 @@ export interface ICodeEditorViewState {
 export interface IDiffEditorViewState {
 	original: ICodeEditorViewState | null;
 	modified: ICodeEditorViewState | null;
+	focusedSide?: 'original' | 'modified';
 	modelState?: unknown;
 }
 /**

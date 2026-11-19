@@ -78,6 +78,7 @@ export interface INewSessionTargetLabels {
 }
 
 export interface INewSessionComposer {
+	readonly inputUri?: URI;
 	readonly sessionResource?: IObservable<URI | undefined>;
 	readonly modelPicker?: INewSessionComposerPicker;
 	readonly targetLabels?: IObservable<INewSessionTargetLabels>;

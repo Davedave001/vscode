@@ -13,6 +13,7 @@ import { IExtHostInitDataService } from '../common/extHostInitDataService.js';
 import { IExtHostWindow } from '../common/extHostWindow.js';
 import { IExtHostUrlsService } from '../common/extHostUrls.js';
 import { ILoggerService, ILogService } from '../../../platform/log/common/log.js';
+import product from '../../../platform/product/common/product.js';
 import { MainThreadAuthenticationShape } from '../common/extHost.protocol.js';
 import { Proxied } from '../../services/extensions/common/proxyIdentifier.js';
 import { IAuthorizationServerMetadata, IAuthorizationProtectedResourceMetadata, IAuthorizationTokenResponse, IAuthorizationDeviceResponse, isAuthorizationDeviceResponse, isAuthorizationTokenResponse, IAuthorizationDeviceTokenErrorResponse, AuthorizationErrorType, AuthorizationDeviceCodeErrorType } from '../../../base/common/oauth.js';
@@ -62,6 +63,10 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 		// Prepend Node-specific flows to the existing flows
 		if (!initData.remote.isRemote && serverMetadata.authorization_endpoint) {
 			// If we are not in a remote environment, we can use the loopback server for authentication
+			if (this._isGoogleLoopbackOAuth || this._isSignalCMailOAuth) {
+				// Registered desktop callbacks cannot fall back to the vscode.dev relay.
+				this._createFlows.length = 0;
+			}
 			this._createFlows.unshift({
 				label: nls.localize('loopback', "Loopback Server"),
 				handler: (scopes, progress, token) => this._createWithLoopbackServer(scopes, progress, token)
@@ -69,7 +74,7 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 		}
 
 		// Add device code flow to the end since it's not as streamlined
-		if (serverMetadata.device_authorization_endpoint) {
+		if (serverMetadata.device_authorization_endpoint && !this._isGoogleLoopbackOAuth && !this._isSignalCMailOAuth) {
 			this._createFlows.push({
 				label: nls.localize('device code', "Device Code"),
 				handler: (scopes, progress, token) => this._createWithDeviceCode(scopes, progress, token)
@@ -92,11 +97,13 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 		// Generate a random state value to prevent CSRF
 		const nonce = this.generateRandomString(32);
 		const callbackUri = URI.parse(`${this._initData.environment.appUriScheme}://dynamicauthprovider/${this.authorizationServer.authority}/redirect?nonce=${nonce}`);
-		let appUri: URI;
-		try {
-			appUri = await this._extHostUrls.createAppUri(callbackUri);
-		} catch (error) {
-			throw new Error(`Failed to create external URI: ${error}`);
+		let appUri: URI | undefined;
+		if (!this._isSignalCMailOAuth) {
+			try {
+				appUri = await this._extHostUrls.createAppUri(callbackUri);
+			} catch (error) {
+				throw new Error(`Failed to create external URI: ${error}`);
+			}
 		}
 
 		// Prepare the authorization request URL
@@ -105,6 +112,7 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 		authorizationUrl.searchParams.append('response_type', 'code');
 		authorizationUrl.searchParams.append('code_challenge', codeChallenge);
 		authorizationUrl.searchParams.append('code_challenge_method', 'S256');
+		this._configureAuthorizationUrl(authorizationUrl);
 		const scopeString = scopes.join(' ');
 		const requestScopeString = this._getRequestScopes(scopes).join(' ');
 		if (requestScopeString) {
@@ -117,10 +125,15 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 		}
 
 		// Create and start the loopback server
+		const usesBundledOutlookApp = this._isSignalCMailOAuth && !this._isGoogleLoopbackOAuth
+			&& this._clientId.toLowerCase() === product.signalCOutlookOAuthClientId?.toLowerCase();
 		const server = new LoopbackAuthServer(
 			this._logger,
 			appUri,
-			this._initData.environment.appName
+			this._initData.environment.appName,
+			!this._isGoogleLoopbackOAuth,
+			this._isSignalCMailOAuth && !this._isGoogleLoopbackOAuth ? 'localhost' : '127.0.0.1',
+			usesBundledOutlookApp ? '/oauth/callback' : '/',
 		);
 		try {
 			await server.start();
@@ -134,7 +147,7 @@ export class NodeDynamicAuthProvider extends DynamicAuthProvider {
 
 		const promise = server.waitForOAuthResponse();
 		// Set up a Uri Handler but it's just to redirect not to handle the code
-		void this._proxy.$waitForUriHandler(appUri);
+		if (appUri) { void this._proxy.$waitForUriHandler(appUri); }
 
 		try {
 			// Open the browser for user authorization

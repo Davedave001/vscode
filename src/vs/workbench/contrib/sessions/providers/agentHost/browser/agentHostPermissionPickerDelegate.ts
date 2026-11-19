@@ -11,7 +11,9 @@ import { isWeb } from '../../../../../../base/common/platform.js';
 import { localize } from '../../../../../../nls.js';
 import { createAgentHostSandboxToggle } from '../../../../../../platform/agentHost/browser/agentHostSandboxToggle.js';
 import { IAgentHostEnablementService } from '../../../../../../platform/agentHost/common/agentHostEnablementService.js';
+import { toAgentHostChatHarness } from '../../../../../../platform/agentHost/common/agentHostChatProviders.js';
 import { AgentHostCustomTerminalToolEnabledSettingId } from '../../../../../../platform/agentHost/common/copilotCliConfig.js';
+import { DevinSubscriptionProviderId } from '../../../../../../platform/agentHost/common/devinAgentConfiguration.js';
 import { SessionConfigKey } from '../../../../../../platform/agentHost/common/sessionConfigKeys.js';
 import { getAvailableSessionApprovalValues, getEffectiveSessionApprovalValue, getSessionApprovalProperty, isSessionConfigWritable, getWithheldSessionApprovalValues, readSessionApprovalLevel, writeSessionApprovalLevel } from '../../../../../../platform/agentHost/common/sessionConfigProperties.js';
 import { narrowClaudePermissionMode } from '../../../../../../platform/agentHost/common/claudeSessionConfigKeys.js';
@@ -36,6 +38,7 @@ import { equalsUnavailablePermissionLevels, isWellKnownAutoApproveSchema, isWell
 
 const REQUIRED_PERMISSION_MODE_VALUE = 'default';
 const REQUIRED_CODEX_APPROVALS_VALUE = 'default';
+const DEVIN_HARNESS = toAgentHostChatHarness(DevinSubscriptionProviderId);
 
 export { isWellKnownAutoApproveSchema, isWellKnownModeSchema };
 
@@ -100,6 +103,17 @@ export class AgentHostPermissionPickerDelegate extends Disposable implements IPe
 	};
 
 	getPermissionLevelMeta(level: ChatPermissionLevel, meta: IPermissionLevelMeta): IPermissionLevelMeta {
+		const session = this._session.get();
+		const chat = this._chat.get();
+		if (session && chat && (chat.harness ?? session.harness) === DEVIN_HARNESS) {
+			const config = this._getProvider(session.providerId, session.sessionId)?.getSessionConfig(session.sessionId, chat.resource);
+			const approval = getSessionApprovalProperty(config?.schema);
+			const index = approval?.schema.enum?.indexOf(level) ?? -1;
+			if (approval && index >= 0) {
+				const description = approval.schema.enumDescriptions?.[index];
+				return { ...meta, label: approval.schema.enumLabels?.[index] ?? meta.label, detail: description ?? meta.detail, hover: description };
+			}
+		}
 		switch (level) {
 			case ChatPermissionLevel.Default:
 				return {
@@ -264,6 +278,11 @@ export class AgentHostPermissionPickerDelegate extends Disposable implements IPe
 		const chat = this._chat.get();
 		const config = session && chat && this._getProvider(session.providerId, session.sessionId)?.getSessionConfig(session.sessionId, chat.resource);
 		const approvalProperty = getSessionApprovalProperty(config?.schema);
+		if (approvalProperty && (chat?.harness ?? session?.harness) === DEVIN_HARNESS) {
+			const index = approvalProperty.schema.enum?.indexOf(level) ?? -1;
+			const description = approvalProperty.schema.enumDescriptions?.[index];
+			if (description) { return description; }
+		}
 		if (config && approvalProperty?.key === 'approvalMode') {
 			const requested = config.values[approvalProperty.key] ?? approvalProperty.schema.default;
 			const effective = getEffectiveSessionApprovalValue(approvalProperty, config.schema, config.values);

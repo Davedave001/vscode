@@ -5,8 +5,10 @@
 
 import assert from 'assert';
 import sinon from 'sinon';
+import { timeout } from '../../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { constObservable } from '../../../../../base/common/observable.js';
+import { isWindows } from '../../../../../base/common/platform.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
@@ -15,19 +17,23 @@ import { agentModelCatalogStatusKey } from '../../../../../platform/agentHost/co
 import { RootState } from '../../../../../platform/agentHost/common/state/protocol/state.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
+import { IFileService } from '../../../../../platform/files/common/files.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { INotificationHandle, INotificationService, IPromptChoice } from '../../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
-import { ITerminalLaunchError, TerminalLocation } from '../../../../../platform/terminal/common/terminal.js';
+import { ITerminalBackend, ITerminalLaunchError, TerminalLocation } from '../../../../../platform/terminal/common/terminal.js';
 import { IWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
-import { ITerminalInstance, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
+import { ITerminalInstance, ITerminalInstanceService, ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService } from '../../../../../workbench/services/agentHost/browser/codexAccountService.js';
 import { IAgentSdkSetupService } from '../../../../../workbench/services/agentHost/browser/agentSdkSetupService.js';
 import { IWorkbenchEnvironmentService } from '../../../../../workbench/services/environment/common/environmentService.js';
+import { IHostService } from '../../../../../workbench/services/host/browser/host.js';
+import { IPathService } from '../../../../../workbench/services/path/common/pathService.js';
 import { DevinSubscriptionStatus, IDevinSubscriptionConnection } from '../../browser/devinSubscriptionConnection.js';
+import { IReachSubscriptionConnection } from '../../browser/reachSubscriptionConnection.js';
 import { IFocusedSessionHostService, ISessionHost, ISessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { IChat, ISessionWorkspace } from '../../../../../workbench/services/sessions/common/session.js';
-import { TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
+import { TestPathService, TestQuickInputService } from '../../../../../workbench/test/browser/workbenchTestServices.js';
 import { AgentSubscriptionsAction, CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING, connectCodexSubscription, enableClaudeAgent, openSubscriptionClient } from '../../browser/subscriptionActions.js';
 
 suite('Agent Subscriptions', () => {
@@ -43,11 +49,12 @@ suite('Agent Subscriptions', () => {
 		let restartChoice: IPromptChoice | undefined;
 		let restarts = 0;
 		instantiation.stub(IConfigurationService, configuration);
+		instantiation.stub(IReachSubscriptionConnection, upcastPartial<IReachSubscriptionConnection>({ getAccount: async () => undefined }));
 		instantiation.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority }));
+		instantiation.stub(IHostService, upcastPartial<IHostService>({ restart: async () => { restarts++; } }));
 		instantiation.stub(IAgentSdkSetupService, upcastPartial<IAgentSdkSetupService>({ setups: state === 'registered' ? [{ agent: 'claude', download: 'ready' }] : [], requestReload: agent => { reloads.push(agent); } }));
 		instantiation.stub(IAgentHostService, upcastPartial<IAgentHostService>({
 			rootState: upcastPartial<IAgentHostService['rootState']>({ value: state === 'failed' ? new Error('Unavailable') : upcastPartial<RootState>({ agents: state === 'registered' ? [{ provider: 'claude', displayName: 'Claude', description: 'Test', models: [] }] : [] }) }),
-			restartAgentHost: async () => { restarts++; },
 		}));
 		instantiation.stub(INotificationService, upcastPartial<INotificationService>({
 			info: message => { notices.push(String(message)); },
@@ -71,7 +78,8 @@ suite('Agent Subscriptions', () => {
 			await f.instantiation.invokeFunction(enableClaudeAgent);
 			assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts, enabled: f.configuration.getValue(AgentHostClaudeAgentEnabledSettingId) }, { reloads: [], restarts: 0, enabled: true });
 			assert.ok(f.restartChoice);
-			assert.match(f.notices[0], /running agent turns will be interrupted/);
+			assert.match(f.notices[0], /Restart Signal-C.*Running agent turns will be interrupted/);
+			assert.strictEqual(f.restartChoice.label, 'Restart Signal-C');
 			await f.restartChoice.run();
 			assert.deepStrictEqual({ reloads: f.reloads, restarts: f.restarts }, { reloads: [], restarts: 1 });
 		});
@@ -172,10 +180,10 @@ suite('Agent Subscriptions', () => {
 		} finally { picker.restore(); }
 	});
 
-	for (const outcome of ['success', 'failure', 'unknownExit', 'launchError', 'closed', 'alreadyExited', 'alreadyDisposed', 'notRegistered', 'disabledDuringLogin', 'policyDuringLogin'] as const) {
+	for (const outcome of ['success', 'failure', 'unknownExit', 'launchError', 'closed', 'alreadyExited', 'alreadyDisposed', 'notRegistered', 'initiallyDisabled', 'disabledDuringLogin', 'policyDuringLogin'] as const) {
 		test(`refreshes Claude models only after a successful official sign-in (${outcome})`, async () => {
-			const f = nativeClaudeFixture(outcome === 'notRegistered' ? 'missing' : 'registered');
-			await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, true);
+			const f = nativeClaudeFixture(outcome === 'notRegistered' || outcome === 'initiallyDisabled' ? 'missing' : 'registered');
+			if (outcome !== 'initiallyDisabled') { await f.values.setUserConfiguration(AgentHostClaudeAgentEnabledSettingId, true); }
 			const exited = store.add(new Emitter<number | ITerminalLaunchError | undefined>());
 			const disposed = store.add(new Emitter<ITerminalInstance>());
 			const terminal = upcastPartial<ITerminalInstance>({ onExit: exited.event, onDisposed: disposed.event, isDisposed: outcome === 'alreadyDisposed', exitCode: outcome === 'alreadyExited' ? 0 : undefined });
@@ -190,9 +198,11 @@ suite('Agent Subscriptions', () => {
 			if (outcome === 'closed') { disposed.fire(terminal); }
 			exited.fire(outcome === 'failure' ? 1 : outcome === 'unknownExit' ? undefined : outcome === 'launchError' ? upcastPartial<ITerminalLaunchError>({ message: 'Simulated launch failure' }) : 0);
 			exited.fire(0);
+			await timeout(0);
 			assert.deepStrictEqual(f.reloads, outcome === 'success' || outcome === 'alreadyExited' ? ['claude'] : []);
 			assert.strictEqual(f.restarts, 0);
-			assert.strictEqual(f.updates.callCount, 0);
+			assert.strictEqual(f.updates.callCount, outcome === 'initiallyDisabled' ? 1 : 0);
+			assert.strictEqual(!!f.restartChoice, outcome === 'notRegistered' || outcome === 'initiallyDisabled');
 		});
 	}
 
@@ -210,11 +220,27 @@ suite('Agent Subscriptions', () => {
 				await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
 				const items = picker.firstCall.args[0];
 				assert.ok(Array.isArray(items));
-				assert.deepStrictEqual(items.map(item => item.label), ['Codex', 'Anthropic', 'Devin Subscription', 'Devin CLI']);
+				assert.deepStrictEqual(items.map(item => item.label), ['Codex', 'Anthropic', 'Devin Subscription', 'Devin CLI', 'REACH Subscription']);
 				assert.deepStrictEqual(calls, cancelled ? [] : ['connect-provider', 'connected']);
 			} finally { picker.restore(); }
 		});
 	}
+
+	test('opens REACH browser sign-in from the subscriptions picker', async () => {
+		const { instantiation, notices } = nativeClaudeFixture();
+		const quickInput = new TestQuickInputService();
+		const picker = sinon.stub(quickInput, 'pick').resolves({ id: 'reach', label: 'REACH Subscription' });
+		const signIn = sinon.stub().resolves({ id: 'reach-account', subscriptionActive: true });
+		instantiation.stub(IQuickInputService, quickInput);
+		instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({ account: { status: 'signedOut' } }));
+		instantiation.stub(IDevinSubscriptionConnection, upcastPartial<IDevinSubscriptionConnection>({ status: constObservable({ kind: 'signedOut' }) }));
+		instantiation.stub(IReachSubscriptionConnection, upcastPartial<IReachSubscriptionConnection>({ getAccount: async () => undefined, signIn }));
+		try {
+			await instantiation.invokeFunction(accessor => new AgentSubscriptionsAction().run(accessor));
+			assert.strictEqual(signIn.callCount, 1);
+			assert.deepStrictEqual(notices, ['Signed in to REACH Subscription.']);
+		} finally { picker.restore(); }
+	});
 
 	const devinStatuses: { status: DevinSubscriptionStatus; description: string }[] = [
 		{ status: { kind: 'checking' }, description: 'Checking connection' },
@@ -277,15 +303,24 @@ suite('Agent Subscriptions', () => {
 		test(`enables Codex before ${status === 'signedOut' ? 'starting official sign-in' : 'reusing the signed-in account'}`, async () => {
 			const instantiation = store.add(new TestInstantiationService());
 			const calls: unknown[] = [];
-			instantiation.stub(IConfigurationService, upcastPartial<IConfigurationService>({
-				inspect: () => ({}),
-				updateValue: async (key, value, target?) => { calls.push([key, value, target]); },
-			}));
+			const values = new TestConfigurationService({ [AgentHostCodexAgentEnabledSettingId]: false });
+			const configuration: IConfigurationService = values;
+			sinon.stub(configuration, 'updateValue').callsFake(async (key, value, target) => { calls.push([key, value, target]); await values.setUserConfiguration(key, value); });
+			instantiation.stub(IConfigurationService, values);
+			const changed = store.add(new Emitter<RootState>());
+			const registered = upcastPartial<RootState>({ agents: [{ provider: 'codex', displayName: 'Codex', description: '', models: [] }] });
+			const subscription = { value: upcastPartial<RootState>({ agents: [] }), onDidChange: changed.event };
+			instantiation.stub(IAgentHostService, upcastPartial<IAgentHostService>({ rootState: upcastPartial<IAgentHostService['rootState']>(subscription), onAgentHostStart: Event.None }));
 			instantiation.stub(ICodexAccountService, upcastPartial<ICodexAccountService>({
 				account: { status, planType: 'plus' }, signIn: () => { calls.push('signIn'); },
 			}));
 			instantiation.stub(INotificationService, upcastPartial<INotificationService>({ info: () => { calls.push('ready'); } }));
-			await instantiation.invokeFunction(connectCodexSubscription);
+			const connection = instantiation.invokeFunction(connectCodexSubscription);
+			await timeout(0);
+			assert.deepStrictEqual(calls, [[AgentHostCodexAgentEnabledSettingId, true, ConfigurationTarget.USER]]);
+			subscription.value = registered;
+			changed.fire(registered);
+			await connection;
 			assert.deepStrictEqual(calls, [[AgentHostCodexAgentEnabledSettingId, true, ConfigurationTarget.USER], status === 'signedOut' ? 'signIn' : 'ready']);
 		});
 	}
@@ -313,6 +348,8 @@ suite('Agent Subscriptions', () => {
 				instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
 				instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => host }));
 				instantiation.stub(IConfigurationService, new TestConfigurationService({ [CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING]: '/clients/Claude Code/claude.exe' }));
+				instantiation.stub(IFileService, upcastPartial<IFileService>({ exists: async () => false }));
+				instantiation.stub(ITerminalInstanceService, upcastPartial<ITerminalInstanceService>({ getBackend: async () => undefined }));
 				const terminal = upcastPartial<ITerminalInstance>({ onExit: Event.None, onDisposed: Event.None, exitCode: 1 });
 				instantiation.stub(IAgentSdkSetupService, upcastPartial<IAgentSdkSetupService>({ requestReload: () => { } }));
 				const calls: unknown[] = [];
@@ -324,7 +361,7 @@ suite('Agent Subscriptions', () => {
 				await instantiation.invokeFunction(openSubscriptionClient, provider, signIn);
 				assert.deepStrictEqual(calls, [{
 					config: {
-						name: provider === 'claude' ? 'Claude Code · Subscription' : 'Devin CLI', executable: provider === 'claude' ? '/clients/Claude Code/claude.exe' : 'devin', args: signIn ? ['auth', 'login'] : [], cwd,
+						name: provider === 'claude' ? 'Claude Code · Subscription' : 'Devin CLI', executable: provider === 'claude' ? '/clients/Claude Code/claude.exe' : 'devin', args: signIn ? provider === 'claude' ? ['auth', 'login', '--claudeai'] : ['auth', 'login'] : [], cwd,
 						env: provider === 'claude' ? { ANTHROPIC_API_KEY: null, ANTHROPIC_AUTH_TOKEN: null } : { WINDSURF_API_KEY: null }, waitOnExit: true,
 					},
 					location: TerminalLocation.Editor,
@@ -332,6 +369,33 @@ suite('Agent Subscriptions', () => {
 			});
 		}
 	}
+
+	test('starts subscription sign-in in the local home when no workspace is open', async () => {
+		const instantiation = store.add(new TestInstantiationService());
+		const host = upcastPartial<ISessionHost>({ session: constObservable(undefined), chat: constObservable(undefined) });
+		instantiation.stub(ISessionHostService, upcastPartial<ISessionHostService>({}));
+		instantiation.stub(IFocusedSessionHostService, upcastPartial<IFocusedSessionHostService>({ getFocusedHost: () => host }));
+		instantiation.stub(IWorkspaceContextService, upcastPartial<IWorkspaceContextService>({ getWorkspace: () => upcastPartial<IWorkspace>({ folders: [] }) }));
+		const home = URI.file('/local-home');
+		instantiation.stub(IPathService, new TestPathService(home));
+		instantiation.stub(IConfigurationService, new TestConfigurationService());
+		instantiation.stub(IFileService, upcastPartial<IFileService>({ exists: async uri => isWindows && uri.fsPath.toLowerCase() === 'c:\\users\\test\\appdata\\local\\devin\\cli\\bin\\devin.exe' }));
+		instantiation.stub(ITerminalInstanceService, upcastPartial<ITerminalInstanceService>({
+			getBackend: async () => upcastPartial<ITerminalBackend>({ getEnvironment: async () => ({ LocalAppData: 'C:\\Users\\test\\AppData\\Local' }) }),
+		}));
+		const terminal = upcastPartial<ITerminalInstance>({});
+		const created: unknown[] = [];
+		instantiation.stub(ITerminalService, upcastPartial<ITerminalService>({
+			createTerminal: async options => {
+				created.push(options?.config);
+				return terminal;
+			},
+			setActiveInstance: () => { },
+			revealTerminal: async () => { },
+		}));
+		await instantiation.invokeFunction(openSubscriptionClient, 'devin', true);
+		assert.deepStrictEqual(created, [{ name: 'Devin CLI', executable: isWindows ? 'C:\\Users\\test\\AppData\\Local\\devin\\cli\\bin\\devin.exe' : 'devin', args: ['auth', 'login'], cwd: home, env: { WINDSURF_API_KEY: null }, waitOnExit: true }]);
+	});
 
 	test('rejects a virtual workspace before starting a local client', async () => {
 		const instantiation = store.add(new TestInstantiationService());

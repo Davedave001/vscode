@@ -3213,6 +3213,26 @@ suite('authenticateProtectedResources', () => {
 		assert.deepStrictEqual({ requests, sharedHostToken }, { requests: [], sharedHostToken: 'other-client-token' });
 	});
 
+	test('skips resources without authorization_servers without logging unresolved session info', async () => {
+		const infoLogs: string[] = [];
+		const authService = createMockAuthService({});
+		const instantiationService = createAuthInstantiationService(disposables, authService);
+		instantiationService.stub(ILogService, new class extends NullLogService {
+			override info(message: string): void { infoLogs.push(message); }
+		}());
+		const requests: IAgentHostAuthenticateRequest[] = [];
+		const agents = [{
+			protectedResources: [{ resource: 'https://api.devin.ai', resource_name: 'Devin Subscription', required: false }],
+		}] as unknown as readonly AgentInfo[];
+
+		await instantiationService.invokeFunction(authenticateProtectedResources, agents, {
+			logPrefix: '[AgentHost]',
+			authenticate: async request => { requests.push(request); },
+		});
+
+		assert.deepStrictEqual({ requests, infoLogs }, { requests: [], infoLogs: [] });
+	});
+
 	test('repairs host authentication after an external clear without replacing the cache', async () => {
 		let sharedHostToken: string | undefined;
 		const authService = createMockAuthService({

@@ -10766,6 +10766,24 @@ suite('LocalAgentHostSessionsProvider', () => {
 		}]);
 	});
 
+	test('refreshing a focused Devin session leaves its active client to the chat handler', async () => {
+		const devin = 'devin-subscription';
+		const rawId = 'devin-session-with-gateway';
+		const workingDirectory = URI.file('/home/user/project');
+		const activeSession = observableValue<ITestSessionWithChat | undefined>('activeSession', undefined);
+		agentHost.setAgents([{ provider: devin, displayName: 'Devin Subscription', description: '', models: [] }]);
+		agentHost.addSession(createSession(rawId, { provider: devin, workingDirectory }));
+		const provider = createProvider(disposables, agentHost, undefined, { activeSession });
+		provider.getSessions();
+		await timeout(0);
+		const selected = provider.getSessions().find(session => AgentSession.id(session.resource) === rawId);
+		assert.ok(selected);
+		activeSession.set(selected as ITestSessionWithChat, undefined);
+		fireSessionAdded(agentHost, rawId, { provider: devin, workingDirectory: workingDirectory.toString(), changes: { files: 1, additions: 1, deletions: 0 } });
+		await timeout(0);
+		assert.deepStrictEqual(agentHost.dispatchedActions.filter(dispatch => dispatch.action.type === ActionType.SessionActiveClientSet), []);
+	});
+
 	test('republishes the active client after its idle session-state subscription is released', () => runWithFakedTimers<void>({ useFakeTimers: true }, async () => {
 		const activeSession = observableValue<ITestSessionWithChat | undefined>('activeSession', undefined);
 		const visibleSessions = observableValue<readonly (ITestSessionWithChat | undefined)[]>('visibleSessions', []);

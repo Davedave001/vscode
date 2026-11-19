@@ -283,7 +283,10 @@ async function doSetupNLS(): Promise<INLSConfiguration | undefined> {
 
 //#endregion
 
-export async function bootstrapESM(): Promise<void> {
+export async function bootstrapESM(urlProtocol?: string): Promise<void> {
+	if (urlProtocol) {
+		Object.assign(globalThis._VSCODE_PRODUCT_JSON, { urlProtocol });
+	}
 
 	// NLS
 	await setupNLS();

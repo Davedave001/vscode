@@ -9,7 +9,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/tes
 import { URI } from '../../../../../base/common/uri.js';
 import { AuthenticationAccessService } from '../../browser/authenticationAccessService.js';
 import { AuthenticationService } from '../../browser/authenticationService.js';
-import { AuthenticationProviderInformation, AuthenticationSessionsChangeEvent, IAuthenticationProvider } from '../../common/authentication.js';
+import { AuthenticationProviderInformation, AuthenticationSessionsChangeEvent, getDynamicAuthenticationProviderId, IAuthenticationProvider } from '../../common/authentication.js';
 import { TestEnvironmentService } from '../../../../test/browser/workbenchTestServices.js';
 import { TestExtensionService, TestProductService, TestStorageService } from '../../../../test/common/workbenchTestServices.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
@@ -134,6 +134,22 @@ suite('AuthenticationService', () => {
 			const authorizationServer = URI.parse('https://example.com');
 			const result = await authenticationService.getOrActivateProviderIdForServer(authorizationServer);
 			assert.strictEqual(result, undefined);
+		});
+
+		test('getOrActivateProviderIdForServer excludes client-scoped providers from automatic matching', async () => {
+			const issuer = URI.parse('https://auth.example');
+			const resource = { resource: 'https://mcp.example' };
+			const resourceServer = URI.parse(resource.resource);
+			const authorizationServers = [issuer];
+			const scopedId = getDynamicAuthenticationProviderId(issuer, resource, 'client/example');
+			const scoped = createProvider({ id: scopedId, authorizationServers, resourceServer, onDidChangeSessions: Event.None });
+			authenticationService.registerAuthenticationProvider(scoped.id, scoped);
+			assert.strictEqual(await authenticationService.getOrActivateProviderIdForServer(issuer, resourceServer), undefined);
+			const unscoped = createProvider({ id: getDynamicAuthenticationProviderId(issuer, resource), authorizationServers, resourceServer, onDidChangeSessions: Event.None });
+			authenticationService.registerAuthenticationProvider(unscoped.id, unscoped);
+			assert.strictEqual(await authenticationService.getOrActivateProviderIdForServer(issuer, resourceServer), unscoped.id);
+			assert.strictEqual(authenticationService.getProvider(scopedId), scoped);
+			assert.deepStrictEqual(await authenticationService.getSessions(scopedId, undefined, { authorizationServer: issuer }), []);
 		});
 
 		test('getOrActivateProviderIdForServer - should return provider id if authorizationServerGlobs matches and authorizationServers match', async () => {

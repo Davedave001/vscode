@@ -113,6 +113,7 @@ export interface IProductConfiguration {
 	readonly win32VersionedUpdate?: boolean;
 	readonly win32ContextMenu?: { readonly [arch: string]: { readonly clsid: string } };
 	readonly applicationName: string;
+	readonly openAgentsWindowByDefault?: boolean;
 	readonly linuxDesktopName?: string;
 	readonly embedderIdentifier?: string;
 	readonly agentsTelemetryAppName?: string;
@@ -268,6 +269,8 @@ export interface IProductConfiguration {
 	readonly linkProtectionTrustedDomains?: readonly string[];
 
 	readonly authClientIdMetadataUrl?: string;
+	/** Public Microsoft desktop app ID with http://localhost/oauth/callback registered for Outlook mail. */
+	readonly signalCOutlookOAuthClientId?: string;
 
 	readonly 'configurationSync.store'?: ConfigurationSyncStore;
 

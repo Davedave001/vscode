@@ -48,7 +48,7 @@ import { AccessibilityVerbositySettingId } from '../../../accessibility/browser/
 import { SuggestEnabledInput } from '../../../codeEditor/browser/suggestEnabledInput/suggestEnabledInput.js';
 import { IMcpWorkbenchService, McpServerInstallState } from '../../../mcp/common/mcpTypes.js';
 import { McpCommandIds } from '../../../mcp/common/mcpCommandIds.js';
-import { matchesSignalCAppConnection, signalCAppConnections, signalCAppConnectionSource } from '../../../mcp/common/signalCAppConnections.js';
+import { ISignalCAppConnection, matchesSignalCAppConnection, signalCAppConnections, signalCAppConnectionSource, signalCDirectMailConnections } from '../../../mcp/common/signalCAppConnections.js';
 import { CustomizationMarketplaceInstallationTarget, CustomizationMarketplaceInstallState, ICustomizationMarketplaceInstallationSnapshot, ICustomizationMarketplaceInstallService, IRecordedCustomizationMarketplaceResource, RecordedCustomizationMarketplaceInstallState } from '../../common/customizationMarketplaceInstallService.js';
 import { AICustomizationManagementSection, AICustomizationSources, IWelcomePageFeatures } from '../../common/aiCustomizationWorkspaceService.js';
 import { customizationSearchMatchesAny } from '../../common/aiCustomizationSearch.js';
@@ -532,8 +532,17 @@ function getInstallActionLabel(state: CustomizationMarketplaceInstallState, hasS
 	}
 }
 
-function getSignalCApp(resource: ICustomizationMarketplaceResource) {
-	return resource.sourceId === signalCAppConnectionSource.id ? signalCAppConnections.find(app => app.id === resource.identifier) : undefined;
+function getSignalCApp(resource: ICustomizationMarketplaceResource): ISignalCAppConnection | undefined {
+	if (resource.sourceId !== signalCAppConnectionSource.id) { return undefined; }
+	return resource.identifier === signalCDirectMailConnections.outlook.id ? signalCDirectMailConnections.outlook : signalCAppConnections.find(app => app.id === resource.identifier);
+}
+
+function getCatalogTypeLabel(resource: ICustomizationMarketplaceResource): string {
+	if (getSignalCApp(resource)?.id === signalCDirectMailConnections.outlook.id) {
+		return localize('customizationDiscovery.directAppConnection', "App connection");
+	}
+	const type = getCatalogType(resource);
+	return type ? getTypeLabel(type) : resource.mediaType;
 }
 
 function getCatalogActionLabel(resource: ICustomizationMarketplaceResource, state: CustomizationMarketplaceInstallState, hasSetupUrl: boolean): string {
@@ -759,7 +768,7 @@ class DiscoveryResultRenderer implements IListRenderer<DiscoveryListEntry, IDisc
 			? marketplaceState.uninstallUnavailableMessage
 			: marketplaceState ? getInstallationStateLabel(marketplaceState, isCopilotConnectorResource(resource)) : undefined;
 		const detail = [
-			type ? getTypeLabel(type) : !installed ? element.resource.mediaType : undefined,
+			installed ? getTypeLabel(element.type) : getCatalogTypeLabel(element.resource),
 			installed ? element.sourceLabel : this.getSourceLabel(element.resource),
 			installationDetail,
 			installed && element.disabled ? localize('customizationDiscovery.disabled', "Disabled") : undefined,
@@ -2618,7 +2627,7 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 		name.textContent = item.displayName;
 		const metadata = DOM.append(heading, $('.customization-discovery-card-metadata'));
 		metadata.textContent = [
-			type ? getTypeLabel(type) : undefined,
+			getCatalogTypeLabel(item),
 			this.getMarketplaceSourceLabel(item.sourceId),
 		].filter(Boolean).join(' · ');
 		const description = DOM.append(body, $('.customization-discovery-card-description'));
@@ -2674,7 +2683,11 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 			}
 			this.pendingInstalls.add(resourceKey);
 			try {
-				await this.commandService.executeCommand(McpCommandIds.ConnectApp, undefined, app.id);
+				if (app.id === signalCDirectMailConnections.outlook.id) {
+					await this.commandService.executeCommand(McpCommandIds.ConnectApp, undefined, app.id, 'assistant');
+				} else {
+					await this.commandService.executeCommand(McpCommandIds.ConnectApp, undefined, app.id);
+				}
 			} catch (error) {
 				if (!isCancellationError(error)) {
 					this.notificationService.error(error);
@@ -2983,10 +2996,9 @@ export class AICustomizationDiscoveryPage extends Disposable implements IAICusto
 		if (entry.linkedConnectionRole === 'alternative' && !entry.alternativeExpanded) {
 			return localize('customizationDiscovery.collapsedAlternativeAriaLabel', "1 alternative customization, collapsed");
 		}
-		const type = getCatalogType(entry.resource);
 		const state = this.getInstallState(entry.resource);
 		const verified = isVerifiedCopilotConnector(entry.resource) ? localize('customizationDiscovery.verifiedAriaLabel', ", verified by GitHub") : '';
-		return localize('customizationDiscovery.availableAriaLabel', "{0}, {1}, source {2}{3}. {4}. {5}", entry.resource.displayName, type ? getTypeLabel(type) : entry.resource.mediaType, this.getMarketplaceResourceLabel(entry.resource), verified, entry.resource.description, state.kind);
+		return localize('customizationDiscovery.availableAriaLabel', "{0}, {1}, source {2}{3}. {4}. {5}", entry.resource.displayName, getCatalogTypeLabel(entry.resource), this.getMarketplaceResourceLabel(entry.resource), verified, entry.resource.description, state.kind);
 	}
 
 	private isAlternativeExpanded(resource: ICustomizationMarketplaceResource): boolean {

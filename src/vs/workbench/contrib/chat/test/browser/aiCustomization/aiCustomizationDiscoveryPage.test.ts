@@ -33,6 +33,7 @@ import { IUserInteractionService, MockUserInteractionService } from '../../../..
 import { IChatEntitlementService } from '../../../../../services/chat/common/chatEntitlementService.js';
 import { workbenchInstantiationService } from '../../../../../test/browser/workbenchTestServices.js';
 import { IMcpWorkbenchService, IWorkbenchMcpServer, McpServerInstallState } from '../../../../mcp/common/mcpTypes.js';
+import { McpCommandIds } from '../../../../mcp/common/mcpCommandIds.js';
 import { signalCAppConnectionSource } from '../../../../mcp/common/signalCAppConnections.js';
 import { AICustomizationDiscoveryPage } from '../../../browser/aiCustomization/aiCustomizationDiscoveryPage.js';
 import { IAICustomizationItemSource, IAICustomizationListItem } from '../../../browser/aiCustomization/aiCustomizationItemSource.js';
@@ -3438,6 +3439,30 @@ suite('AICustomizationDiscoveryPage', () => {
 			await timeout(0);
 			assert.deepStrictEqual([...fixture.container.querySelectorAll('.customization-discovery-card-name')].map(item => item.textContent), ['Notion']);
 			assert.strictEqual(fixture.container.querySelector('.customization-discovery-card-actions .monaco-button')?.textContent, 'Connect');
+		} finally {
+			await browseSections.complete({ sourceId: 'agentFinder', sections: [] });
+			await fixture.requests[0].result.complete({ items: [app] });
+		}
+	});
+
+	test('connects Outlook mail straight from the built-in Browse card', async () => {
+		const browseSections = new DeferredPromise<ICustomizationMarketplaceBrowseSections>();
+		const nativeSource = signalCAppConnectionSource.id;
+		const app = resource('outlook-direct', { sourceId: nativeSource, displayName: 'Outlook / Microsoft 365 Mail' });
+		const fixture = createPage(
+			['agentFinder', nativeSource],
+			[AICustomizationManagementSection.McpServers], [], undefined, [], browseSections.p,
+			{ [nativeSource]: [app] },
+		);
+		fixture.page.setVisible(true);
+		try {
+			await timeout(0);
+			assert.match(fixture.container.querySelector('.customization-discovery-card-metadata')?.textContent ?? '', /App connection/);
+			const connect = fixture.container.querySelector<HTMLButtonElement>('.customization-discovery-card-actions .monaco-button')!;
+			assert.strictEqual(connect.textContent, 'Connect');
+			connect.click();
+			await timeout(0);
+			assert.deepStrictEqual(fixture.commands, [{ id: McpCommandIds.ConnectApp, args: [undefined, 'outlook-direct', 'assistant'] }]);
 		} finally {
 			await browseSections.complete({ sourceId: 'agentFinder', sections: [] });
 			await fixture.requests[0].result.complete({ items: [app] });

@@ -74,6 +74,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { CustomizationMarketplaceConfiguration } from '../../../../platform/customizationMarketplace/common/customizationMarketplaceSources.js';
 import { IChatEntitlementService } from '../../../services/chat/common/chatEntitlementService.js';
 import { McpCommandIds } from '../../mcp/common/mcpCommandIds.js';
+import { SignalCExtensionsMarketplaceView } from './signalCExtensionsMarketplace.js';
 
 export const ExtensionsSortByContext = new RawContextKey<string>('extensionsSortByValue', '');
 export const SearchMarketplaceExtensionsContext = new RawContextKey<boolean>('searchMarketplaceExtensions', false);
@@ -118,6 +119,14 @@ export class ExtensionsViewletViewsContribution extends Disposable implements IW
 
 	private registerViews(): void {
 		const viewDescriptors: IViewDescriptor[] = [];
+		viewDescriptors.push({
+			id: SignalCExtensionsMarketplaceView.ID,
+			name: localize2('signalCMarketplace', "Signal-C Marketplace"),
+			ctorDescriptor: new SyncDescriptor(SignalCExtensionsMarketplaceView),
+			canToggleVisibility: true,
+			order: -2,
+			weight: 80,
+		});
 
 		/* Default views */
 		viewDescriptors.push(...this.createDefaultExtensionsViewDescriptors());
@@ -971,6 +980,9 @@ export class ExtensionsViewPaneContainer extends ViewPaneContainer<IExtensionsVi
 
 	private async showExtensionsViews(views: ViewPane[]): Promise<void> {
 		await this.progress(Promise.all(views.map(async view => {
+			if (view instanceof SignalCExtensionsMarketplaceView) {
+				view.setQuery(this.normalizedQuery());
+			}
 			if (view instanceof AbstractExtensionsListView) {
 				const model = await view.show(this.normalizedQuery());
 				this.alertSearchResult(model.length, view.id);

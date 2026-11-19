@@ -15,6 +15,48 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
  */
 export const INTERNAL_AUTH_PROVIDER_PREFIX = '__';
 
+export function isGoogleWorkspaceOAuth(authorizationServer: URI, metadata: IAuthorizationServerMetadata, resource: URI | undefined): boolean {
+	return authorizationServer.scheme === 'https'
+		&& authorizationServer.authority === 'accounts.google.com'
+		&& metadata.authorization_endpoint === 'https://accounts.google.com/o/oauth2/v2/auth'
+		&& metadata.token_endpoint === 'https://oauth2.googleapis.com/token'
+		&& resource?.scheme === 'https'
+		&& /^[a-z0-9]+\.googleapis\.com$/.test(resource.authority)
+		&& /^\/mcp(?:\/v1)?\/?$/.test(resource.path);
+}
+
+/** Signal-C mailbox grants use registered desktop callbacks and their own storage namespace. */
+export const signalCMailOAuthPrefix = 'signal-c-mail:';
+
+export const signalCMailOAuth = {
+	gmail: {
+		issuer: 'https://accounts.google.com',
+		authorize: 'https://accounts.google.com/o/oauth2/v2/auth',
+		token: 'https://oauth2.googleapis.com/token',
+		resource: 'https://gmail.googleapis.com/',
+		scope: 'https://www.googleapis.com/auth/gmail.readonly',
+	},
+	outlook: {
+		issuer: 'https://login.microsoftonline.com/common/v2.0',
+		authorize: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+		token: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+		resource: 'https://graph.microsoft.com/',
+		scope: 'https://graph.microsoft.com/Mail.Read',
+	},
+} as const;
+
+export type SignalCMailProvider = keyof typeof signalCMailOAuth;
+
+export function isSignalCMailOAuth(providerId: string, authorizationServer: URI, metadata: IAuthorizationServerMetadata, resource: string | undefined): boolean {
+	const provider: SignalCMailProvider = providerId.startsWith(`${signalCMailOAuthPrefix}gmail:`) ? 'gmail' : 'outlook';
+	const config = signalCMailOAuth[provider];
+	return providerId.startsWith(`${signalCMailOAuthPrefix}${provider}:`)
+		&& authorizationServer.toString(true) === URI.parse(config.issuer).toString(true)
+		&& metadata.authorization_endpoint === config.authorize
+		&& metadata.token_endpoint === config.token
+		&& resource === config.resource;
+}
+
 /**
  * Setting that controls whether the profile image (avatar) of a signed-in account
  * is shown in account related UI.
@@ -130,8 +172,15 @@ export interface IAuthenticationProviderHostDelegate {
 	createXaa?(issuer: URI): Promise<string>;
 }
 
-export function getDynamicAuthenticationProviderId(authorizationServer: URI, resource: IAuthorizationProtectedResourceMetadata | undefined): string {
-	return resource ? `${authorizationServer.toString(true)} ${resource.resource}` : authorizationServer.toString(true);
+const dynamicProviderClientSeparator = ' client:';
+
+export function getDynamicAuthenticationProviderId(authorizationServer: URI, resource: IAuthorizationProtectedResourceMetadata | undefined, clientId?: string): string {
+	const providerId = resource ? `${authorizationServer.toString(true)} ${resource.resource}` : authorizationServer.toString(true);
+	return clientId ? `${providerId}${dynamicProviderClientSeparator}${encodeURIComponent(clientId)}` : providerId;
+}
+
+export function isClientScopedDynamicAuthenticationProviderId(providerId: string): boolean {
+	return providerId.includes(dynamicProviderClientSeparator);
 }
 
 export const IAuthenticationService = createDecorator<IAuthenticationService>('IAuthenticationService');
@@ -244,7 +293,8 @@ export interface IAuthenticationService {
 	removeSession(providerId: string, sessionId: string): Promise<void>;
 
 	/**
-	 * Gets a provider id for a specified authorization server
+	 * Gets an unscoped provider id for a specified authorization server. Callers
+	 * with an explicitly configured OAuth client can look up its provider by ID.
 	 * @param authorizationServer The authorization server url that this provider is responsible for
 	 * @param resourceServer The resource server URI that should match the provider's resourceServer (if defined)
 	 */

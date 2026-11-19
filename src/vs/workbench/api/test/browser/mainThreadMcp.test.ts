@@ -21,6 +21,7 @@ import { NullLogService } from '../../../../platform/log/common/log.js';
 import { IMcpServerMatcher } from '../../../../platform/mcp/common/allowedMcpServers.js';
 import { AllowedMcpServersService } from '../../../../platform/mcp/common/allowedMcpServersService.js';
 import { IAllowedMcpServersService, mcpAccessConfig, mcpAllowedServersConfig, mcpDeniedServersConfig, McpAccessValue } from '../../../../platform/mcp/common/mcpManagement.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { StorageScope } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
@@ -32,7 +33,7 @@ import { MCP } from '../../../contrib/mcp/common/modelContextProtocol.js';
 import { IAuthenticationMcpAccessService } from '../../../services/authentication/browser/authenticationMcpAccessService.js';
 import { IAuthenticationMcpService } from '../../../services/authentication/browser/authenticationMcpService.js';
 import { IAuthenticationMcpUsageService } from '../../../services/authentication/browser/authenticationMcpUsageService.js';
-import { AuthenticationSession, AuthenticationSessionsChangeEvent, IAuthenticationGetSessionsOptions, IAuthenticationProvider, IAuthenticationService, IAuthenticationWwwAuthenticateRequest } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, AuthenticationSessionsChangeEvent, getDynamicAuthenticationProviderId, IAuthenticationGetSessionsOptions, IAuthenticationProvider, IAuthenticationService, IAuthenticationWwwAuthenticateRequest } from '../../../services/authentication/common/authentication.js';
 import { IDynamicAuthenticationProviderStorageService } from '../../../services/authentication/common/dynamicAuthenticationProviderStorage.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { TestExtensionService } from '../../../test/common/workbenchTestServices.js';
@@ -57,6 +58,7 @@ function createMainThreadMcp(disposables: Pick<DisposableStore, 'add'>, proxy: P
 	services.stub(IWorkbenchMcpGatewayService, {});
 	services.stub(IConfigurationService, {});
 	services.stub(ISecretStorageService, {});
+	services.stub(IQuickInputService, {});
 	services.stub(IAllowedMcpServersService, {
 		onDidChangeAllowedMcpServers: Event.None,
 		isServerAllowed: () => true,
@@ -386,6 +388,9 @@ suite('MainThreadMcp - re-validation', () => {
 			override isDynamicAuthenticationProvider(): boolean {
 				return false;
 			}
+			override isAuthenticationProviderRegistered(id: string): boolean {
+				return id === 'test-provider';
+			}
 			override getProvider(id: string): IAuthenticationProvider {
 				return new class extends mock<IAuthenticationProvider>() {
 					override readonly id = id;
@@ -500,6 +505,149 @@ suite('MainThreadMcp - re-validation', () => {
 
 	test('revalidates clients without a secret-storage key without reading secret storage', async () => {
 		await assertRevalidationContext(false, undefined);
+	});
+});
+
+suite('MainThreadMcp - explicit OAuth clients', () => {
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('prompts once for a missing Google Workspace client secret only on an interactive connection', async () => {
+		const authorizationServer = URI.parse('https://accounts.google.com');
+		const uri = URI.parse('https://gmailmcp.googleapis.com/mcp/v1');
+		const key = mcpOAuthClientSecretStorageKey(uri.toString(true), 'gmail-client');
+		let value: string | undefined;
+		let promptCount = 0;
+		const registeredSecrets: (string | undefined)[] = [];
+		let delegate: IMcpHostDelegate | undefined;
+		const registry = new class extends mock<IMcpRegistry>() {
+			override readonly collections = observableValue<readonly McpCollectionDefinition[]>('collections', []);
+			override registerDelegate(value: IMcpHostDelegate) { delegate = value; return { dispose() { } }; }
+		};
+		const mainThread = createMainThreadMcp(disposables, { $onDidChangeMcpServerDefinitions() { }, $startMcp() { } }, registry, services => {
+			services.stub(IAuthenticationService, {
+				onDidChangeSessions: Event.None,
+				getOrActivateProviderIdForServer: async () => undefined,
+				isDynamicAuthenticationProvider: () => false,
+				isAuthenticationProviderRegistered: () => false,
+				createDynamicAuthenticationProvider: async (_server, _metadata, _resource, _client, secret) => {
+					registeredSecrets.push(secret);
+					return undefined;
+				},
+			});
+			services.stub(IDynamicAuthenticationProviderStorageService, { getClientRegistration: async () => undefined });
+			services.stub(ISecretStorageService, {
+				get: async requestKey => { assert.strictEqual(requestKey, key); return value; },
+				set: async (requestKey, secret) => { assert.strictEqual(requestKey, key); value = secret; },
+			});
+			services.stub(IQuickInputService, {
+				input: async options => {
+					promptCount++;
+					assert.strictEqual(options?.password, true);
+					return 'fixture-google-secret';
+				},
+			});
+		});
+		const launch: McpServerLaunch = { type: McpServerTransportType.HTTP, uri, headers: [] };
+		const definition: McpServerDefinition = { id: 'gmail', label: 'Gmail', launch, cacheNonce: 'fixture' };
+		const collection: McpCollectionDefinition = {
+			id: 'fixtures', label: 'Fixtures', remoteAuthority: null,
+			serverDefinitions: observableValue<readonly McpServerDefinition[]>('definitions', [definition]),
+			trustBehavior: McpServerTrust.Kind.Trusted, scope: StorageScope.PROFILE,
+			configTarget: ConfigurationTarget.USER_LOCAL, order: McpCollectionSortOrder.Extension,
+		};
+		assert.ok(delegate);
+		delegate.start(collection, definition, launch, {});
+		const details: IMcpAuthenticationDetails = {
+			authorizationServer, clientId: 'gmail-client', resourceMetadata: { resource: uri.toString(true) }, scopes: ['read'],
+			authorizationServerMetadata: {
+				issuer: authorizationServer.toString(true), response_types_supported: ['code'],
+				authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+				token_endpoint: 'https://oauth2.googleapis.com/token',
+			},
+		};
+		await assert.rejects(mainThread.$getTokenFromServerMetadata(1, details, { errorOnUserInteraction: true }), /User interaction required: authentication/);
+		assert.deepStrictEqual({ promptCount, value, registeredSecrets }, { promptCount: 0, value: undefined, registeredSecrets: [] });
+		await Promise.all([mainThread.$getTokenFromServerMetadata(1, details), mainThread.$getTokenFromServerMetadata(1, details)]);
+		assert.deepStrictEqual({ promptCount, value, registeredSecrets }, {
+			promptCount: 1, value: 'fixture-google-secret', registeredSecrets: ['fixture-google-secret', 'fixture-google-secret'],
+		});
+	});
+
+	test('retains a matching legacy sign-in, separates concurrent client registrations and rotates only the selected client', async () => {
+		const authority = URI.parse('https://auth.example');
+		const uri = URI.parse('https://mcp.example/mcp');
+		const resource = { resource: uri.toString(true) };
+		const legacyId = getDynamicAuthenticationProviderId(authority, resource);
+		const secondId = getDynamicAuthenticationProviderId(authority, resource, 'engineering');
+		const registrations = new Map<string, { clientId: string; clientSecret?: string }>([[legacyId, { clientId: 'support' }]]);
+		const tokens = new Map<string, string>([[legacyId, 'support-session']]);
+		const removed: string[] = [];
+		const created: { id: string; clientId: string; clientSecret?: string }[] = [];
+		const clientSecrets = new Map<string, string>();
+		let delegate: IMcpHostDelegate | undefined;
+		const mcpRegistry = new class extends mock<IMcpRegistry>() {
+			override readonly collections = observableValue<readonly McpCollectionDefinition[]>('collections', []);
+			override registerDelegate(value: IMcpHostDelegate) { delegate = value; return { dispose() { } }; }
+		};
+		function provider(id: string): IAuthenticationProvider {
+			return new class extends mock<IAuthenticationProvider>() {
+				override readonly id = id;
+				override readonly label = 'Fixture provider';
+				override readonly supportsMultipleAccounts = false;
+			};
+		}
+		const mainThread = createMainThreadMcp(disposables, { $onDidChangeMcpServerDefinitions() { }, $startMcp() { } }, mcpRegistry, services => {
+			services.stub(IAuthenticationService, {
+				onDidChangeSessions: Event.None,
+				getOrActivateProviderIdForServer: async () => legacyId,
+				isDynamicAuthenticationProvider: id => tokens.has(id),
+				unregisterAuthenticationProvider: id => { tokens.delete(id); },
+				createDynamicAuthenticationProvider: async (_authority, _metadata, _resource, clientId, clientSecret, id) => {
+					assert.ok(id && clientId);
+					assert.strictEqual(tokens.has(id), false);
+					await Promise.resolve();
+					registrations.set(id, { clientId, clientSecret });
+					created.push({ id, clientId, clientSecret });
+					tokens.set(id, `${clientId}-session-${created.length}`);
+					return provider(id);
+				},
+				getProvider: provider,
+				getSessions: async id => {
+					const accessToken = tokens.get(id);
+					assert.ok(accessToken);
+					return [{ id: accessToken, accessToken, account: { id: 'workspace', label: 'Same workspace label' }, scopes: ['read'] }];
+				},
+			});
+			services.stub(IDynamicAuthenticationProviderStorageService, {
+				getClientRegistration: async id => registrations.get(id),
+				removeDynamicProvider: async id => { removed.push(id); registrations.delete(id); },
+			});
+			services.stub(ISecretStorageService, { get: async key => clientSecrets.get(key) });
+			services.stub(IAuthenticationMcpService, { getAccountPreference: () => undefined });
+			services.stub(IAuthenticationMcpAccessService, { isAccessAllowedForUrl: () => true });
+			services.stub(IAuthenticationMcpUsageService, { addAccountUsage() { } });
+		});
+		const launch: McpServerLaunch = { type: McpServerTransportType.HTTP, uri, headers: [] };
+		const definitions = ['support', 'engineering', 'engineering-copy'].map(name => ({ id: name, label: name, launch, cacheNonce: 'fixture' }));
+		const collection: McpCollectionDefinition = {
+			id: 'fixtures', label: 'Fixtures', remoteAuthority: null, serverDefinitions: observableValue<readonly McpServerDefinition[]>('definitions', definitions),
+			trustBehavior: McpServerTrust.Kind.Trusted, scope: StorageScope.PROFILE, configTarget: ConfigurationTarget.USER_LOCAL, order: McpCollectionSortOrder.Extension,
+		};
+		assert.ok(delegate);
+		for (const definition of definitions) { delegate.start(collection, definition, launch, {}); }
+		const getToken = (id: number, clientId: string) => mainThread.$getTokenFromServerMetadata(id, {
+			authorizationServer: authority,
+			authorizationServerMetadata: { issuer: authority.toString(true), response_types_supported: ['code'] },
+			resourceMetadata: resource, scopes: ['read'], clientId,
+		});
+		assert.strictEqual(await getToken(1, 'support'), 'support-session');
+		assert.deepStrictEqual(await Promise.all([getToken(2, 'engineering'), getToken(3, 'engineering')]), ['engineering-session-1', 'engineering-session-1']);
+		assert.deepStrictEqual(created, [{ id: secondId, clientId: 'engineering', clientSecret: undefined }]);
+		clientSecrets.set(mcpOAuthClientSecretStorageKey(uri.toString(true), 'engineering'), 'rotated-engineering-secret');
+		assert.strictEqual(await getToken(2, 'engineering'), 'engineering-session-2');
+		assert.deepStrictEqual(removed, [secondId]);
+		assert.strictEqual(await getToken(1, 'support'), 'support-session');
+		assert.deepStrictEqual(registrations.get(secondId), { clientId: 'engineering', clientSecret: 'rotated-engineering-secret' });
 	});
 });
 

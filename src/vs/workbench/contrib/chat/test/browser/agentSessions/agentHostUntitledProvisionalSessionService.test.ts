@@ -892,6 +892,24 @@ suite('AgentHostUntitledProvisionalSessionService', () => {
 		});
 	});
 
+	test('a rebound Devin draft leaves active-client updates to the live chat', async () => {
+		const provider = 'devin-subscription';
+		const ui = untitledChatUri('devin-gateway').with({ scheme: `agent-host-${provider}` });
+		const real = ui.with({ path: '/real-devin-gateway' });
+		const backend = await provisional.getOrCreate(ui, provider, URI.file('/repo'));
+		assert.ok(backend);
+		const publishCount = agentHost.dispatched.filter(action => action.type === ActionType.SessionActiveClientSet).length;
+		assert.ok(publishCount > 0, 'The draft should publish its initial snapshot');
+
+		const rebound = await provisional.tryRebind(ui, real, provider);
+		customizations.set([{ type: CustomizationType.Plugin, id: 'plugin:late', uri: 'file:///plugins/late', name: 'Late' }], undefined);
+
+		assert.deepStrictEqual({
+			rebound: rebound?.toString(),
+			publishCount: agentHost.dispatched.filter(action => action.type === ActionType.SessionActiveClientSet).length,
+		}, { rebound: backend.toString(), publishCount });
+	});
+
 	test('config changes after graduation reach the retained backend without recreating it', async () => {
 		const ui = untitledChatUri('retained-config');
 		const real = ui.with({ path: '/real-retained-config' });

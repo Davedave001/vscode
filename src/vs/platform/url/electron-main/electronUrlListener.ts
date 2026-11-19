@@ -13,7 +13,7 @@ import { IEnvironmentMainService } from '../../environment/electron-main/environ
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
 import { IURLService } from '../common/url.js';
-import { getWindowsProtocolHandlerArguments } from '../node/protocolHandlerArguments.js';
+import { getWindowsProtocolHandlerArguments, SIGNAL_C_PROTOCOL } from '../node/protocolHandlerArguments.js';
 import { IProtocolUrl } from './url.js';
 import { IWindowsMainService } from '../../windows/electron-main/windows.js';
 
@@ -53,8 +53,12 @@ export class ElectronURLListener extends Disposable {
 		// Skip in portable mode: the registered command wouldn't preserve
 		// portable mode settings, causing issues with OAuth flows.
 		if (isWindows && !environmentMainService.isPortable) {
-			const windowsParameters = getWindowsProtocolHandlerArguments(environmentMainService);
-			app.setAsDefaultProtocolClient(productService.urlProtocol, process.execPath, windowsParameters);
+			const protocol = productService.urlProtocol;
+			// Keep the installed Signal-C association when another copy of the app is opened.
+			if (protocol !== SIGNAL_C_PROTOCOL || !app.getApplicationNameForProtocol(`${protocol}://`)) {
+				const windowsParameters = getWindowsProtocolHandlerArguments(environmentMainService, protocol);
+				app.setAsDefaultProtocolClient(protocol, process.execPath, windowsParameters);
+			}
 		}
 
 		// macOS: listen to `open-url` events from here on to handle

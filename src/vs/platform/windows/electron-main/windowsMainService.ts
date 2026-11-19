@@ -19,9 +19,10 @@ import { basename, join, normalize, posix } from '../../../base/common/path.js';
 import { getMarks, mark } from '../../../base/common/performance.js';
 import { IProcessEnvironment, isMacintosh, isWindows, OS } from '../../../base/common/platform.js';
 import { cwd } from '../../../base/common/process.js';
-import { extUri, extUriBiasedIgnorePathCase, isEqual, isEqualAuthority, normalizePath, originalFSPath, removeTrailingPathSeparator } from '../../../base/common/resources.js';
+import { extUriBiasedIgnorePathCase, isEqual, isEqualAuthority, normalizePath, originalFSPath, removeTrailingPathSeparator } from '../../../base/common/resources.js';
 import { assertReturnsDefined } from '../../../base/common/types.js';
 import { URI } from '../../../base/common/uri.js';
+import type { IOpenAgentsWindowOptions } from '../../native/common/native.js';
 import { getNLSLanguage, getNLSMessages, localize } from '../../../nls.js';
 import { IBackupMainService } from '../../backup/electron-main/backup.js';
 import { IEmptyWindowBackupInfo } from '../../backup/node/backup.js';
@@ -50,7 +51,7 @@ import { IWorkspacesHistoryMainService } from '../../workspaces/electron-main/wo
 import { IWorkspacesManagementMainService } from '../../workspaces/electron-main/workspacesManagementMainService.js';
 import { ICodeWindow, UnloadReason } from '../../window/electron-main/window.js';
 import { IThemeMainService } from '../../theme/electron-main/themeMainService.js';
-import { IEditorOptions, ITextEditorOptions } from '../../editor/common/editor.js';
+import { IEditorOptions, ITextEditorOptions, ITextEditorSelection } from '../../editor/common/editor.js';
 import { IUserDataProfile } from '../../userDataProfile/common/userDataProfile.js';
 import { IPolicyService } from '../../policy/common/policy.js';
 import { IUserDataProfilesMainService } from '../../userDataProfile/electron-main/userDataProfile.js';
@@ -175,8 +176,26 @@ interface ISingleFolderWorkspacePathToOpen extends IPathToOpen {
 	readonly workspace: ISingleFolderWorkspaceIdentifier;
 }
 
+interface IEditorWorkspaceSnapshot {
+	readonly folders: readonly { readonly uri: URI; readonly name: string }[];
+	readonly activeFile?: URI;
+	readonly selection?: ITextEditorSelection;
+	readonly activeFileViewState?: object;
+	readonly activeEditorGroupId?: number;
+	readonly activeEditorTab?: NonNullable<IOpenAgentsWindowOptions['editorWorkspace']>['activeEditorTab'];
+	readonly activeDiff?: { readonly original: URI; readonly modified: URI; readonly viewState?: object };
+}
+
+type RecoveredEditor = [IPathToOpen<ITextEditorOptions>] | [IPathToOpen<ITextEditorOptions>, IPathToOpen<ITextEditorOptions>];
+
+interface IOriginatingEditorPath {
+	readonly path: IWorkspacePathToOpen | ISingleFolderWorkspacePathToOpen;
+	readonly recoveredEditor?: RecoveredEditor;
+}
+
 type EditorHandoffOrigin =
-	| { readonly kind: 'workspace'; readonly windowId: number; readonly workspace: IWorkspaceIdentifier; readonly folder: URI }
+	| { readonly kind: 'workspace'; readonly windowId: number; readonly workspace: IWorkspaceIdentifier; readonly selectedFolder: URI; readonly snapshot?: IEditorWorkspaceSnapshot }
+	| { readonly kind: 'folder'; readonly selectedFolder: URI; readonly remoteAuthority: string | undefined; readonly snapshot?: IEditorWorkspaceSnapshot }
 	| { readonly kind: 'folderless'; readonly windowId: number; readonly backupPath: string; readonly remoteAuthority: string | undefined };
 
 function isWorkspacePathToOpen(path: IPathToOpen | undefined): path is IWorkspacePathToOpen {
@@ -221,7 +240,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 	readonly onDidTriggerSystemContextMenu = this._onDidTriggerSystemContextMenu.event;
 
 	private readonly windows = new Map<number, ICodeWindow>();
-	private readonly editorHandoffOrigins = new WeakMap<ICodeWindow, EditorHandoffOrigin>();
+	private readonly editorHandoffOrigins = new WeakMap<ICodeWindow, readonly EditorHandoffOrigin[]>();
 
 	private readonly windowsStateHandler: WindowsStateHandler;
 
@@ -313,16 +332,32 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		this.handleChatRequest(openConfig, [window]);
 	}
 
-	async openAgentsWindow(openConfig: IOpenConfiguration, folderUri?: URI, reveal?: URI | 'new', source?: AgentsWindowOpenSource, folderUriIsDefault = false, draft?: IAgentsWindowDraft, onboardingSessionResource?: URI, revealRemoteAuthority?: string): Promise<ICodeWindow[]> {
+	async openAgentsWindow(openConfig: IOpenConfiguration, folderUri?: URI, reveal?: URI | 'new', source?: AgentsWindowOpenSource, folderUriIsDefault = false, draft?: IAgentsWindowDraft, onboardingSessionResource?: URI, revealRemoteAuthority?: string, preserveEditorHandoff = false, editorWorkspace?: IOpenAgentsWindowOptions['editorWorkspace']): Promise<ICodeWindow[]> {
 		this.logService.trace('windowsManager#openAgentsWindow');
 
-		const isModeSwitch = openConfig.context === OpenContext.API && (source === AgentsWindowOpenSource.TitleBar || source === AgentsWindowOpenSource.CommandPalette || source === AgentsWindowOpenSource.KeyboardShortcut);
+		const isModeSwitch = openConfig.context === OpenContext.API && (source === AgentsWindowOpenSource.TitleBar || source === AgentsWindowOpenSource.CommandPalette || source === AgentsWindowOpenSource.KeyboardShortcut || source === AgentsWindowOpenSource.Explorer);
 		const editor = isModeSwitch && openConfig.contextWindowId !== undefined ? this.getWindowById(openConfig.contextWindowId) : undefined;
 		let origin: EditorHandoffOrigin | undefined;
 		if (editor?.config && !editor.config.isSessionsWindow && !editor.isExtensionDevelopmentHost) {
 			const workspace = editor.openedWorkspace;
+			const snapshot = !editor.remoteAuthority && editorWorkspace ? {
+				folders: editorWorkspace.folders.map(({ uri, name }) => ({ uri: URI.revive(uri), name })),
+				activeFile: URI.revive(editorWorkspace.activeFile),
+				selection: editorWorkspace.activeFileSelection,
+				activeEditorGroupId: editorWorkspace.activeEditorGroupId,
+				activeEditorTab: editorWorkspace.activeEditorTab,
+				activeFileViewState: editorWorkspace.activeFileViewState,
+				activeDiff: editorWorkspace.activeDiff && {
+					original: URI.revive(editorWorkspace.activeDiff.original),
+					modified: URI.revive(editorWorkspace.activeDiff.modified),
+					viewState: editorWorkspace.activeDiff.viewState,
+				},
+			} : undefined;
 			if (folderUri && isWorkspaceIdentifier(workspace)) {
-				origin = { kind: 'workspace', windowId: editor.id, workspace: { id: workspace.id, configPath: workspace.configPath }, folder: folderUri };
+				origin = { kind: 'workspace', windowId: editor.id, workspace: { id: workspace.id, configPath: workspace.configPath }, selectedFolder: folderUri, snapshot };
+			} else if (folderUri && isSingleFolderWorkspaceIdentifier(workspace) && extUriBiasedIgnorePathCase.isEqual(workspace.uri, folderUri)) {
+				const singleFolderSnapshot = snapshot?.folders.length === 1 && extUriBiasedIgnorePathCase.isEqual(snapshot.folders[0].uri, workspace.uri) ? snapshot : undefined;
+				origin = { kind: 'folder', selectedFolder: folderUri, remoteAuthority: editor.remoteAuthority, snapshot: singleFolderSnapshot };
 			} else if (!workspace && editor.backupPath) {
 				origin = { kind: 'folderless', windowId: editor.id, backupPath: editor.backupPath, remoteAuthority: editor.remoteAuthority };
 			}
@@ -334,14 +369,33 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		// Open in a new browser window with the agent sessions workspace
 		const windows = await this.open(await this.ensureAgentsWindow(openConfig));
 
-		if (windows.length > 0) {
-			if (origin) {
-				this.editorHandoffOrigins.set(windows[0], origin);
-			} else if (isModeSwitch || openConfig.context !== OpenContext.API || reveal !== undefined) {
-				// A new handoff can change the workspace. A focus-only open leaves the current context in place.
-				this.editorHandoffOrigins.delete(windows[0]);
+		const [window] = windows;
+		if (window) {
+			const isExistingWindow = existingWindows.includes(window);
+			const desktopReveal = openConfig.context === OpenContext.DESKTOP && !folderUri;
+			const keepOrigin = isExistingWindow && reveal === undefined && (desktopReveal || (preserveEditorHandoff && openConfig.context === OpenContext.API));
+			if (!keepOrigin) {
+				if (isModeSwitch && isExistingWindow && folderUri && reveal === undefined) {
+					// A warm switch can leave an Agents draft in an earlier workspace. Retain its return target.
+					const previousOrigins = this.editorHandoffOrigins.get(window)?.filter(entry => {
+						if (entry.kind === 'workspace') {
+							return origin?.kind !== 'workspace' || entry.workspace.id !== origin.workspace.id;
+						}
+						return entry.kind === 'folder' && (origin?.kind !== 'folder'
+							|| !isEqualAuthority(entry.remoteAuthority, origin.remoteAuthority)
+							|| !extUriBiasedIgnorePathCase.isEqual(entry.selectedFolder, origin.selectedFolder));
+					}) ?? [];
+					this.editorHandoffOrigins.set(window, origin ? [origin, ...previousOrigins] : previousOrigins);
+				} else if (origin) {
+					this.editorHandoffOrigins.set(window, [origin]);
+				} else if (isModeSwitch || openConfig.context !== OpenContext.API || reveal !== undefined) {
+					this.editorHandoffOrigins.delete(window);
+				}
 			}
-			sendAgentsWindowOpenIntent(windows[0], existingWindows.includes(windows[0]), openConfig, { folderUri, reveal, revealRemoteAuthority, source, folderUriIsDefault, draft, onboardingSessionResource });
+			sendAgentsWindowOpenIntent(window, isExistingWindow, openConfig, {
+				folderUri, reveal, revealRemoteAuthority, source, folderUriIsDefault, draft, onboardingSessionResource, preserveEditorHandoff,
+				editorWorkspace: editor?.config && !editor.config.isSessionsWindow && !editor.isExtensionDevelopmentHost && !editor.remoteAuthority && folderUri ? editorWorkspace : undefined,
+			});
 		}
 
 		return windows;
@@ -395,7 +449,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		let maybeOpenEmptyWindow = false;
 
 		// Identify things to open from open config
-		const { pathsToOpen, requestedPaths } = await this.getPathsToOpen(openConfig);
+		const { pathsToOpen, requestedPaths, restoreDiff } = await this.getPathsToOpen(openConfig);
 		this.logService.trace('windowsManager#open pathsToOpen', pathsToOpen);
 		for (const path of pathsToOpen) {
 			if (isSingleFolderWorkspacePathToOpen(path)) {
@@ -424,8 +478,8 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			}
 		}
 
-		// When run with --diff, take the first 2 files to open as files to diff
-		if (openConfig.diffMode && filesToOpen && filesToOpen.filesToOpenOrCreate.length >= 2) {
+		// An explicit diff request or a recovered comparison opens the ordered file pair together.
+		if ((openConfig.diffMode || restoreDiff) && filesToOpen && filesToOpen.filesToOpenOrCreate.length >= 2) {
 			filesToOpen.filesToDiff = filesToOpen.filesToOpenOrCreate.slice(0, 2);
 			filesToOpen.filesToOpenOrCreate = [];
 		}
@@ -919,8 +973,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		});
 	}
 
-	private async getPathsToOpen(openConfig: IOpenConfiguration): Promise<{ readonly pathsToOpen: IPathToOpen[]; readonly requestedPaths: readonly IPathToOpen[] }> {
+	private async getPathsToOpen(openConfig: IOpenConfiguration): Promise<{ readonly pathsToOpen: IPathToOpen[]; readonly requestedPaths: readonly IPathToOpen[]; readonly restoreDiff: boolean }> {
 		let pathsToOpen: IPathToOpen[];
+		let recoveredEditor: RecoveredEditor | undefined;
 		let isCommandLineOrAPICall = false;
 		let isRestoringPaths = false;
 
@@ -955,15 +1010,21 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			isRestoringPaths = true;
 		}
 
-		if (openConfig.context === OpenContext.API && openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && pathsToOpen.length > 0 && pathsToOpen.every(isSingleFolderWorkspacePathToOpen)) {
-			const preferredWorkspace = await this.doGetOriginatingEditorWorkspace(openConfig.contextWindowId, pathsToOpen);
-			if (preferredWorkspace) {
-				pathsToOpen = [preferredWorkspace];
+		const originatingEditor = openConfig.context === OpenContext.API && openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && pathsToOpen.length > 0 && pathsToOpen.every(isSingleFolderWorkspacePathToOpen)
+			? await this.doGetOriginatingEditorPath(openConfig.contextWindowId, pathsToOpen) : undefined;
+		if (originatingEditor) {
+			const { path, recoveredEditor: editorToRestore } = originatingEditor;
+			pathsToOpen = [path];
+			if (editorToRestore) {
+				const target = isWorkspacePathToOpen(path) ? path.workspace.configPath : path.workspace.uri;
+				if (!findWindowOnWorkspaceOrFolder(this.getWindows(), target)) {
+					recoveredEditor = editorToRestore;
+				}
 			}
 		}
 
 		// A mode handoff can return to a multi-root editor that already contains its active folder.
-		if (openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && isCommandLineOrAPICall && pathsToOpen.length === 1) {
+		if (!originatingEditor && openConfig.reuseWorkspaceContainingFolder && !openConfig.addMode && !openConfig.removeMode && isCommandLineOrAPICall && pathsToOpen.length === 1) {
 			const folder = pathsToOpen[0];
 			if (isSingleFolderWorkspacePathToOpen(folder) && !findWindowOnWorkspaceOrFolder(this.getWindows(), folder.workspace.uri)) {
 				const workspace = await this.doGetOpenWorkspaceMatchingFolders(folder.remoteAuthority, [folder], { allowAdditionalFolders: true, preferRecentlyFocused: true });
@@ -988,7 +1049,11 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 					if (workspaceMatchingFolders) {
 						workspace = workspaceMatchingFolders;
 					} else {
-						workspace = await this.workspacesManagementMainService.createUntitledWorkspace(foldersToOpen.map(folder => ({ uri: folder.workspace.uri })));
+						const snapshot = openConfig.context === OpenContext.API && openConfig.reuseWorkspaceContainingFolder && !remoteAuthority
+							&& pathsToOpen.length === foldersToOpen.length
+							? this.getClosedEditorWorkspaceSnapshot(openConfig.contextWindowId, foldersToOpen) : undefined;
+						workspace = await this.workspacesManagementMainService.createUntitledWorkspace(snapshot ? [...snapshot.folders] : foldersToOpen.map(folder => ({ uri: folder.workspace.uri })));
+						recoveredEditor = await this.doResolveRecoveredEditor(snapshot);
 					}
 
 					// Add workspace and remove folders thereby
@@ -1000,6 +1065,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 		// The paths that were asked for, without windows restored next to them
 		const requestedPaths = isCommandLineOrAPICall ? [...pathsToOpen] : [];
+		if (recoveredEditor) {
+			pathsToOpen.push(...recoveredEditor);
+		}
 
 		// Check for `window.restoreWindows` setting to include all windows
 		// from the previous session if this is the initial startup and we have
@@ -1011,7 +1079,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			pathsToOpen.unshift(...lastSessionPaths.filter(path => isWorkspacePathToOpen(path) || isSingleFolderWorkspacePathToOpen(path) || path.backupPath));
 		}
 
-		return { pathsToOpen, requestedPaths };
+		return { pathsToOpen, requestedPaths, restoreDiff: recoveredEditor?.length === 2 };
 	}
 
 	private async doExtractPathsFromAPI(openConfig: IOpenConfiguration): Promise<IPathToOpen[]> {
@@ -1197,7 +1265,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 	private getOriginatingFolderlessEditor(openConfig: IOpenEmptyConfiguration, remoteAuthority: string | undefined): ICodeWindow | undefined {
 		const agents = openConfig.context === OpenContext.API && openConfig.contextWindowId !== undefined ? this.getWindowById(openConfig.contextWindowId) : undefined;
-		const origin = agents && this.editorHandoffOrigins.get(agents);
+		const origin = agents && this.editorHandoffOrigins.get(agents)?.[0];
 		if (origin?.kind !== 'folderless' || origin.remoteAuthority !== remoteAuthority) {
 			return undefined;
 		}
@@ -1206,28 +1274,95 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		return editor && !editor.openedWorkspace && editor.backupPath === origin.backupPath ? findWindowForEmptyHandoff([editor], remoteAuthority) : undefined;
 	}
 
-	private async doGetOriginatingEditorWorkspace(contextWindowId: number | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IWorkspacePathToOpen | undefined> {
+	private async doGetOriginatingEditorPath(contextWindowId: number | undefined, folders: ISingleFolderWorkspacePathToOpen[]): Promise<IOriginatingEditorPath | undefined> {
 		const agents = contextWindowId !== undefined ? this.getWindowById(contextWindowId) : undefined;
-		const origin = agents && this.editorHandoffOrigins.get(agents);
-		if (!agents || origin?.kind !== 'workspace') {
+		const origins = agents && this.editorHandoffOrigins.get(agents);
+		if (!agents || !origins || folders.length === 0) {
 			return undefined;
+		}
+		const remoteAuthority = folders[0].remoteAuthority;
+		if (folders.some(folder => folder.remoteAuthority !== remoteAuthority)) {
+			return undefined;
+		}
+		const newerFolders: URI[] = [];
+		for (const origin of origins) {
+			if (origin.kind === 'folder' && isEqualAuthority(origin.remoteAuthority, remoteAuthority)) {
+				if (folders.length === 1 && extUriBiasedIgnorePathCase.isEqual(origin.selectedFolder, folders[0].workspace.uri)) {
+					const path = folders[0];
+					const recoveredEditor = findWindowOnWorkspaceOrFolder(this.getWindows(), path.workspace.uri)
+						? undefined : await this.doResolveRecoveredEditor(origin.snapshot);
+					return this.editorHandoffOrigins.get(agents) === origins ? { path, recoveredEditor } : undefined;
+				}
+				newerFolders.push(origin.selectedFolder);
+			}
+			if (origin.kind !== 'workspace') {
+				continue;
+			}
+			const result = await this.doResolveOriginatingEditorWorkspace(origin, folders, remoteAuthority, newerFolders);
+			if (this.editorHandoffOrigins.get(agents) !== origins) {
+				return undefined;
+			}
+			if (result) {
+				return result;
+			}
+			newerFolders.push(origin.selectedFolder);
+		}
+		return undefined;
+	}
+
+	private async doResolveRecoveredEditor(snapshot: IEditorWorkspaceSnapshot | undefined): Promise<RecoveredEditor | undefined> {
+		const activeFile = snapshot?.activeFile;
+		if (!snapshot || !activeFile) { return undefined; }
+		const isWorkspaceFile = (uri: URI) => uri.scheme === Schemas.file && snapshot.folders.some(folder => extUriBiasedIgnorePathCase.isEqualOrParent(uri, folder.uri));
+		if (!isWorkspaceFile(activeFile)) { return undefined; }
+
+		const tabOptions = { pinned: snapshot.activeEditorTab?.pinned ?? true, sticky: snapshot.activeEditorTab?.sticky };
+		const diff = snapshot.activeDiff;
+		if (diff && isWorkspaceFile(diff.original) && isWorkspaceFile(diff.modified)) {
+			const [original, modified] = await Promise.all([
+				this.resolveOpenable({ fileUri: diff.original }),
+				this.resolveOpenable({ fileUri: diff.modified }),
+			]);
+			if (original?.fileUri && original.exists && modified?.fileUri && modified.exists) {
+				return [original, { ...modified, options: { ...tabOptions, viewState: diff.viewState }, restoreEditorGroupId: snapshot.activeEditorGroupId }];
+			}
 		}
 
-		const remoteAuthority = folders[0]?.remoteAuthority;
-		const resources = origin.folder.scheme === Schemas.file ? extUriBiasedIgnorePathCase : extUri;
-		if (!folders.some(folder => resources.isEqual(folder.workspace.uri, origin.folder)) || folders.some(folder => folder.remoteAuthority !== remoteAuthority)) {
+		const path = await this.resolveOpenable({ fileUri: activeFile });
+		if (!path?.fileUri || !path.exists) {
 			return undefined;
 		}
+		const options: ITextEditorOptions = snapshot.activeFileViewState
+			? { ...tabOptions, viewState: snapshot.activeFileViewState, preserveViewStateContributions: true }
+			: { ...tabOptions, selection: snapshot.selection };
+		return [{ ...path, options, restoreEditorGroupId: snapshot.activeEditorGroupId }];
+	}
+
+	private getClosedEditorWorkspaceSnapshot(contextWindowId: number | undefined, folders: ISingleFolderWorkspacePathToOpen[]): IEditorWorkspaceSnapshot | undefined {
+		const agents = contextWindowId !== undefined ? this.getWindowById(contextWindowId) : undefined;
+		const origins = agents && this.editorHandoffOrigins.get(agents);
+		if (!origins) { return undefined; }
+		const key = (uri: URI) => extUriBiasedIgnorePathCase.getComparisonKey(uri);
+		const requested = new Set(folders.map(folder => key(folder.workspace.uri)));
+		if (requested.size !== folders.length) { return undefined; }
+		const origin = origins.find((entry): entry is Extract<EditorHandoffOrigin, { kind: 'workspace' }> => {
+			if (entry.kind !== 'workspace' || entry.snapshot?.folders.length !== requested.size) { return false; }
+			const captured = new Set(entry.snapshot.folders.map(folder => key(folder.uri)));
+			return captured.size === requested.size && [...captured].every(folder => requested.has(folder));
+		});
+		return origin && !this.getWindowById(origin.windowId) ? origin.snapshot : undefined;
+	}
+
+	private async doResolveOriginatingEditorWorkspace(origin: Extract<EditorHandoffOrigin, { kind: 'workspace' }>, folders: ISingleFolderWorkspacePathToOpen[], remoteAuthority: string | undefined, newerFolders: readonly URI[]): Promise<IOriginatingEditorPath | undefined> {
 		const editor = this.getWindowById(origin.windowId);
 		const allowAdditionalFolders = folders.length === 1;
 		const { configPath } = origin.workspace;
-		if (editor) {
+		const currentWorkspace = editor?.openedWorkspace;
+		if (editor && isWorkspaceIdentifier(currentWorkspace) && currentWorkspace.id === origin.workspace.id) {
 			const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders }, [editor]);
-			if (workspace?.id === origin.workspace.id && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, configPath)
-				&& this.editorHandoffOrigins.get(agents) === origin) {
-				return { workspace, remoteAuthority };
+			if (workspace?.id === origin.workspace.id && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, configPath)) {
+				return { path: { workspace, remoteAuthority } };
 			}
-			return undefined;
 		}
 
 		if (configPath.scheme !== Schemas.file || !isSavedWorkspace(configPath, this.environmentMainService)) {
@@ -1237,13 +1372,43 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		if (!saved || !workspaceMatchesFolders(saved, folders.map(folder => folder.workspace.uri), remoteAuthority, allowAdditionalFolders)) {
 			return undefined;
 		}
-
-		// Keep the existing preference for open editors before reopening a saved workspace.
-		const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders, preferRecentlyFocused: true });
-		if (this.editorHandoffOrigins.get(agents) !== origin || (allowAdditionalFolders && findWindowOnWorkspaceOrFolder(this.getWindows(), folders[0].workspace.uri))) {
+		// A newer switch already chose an editor for that project. Do not reopen an older saved alias of it.
+		if (newerFolders.some(folder => workspaceMatchesFolders(saved, [folder], remoteAuthority, true))) {
 			return undefined;
 		}
-		return { workspace: workspace ?? origin.workspace, remoteAuthority };
+
+		const path = { workspace: origin.workspace, remoteAuthority };
+		const isOriginalWorkspaceOpen = () => this.getWindows().some(window => {
+			const workspace = window.openedWorkspace;
+			return isWorkspaceIdentifier(workspace) && workspace.id === origin.workspace.id && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, configPath)
+				&& isEqualAuthority(window.remoteAuthority, remoteAuthority) && !window.config?.isSessionsWindow && !window.isExtensionDevelopmentHost;
+		});
+		if (isOriginalWorkspaceOpen()) {
+			return { path };
+		}
+
+		// The saved workspace can lose a folder after its window closes or changes projects.
+		const captured = origin.snapshot;
+		const isInSavedWorkspace = (uri: URI) => saved.folders.some(folder => extUriBiasedIgnorePathCase.isEqualOrParent(uri, folder.uri));
+		const diff = captured?.activeDiff;
+		const snapshot = captured?.activeFile && isInSavedWorkspace(captured.activeFile) ? {
+			...captured,
+			activeDiff: diff && isInSavedWorkspace(diff.original) && isInSavedWorkspace(diff.modified) ? diff : undefined,
+		} : undefined;
+		const recoveredEditor = await this.doResolveRecoveredEditor(snapshot);
+		if (recoveredEditor) {
+			return { path, recoveredEditor };
+		}
+
+		// Without an editor to recover, keep the existing fallback to a compatible open window.
+		const workspace = await this.doGetOpenWorkspaceMatchingFolders(remoteAuthority, folders, { allowAdditionalFolders, preferRecentlyFocused: true });
+		if (isOriginalWorkspaceOpen()) {
+			return { path };
+		}
+		if (allowAdditionalFolders && findWindowOnWorkspaceOrFolder(this.getWindows(), folders[0].workspace.uri)) {
+			return undefined;
+		}
+		return { path: workspace ? { workspace, remoteAuthority } : path };
 	}
 
 	private async doGetOpenWorkspaceMatchingFolders(remoteAuthority: string | undefined, folders: ISingleFolderWorkspacePathToOpen[], options: { allowAdditionalFolders?: boolean; preferRecentlyFocused?: boolean }, candidates = this.getWindows()): Promise<IWorkspaceIdentifier | undefined> {

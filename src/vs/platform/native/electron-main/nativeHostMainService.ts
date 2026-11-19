@@ -28,7 +28,7 @@ import { IEnvironmentMainService } from '../../environment/electron-main/environ
 import { createDecorator, IInstantiationService } from '../../instantiation/common/instantiation.js';
 import { ILifecycleMainService, IRelaunchOptions } from '../../lifecycle/electron-main/lifecycleMainService.js';
 import { ILogService } from '../../log/common/log.js';
-import { FocusMode, IApplicationBadge, ICommonNativeHostService, INativeAppWindow, INativeAppWindows, INativeHostOptions, INativeSystemWideKeybinding, INativeSystemWideKeybindingResult, INativeZipFile, INativeZipOptions, INativeZipProgress, INativeZipResult, IOpenAgentsWindowOptions, IOSProperties, IOSProxy, IOSProxyConfig, IOSStatistics, IStartTracingOptions, IToastOptions, IToastResult, PowerSaveBlockerType, SystemIdleState, ThermalState } from '../common/native.js';
+import { AssistantNewsScope, AssistantWeatherDay, AssistantWeatherLocation, FocusMode, IApplicationBadge, ICommonNativeHostService, INativeAppWindow, INativeAppWindows, INativeHostOptions, INativeSystemWideKeybinding, INativeSystemWideKeybindingResult, INativeZipFile, INativeZipOptions, INativeZipProgress, INativeZipResult, IOpenAgentsWindowOptions, IOSProperties, IOSProxy, IOSProxyConfig, IOSStatistics, IStartTracingOptions, IToastOptions, IToastResult, PowerSaveBlockerType, REACH_ACCOUNT_ORIGIN, ReachAssistantRequest, ReachAssistantResponse, ReachAuthenticationRequest, SystemIdleState, ThermalState } from '../common/native.js';
 import { excludeOwnWindowSources, getScreenWindowId, getWindowSourceId, OrderedAppWindow, orderAppWindows } from '../common/appWindows.js';
 import { AppWindowCaptureFeedback, IAppWindowCaptureFeedbackOptions, IAppWindowCaptureOverlay } from './appWindowCaptureFeedback.js';
 import { captureMacWindow, getMacScreenWindows } from './macScreenWindows.js';
@@ -53,6 +53,9 @@ import { CancellationError, getErrorMessage } from '../../../base/common/errors.
 import { extract, validateZip, zip, type IFile } from '../../../base/node/zip.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { IProxyAuthService } from './auth.js';
+import { fetchReachAssistantModels, requestReachAssistant } from './reachAssistant.js';
+import { fetchAssistantNewsFeeds } from './assistantNews.js';
+import { fetchAssistantWeatherForecast } from './assistantWeather.js';
 import { AuthInfo, Credentials, IRequestService } from '../../request/common/request.js';
 import { randomPath } from '../../../base/common/extpath.js';
 import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
@@ -377,7 +380,7 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 			context: OpenContext.API,
 			contextWindowId: windowId,
 			cli: this.environmentMainService.args,
-		}, options?.folderUri ? URI.revive(options.folderUri) : undefined, options?.reveal === 'new' ? 'new' : URI.revive(options?.reveal), options?.source, options?.folderUriIsDefault, options?.draft, options?.onboardingSessionResource ? URI.revive(options.onboardingSessionResource) : undefined, options?.revealRemoteAuthority);
+		}, options?.folderUri ? URI.revive(options.folderUri) : undefined, options?.reveal === 'new' ? 'new' : URI.revive(options?.reveal), options?.source, options?.folderUriIsDefault, options?.draft, options?.onboardingSessionResource ? URI.revive(options.onboardingSessionResource) : undefined, options?.revealRemoteAuthority, options?.preserveEditorHandoff, options?.editorWorkspace);
 		if (windows.length > 0) {
 			// Transfer focus is a no-op on macOS while VS Code is hidden, e.g. when run from a system-wide keybinding
 			windows[0].focus({ mode: FocusMode.Force });
@@ -795,6 +798,73 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 	async setApplicationBadge(windowId: number | undefined, badge: IApplicationBadge | undefined, options?: INativeHostOptions): Promise<void> {
 		const window = this.windowById(options?.targetWindowId, windowId);
 		window?.setApplicationBadge(badge);
+	}
+
+	async requestReachAuthentication(_windowId: number | undefined, request: ReachAuthenticationRequest): Promise<{ status: number; data?: unknown }> {
+		const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json', 'ngrok-skip-browser-warning': '1' });
+		let body: Record<string, string>;
+		switch (request.action) {
+			case 'start':
+				body = { state: request.state, codeChallenge: request.codeChallenge };
+				break;
+			case 'exchange':
+				body = { flowId: request.flowId, state: request.state, codeVerifier: request.codeVerifier };
+				break;
+			case 'logout':
+				headers.set('Authorization', `Bearer ${request.accessToken}`);
+				body = {};
+				break;
+			default:
+				throw new Error('Invalid REACH authentication action');
+		}
+		const { net } = await import('electron');
+		const response = await net.fetch(`${REACH_ACCOUNT_ORIGIN}/v1/auth/${request.action}`, {
+			method: 'POST', headers, body: JSON.stringify(body), redirect: 'manual',
+			credentials: 'omit', signal: AbortSignal.timeout(15_000),
+		});
+		return { status: response.status, data: response.ok ? await response.json().catch(() => undefined) : undefined };
+	}
+
+	private readonly reachAssistantRequests = new Map<string, { windowId: number | undefined; requestId: string; controller: AbortController }>();
+	private readonly reachAssistantChunks = new Emitter<{ requestId: string; delta: string }>();
+	readonly onDidReceiveReachAssistantChunk = this.reachAssistantChunks.event;
+
+	async readAssistantNewsFeeds(_windowId: number | undefined, scope: AssistantNewsScope) {
+		const { net } = await import('electron');
+		return fetchAssistantNewsFeeds(scope, (url, options) => net.fetch(url, options));
+	}
+
+	async readAssistantWeatherForecast(_windowId: number | undefined, day: AssistantWeatherDay, location: AssistantWeatherLocation, apiKey: string) {
+		const { net } = await import('electron');
+		return fetchAssistantWeatherForecast(day, location, apiKey, (url, options) => net.fetch(url, options));
+	}
+
+	async listReachAssistantModels(_windowId: number | undefined, accessToken: string) {
+		const { net } = await import('electron');
+		return fetchReachAssistantModels((url, options) => net.fetch(url, options), accessToken);
+	}
+
+	async sendReachAssistantPrompt(windowId: number | undefined, accountId: string, accessToken: string, request: ReachAssistantRequest, requestId: string, conversationId: string): Promise<ReachAssistantResponse> {
+		const key = JSON.stringify([accountId, conversationId]);
+		if (this.reachAssistantRequests.has(key)) { return { kind: 'busy' }; }
+		const controller = new AbortController();
+		this.reachAssistantRequests.set(key, { windowId, requestId, controller });
+		try {
+			const { net } = await import('electron');
+			return await requestReachAssistant((url, options) => net.fetch(url, options), accountId, accessToken, request, requestId, controller.signal,
+				delta => this.reachAssistantChunks.fire({ requestId, delta }));
+		} finally {
+			this.reachAssistantRequests.delete(key);
+		}
+	}
+
+	async stopReachAssistantPrompt(windowId: number | undefined, requestId: string): Promise<void> {
+		for (const request of this.reachAssistantRequests.values()) {
+			if (request.windowId === windowId && request.requestId === requestId) {
+				request.controller.abort();
+				return;
+			}
+		}
 	}
 
 	async openExternal(windowId: number | undefined, url: string, defaultApplication?: string): Promise<boolean> {

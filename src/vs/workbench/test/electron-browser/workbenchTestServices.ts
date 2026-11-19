@@ -166,6 +166,13 @@ export class TestNativeHostService implements INativeHostService {
 	async setDocumentEdited(edited: boolean): Promise<void> { }
 	async setApplicationBadge(badge: IApplicationBadge | undefined): Promise<void> { }
 	async openExternal(url: string, defaultApplication?: string): Promise<boolean> { return false; }
+	async requestReachAuthentication(): Promise<{ status: number }> { return { status: 503 }; }
+	async sendReachAssistantPrompt(): Promise<{ kind: 'unavailable' }> { return { kind: 'unavailable' }; }
+	async listReachAssistantModels(): Promise<[]> { return []; }
+	async readAssistantNewsFeeds(): Promise<[]> { return []; }
+	async readAssistantWeatherForecast(): Promise<never> { throw new Error('Weather API fixture is unavailable'); }
+	async stopReachAssistantPrompt(): Promise<void> { }
+	readonly onDidReceiveReachAssistantChunk = Event.None;
 	async updateTouchBar(): Promise<void> { }
 	async moveItemToTrash(): Promise<void> { }
 	async getMediaAccessStatus(_mediaType: 'microphone' | 'camera' | 'screen'): Promise<'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'> { return 'granted'; }

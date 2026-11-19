@@ -258,6 +258,7 @@ export class CommandsQuickAccessProvider extends AbstractEditorCommandsQuickAcce
 				commandId: action.item.id,
 				commandWhen: action.item.precondition?.serialize(),
 				commandAlias,
+				searchAlias: action.item.searchAlias,
 				label: stripIcons(label),
 				commandDescription,
 				commandCategory: category,

@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { parseArgs, promisify } from 'node:util';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,13 +24,32 @@ const { values: flags } = parseArgs({
 	options: {
 		'empty-workspace': { type: 'boolean' },
 		conversation: { type: 'boolean' },
+		'running-conversation': { type: 'boolean' },
 		protocol: { type: 'boolean' },
 		'workspace-protocol': { type: 'boolean' },
 		keyboard: { type: 'boolean' },
+		'palette-switch': { type: 'boolean' },
 		'app-connections': { type: 'boolean' },
 		themes: { type: 'boolean' },
 		'switch-accessibility': { type: 'boolean' },
+		'switch-layout': { type: 'boolean' },
+		'view-menu': { type: 'boolean' },
+		'diff-workspace-root': { type: 'boolean' },
+		'focused-diff-side': { type: 'boolean' },
+		'untitled-workspace-root': { type: 'boolean' },
+		'explorer-workspace-root': { type: 'boolean' },
+		'explorer-folder-menu': { type: 'boolean' },
+		'recent-workspace-root': { type: 'boolean' },
 		'originating-editor': { type: 'boolean' },
+		'reopen-saved-editor-file': { type: 'boolean' },
+		'reopen-saved-editor-group': { type: 'boolean' },
+		'reopen-saved-editor-preview': { type: 'boolean' },
+		'preview-conflict': { type: 'boolean' },
+		'disable-editor-restoration': { type: 'boolean' },
+		'reopen-saved-diff': { type: 'boolean' },
+		'focus-agents-from-other-editor': { type: 'boolean' },
+		'warm-workspace-switch': { type: 'boolean' },
+		'save-draft-on-workspace-switch': { type: 'boolean' },
 		optimized: { type: 'boolean' },
 		'optimized-build': { type: 'string' },
 	},
@@ -39,7 +58,17 @@ const optimized = flags.optimized ?? false;
 const optimizedBuild = flags['optimized-build'];
 assert.ok(optimizedBuild === undefined || (optimized && optimizedBuild.trim()), 'Use --optimized --optimized-build <folder> to select a staged desktop build.');
 const { keyboard, 'app-connections': appConnections, themes } = flags;
+const paletteSwitch = flags['palette-switch'];
 const switchAccessibility = flags['switch-accessibility'];
+const switchLayout = flags['switch-layout'];
+const viewMenu = flags['view-menu'];
+const focusedDiffSide = flags['focused-diff-side'];
+const diffWorkspaceRoot = flags['diff-workspace-root'] || focusedDiffSide;
+const untitledWorkspaceRoot = flags['untitled-workspace-root'];
+const explorerWorkspaceRoot = flags['explorer-workspace-root'];
+const explorerFolderMenu = flags['explorer-folder-menu'];
+const recentWorkspaceRoot = flags['recent-workspace-root'];
+const selectsSecondRoot = diffWorkspaceRoot || untitledWorkspaceRoot || explorerWorkspaceRoot || explorerFolderMenu || recentWorkspaceRoot;
 const themePalettes = {
 	dark: {
 		name: 'Dark 2026', themeClass: 'vscode-theme-defaults-themes-2026-dark-json',
@@ -63,12 +92,38 @@ const workspaceProtocol = flags['workspace-protocol'];
 const protocol = workspaceProtocol || flags.protocol;
 const launchToken = 'synthetic-test-launch-token';
 const conversation = protocol || flags.conversation;
+const runningConversation = flags['running-conversation'];
 const emptyWorkspace = conversation || flags['empty-workspace'];
 const originatingEditor = flags['originating-editor'];
+const reopenSavedEditorGroup = flags['reopen-saved-editor-group'];
+const reopenSavedEditorPreview = flags['reopen-saved-editor-preview'];
+const previewConflict = flags['preview-conflict'];
+const disableEditorRestoration = flags['disable-editor-restoration'];
+const reopenSavedEditorFile = flags['reopen-saved-editor-file'] || reopenSavedEditorGroup || reopenSavedEditorPreview;
+const reopenSavedDiff = flags['reopen-saved-diff'];
+const focusAgentsFromOtherEditor = flags['focus-agents-from-other-editor'];
+const warmWorkspaceSwitch = flags['warm-workspace-switch'];
+const saveDraftOnWorkspaceSwitch = flags['save-draft-on-workspace-switch'];
 const folderlessOrigin = originatingEditor && emptyWorkspace;
 assert.ok(!themes || !emptyWorkspace, '--themes checks the multi-root workspace round trip');
 assert.ok(!switchAccessibility || !emptyWorkspace, '--switch-accessibility checks both title bars in the workspace round trip');
+assert.ok(!switchLayout || !emptyWorkspace, '--switch-layout checks the IDE title bar in the workspace round trip');
+assert.ok(!viewMenu || !emptyWorkspace, '--view-menu opens the saved IDE workspace in Agents');
+assert.ok(!paletteSwitch || (!keyboard && !explorerFolderMenu && !emptyWorkspace), '--palette-switch checks a project round trip through the command palette');
+assert.ok(!runningConversation || (!emptyWorkspace && !originatingEditor && !warmWorkspaceSwitch), '--running-conversation checks the standard two-window project handoff');
+assert.ok(!diffWorkspaceRoot || !emptyWorkspace, '--diff-workspace-root compares a file from the second workspace root');
+assert.ok(!untitledWorkspaceRoot || (!emptyWorkspace && !diffWorkspaceRoot), '--untitled-workspace-root uses a separate multi-root test');
+assert.ok(!explorerWorkspaceRoot || (!emptyWorkspace && !diffWorkspaceRoot && !untitledWorkspaceRoot), '--explorer-workspace-root uses a separate multi-root test');
+assert.ok(!explorerFolderMenu || (!emptyWorkspace && !diffWorkspaceRoot && !untitledWorkspaceRoot && !explorerWorkspaceRoot && !viewMenu && !keyboard), '--explorer-folder-menu uses its own opening and activation steps');
+assert.ok(!recentWorkspaceRoot || (!emptyWorkspace && !diffWorkspaceRoot && !untitledWorkspaceRoot && !explorerWorkspaceRoot && !explorerFolderMenu), '--recent-workspace-root starts with a scratch editor over a workspace tab');
 assert.ok(!folderlessOrigin || (conversation && !protocol), 'Use --originating-editor with --conversation to check folderless editor routing');
+assert.ok(!reopenSavedEditorFile || (!emptyWorkspace && !originatingEditor && !warmWorkspaceSwitch && !runningConversation), '--reopen-saved-editor-file uses the standard saved-workspace round trip');
+assert.ok(!reopenSavedDiff || (!emptyWorkspace && !originatingEditor && !warmWorkspaceSwitch && !runningConversation && !reopenSavedEditorFile), '--reopen-saved-diff uses the standard saved-workspace round trip');
+assert.ok(!disableEditorRestoration || reopenSavedEditorGroup, '--disable-editor-restoration requires --reopen-saved-editor-group');
+assert.ok(!previewConflict || (reopenSavedEditorPreview && reopenSavedEditorGroup && !disableEditorRestoration), '--preview-conflict requires preview and split-group restoration');
+assert.ok(!focusAgentsFromOtherEditor || (originatingEditor && !emptyWorkspace), 'Use --focus-agents-from-other-editor with --originating-editor in a multi-root workspace');
+assert.ok(!warmWorkspaceSwitch || (!emptyWorkspace && !originatingEditor && !selectsSecondRoot && !themes && !viewMenu), '--warm-workspace-switch checks switching between separate projects');
+assert.ok(!saveDraftOnWorkspaceSwitch || warmWorkspaceSwitch, '--save-draft-on-workspace-switch requires --warm-workspace-switch');
 const portable = join(run, 'portable');
 const profile = join(portable, 'user-data');
 const fixtureHome = join(run, 'home');
@@ -94,7 +149,11 @@ const runner = join(run, 'unused-extension-test-runner.cjs');
 await writeFile(runner, 'exports.run = async () => { throw new Error("Unexpected extension-development test execution"); };\n');
 
 const responseText = 'Signal-C native conversation retained.';
-if (conversation) { registerScenario('text-only', [{ content: responseText, delayMs: 0 }]); }
+const runningPrompt = 'Finish this request while I switch modes. [scenario:mode-switch-running]';
+const runningReply = 'The running agent completed after the switch.';
+const runningResponse = Promise.withResolvers<void>();
+if (conversation || runningConversation) { registerScenario('text-only', [{ content: responseText, delayMs: 0 }]); }
+if (runningConversation) { registerScenario('mode-switch-running', [{ content: runningReply, delayMs: 0, waitFor: runningResponse.promise }]); }
 const mock = await startServer(0, { logger: () => {}, captureRequests: true });
 let app: ElectronApplication | undefined;
 let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -102,18 +161,48 @@ let stage = 'preparing';
 const report = {
 	optimized,
 	executable: '',
-	scenario: workspaceProtocol ? 'workspace-protocol-conversation' : protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : 'multi-root',
+	scenario: workspaceProtocol ? 'workspace-protocol-conversation' : protocol ? 'protocol-conversation' : conversation ? 'folderless-conversation' : emptyWorkspace ? 'empty-workspace' : runningConversation ? 'running-workspace-conversation' : 'multi-root',
 	windowReuseVerified: false, dirtyBufferRetained: false, agentsDraftRetained: false,
 	conversationCompleted: false, conversationRestoredInIDE: false, modelRequestCountBeforeHandoff: 0,
+	runningConversationOpenedInIDE: false, runningConversationRoundTripVerified: false,
 	warmProtocolConversationRestored: false, coldProtocolConversationRestored: false,
 	recentWorkspaceProtocolVerified: false,
 	originatingEditorVerified: false,
+	singleFolderOriginVerified: false,
+	closedSingleFolderOriginVerified: false,
+	replacementFolderEditorPreserved: false,
+	repurposedFolderEditorPreserved: false,
+	reusedWindowDraftFilePreserved: false,
+	focusOnlyPreservedOrigin: false,
+	explicitSwitchUpdatedOrigin: false,
+	warmWorkspaceSwitchVerified: false,
+	warmWorkspaceDraftRetained: false,
+	warmWorkspaceReturnRetained: false,
+	savedDraftWorkspaceSwitchVerified: false,
+	inlineDraftSwitchNoticeVerified: false,
+	inlineDraftSwitchNoticeDismissed: false,
 	closedOriginFallbackVerified: false,
+	closedOriginFilePreferredOverAlternate: false,
+	reopenedOriginWindowPreferredOverAlternate: false,
+	missingOriginFileFallbackVerified: false,
 	reopenedOriginWorkspaceVerified: false,
+	repurposedSavedWorkspaceRestored: false,
+	reopenedSavedEditorFileVerified: false,
+	reopenedSavedEditorViewportVerified: false,
+	reopenedSavedEditorGroupVerified: false,
+	reopenedPreviewTabVerified: false,
+	restoredDifferentPreviewVerified: false,
+	editorRestorationPreferenceVerified: false,
+	reopenedSavedEditorReplacementPreserved: false,
+	reopenedSingleRootWorkspaceFileVerified: false,
+	reopenedSavedDiffVerified: false,
+	reopenedStickyDiffVerified: false,
+	reopenedDiffWithMissingFileFallbackVerified: false,
 	changedOriginFallbackVerified: false,
 	launchEnvironmentExcludedFromTrace: false,
 	coldCliFallbackVerified: false, coldClaudeCliVersion: '',
 	keyboardActivations: [] as { stage: string; method: string; commandId: string }[],
+	paletteActivations: [] as { label: string; commandId: string; legacyQuery: string }[],
 	modelRequestCount: 0,
 	appPickerVerified: false, payPalSandboxVerified: false, datadogRegionVerified: false, quickBooksRequirementsVerified: false, appSetupCancellationVerified: false,
 	appHeaderVerified: false, googleOAuthSetupVerified: false, browseAppConnectionsVerified: false,
@@ -121,6 +210,15 @@ const report = {
 	themeChecks: [] as { stage: string; mode: string; theme: string; canvas: string[]; titlebar: string }[],
 	switchSettingChangedWithoutReload: false,
 	switchAccessibilityChecks: [] as { mode: string; checked: string; description: string; decorations: string[] }[],
+	switchLayoutVerified: false,
+	viewMenuHandoffVerified: false,
+	diffWorkspaceRootVerified: false,
+	focusedDiffSideVerified: false,
+	untitledWorkspaceRootVerified: false,
+	explorerWorkspaceRootVerified: false,
+	explorerFolderMenuVerified: false,
+	explorerFolderMenuPreservedDraft: false,
+	recentWorkspaceRootVerified: false,
 };
 try {
 	const settings = {
@@ -135,9 +233,14 @@ try {
 		'chat.agentHost.experimental.autoAttachPullRequests': false,
 		'agents.subscriptions.devinExecutable': join(run, 'not-installed-devin.exe'),
 		'sessions.useWorktree': false, 'files.autoSave': 'off',
+		...(disableEditorRestoration ? { 'workbench.editor.restoreEditors': false } : {}),
+		...(reopenSavedEditorPreview ? { 'workbench.editor.enablePreview': true, 'workbench.list.openMode': 'singleClick' } : {}),
+		...(focusedDiffSide || reopenSavedDiff ? { 'diffEditor.renderSideBySide': true, 'diffEditor.useInlineViewWhenSpaceIsLimited': false } : {}),
 		'extensions.autoUpdate': false, 'extensions.autoCheckUpdates': false,
+		...(saveDraftOnWorkspaceSwitch ? { 'sessions.drafts.enabled': true } : {}),
 		...(themes ? { 'workbench.colorTheme': expectedTheme.name, 'workbench.colorCustomizations': expectedTheme.colors } : {}),
 		...(appConnections ? { 'chat.customizations.marketplace.enabled': true } : {}),
+		...(viewMenu ? { 'window.menuBarVisibility': 'compact', 'window.zoomLevel': 3, 'chat.titleBar.openInAgentsWindow.enabled': false } : {}),
 		...(protocol ? { 'security.promptForLocalFileProtocolHandling': false, 'security.promptForRemoteFileProtocolHandling': false } : {}),
 	};
 	for (const file of [join(profile, 'User', 'settings.json'), join(profile, 'User', 'profiles', 'builtin', 'agents', 'settings.json')]) {
@@ -147,7 +250,7 @@ try {
 	await mkdir(join(profile, 'User', 'globalStorage'), { recursive: true });
 	await writeFile(join(profile, 'User', 'globalStorage', 'agent-host-config.json'), JSON.stringify({ githubMcpServerEnabled: false }));
 	const env = buildEnv(mock);
-	if (conversation) {
+	if (conversation || runningConversation) {
 		// Only the synthetic token supplied by buildEnv is used; no account profile is copied.
 		const token = JSON.parse(Buffer.from(env.VSCODE_COPILOT_CHAT_TOKEN, 'base64').toString()) as Record<string, unknown>;
 		Object.assign(token, { copilot_plan: 'individual', sku: 'copilot_individual', isNoAuthUser: false });
@@ -204,7 +307,7 @@ try {
 		'--use-inmemory-secretstorage', '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust',
 		'--disable-crash-reporter',
 		'--disable-telemetry', '--disable-experiments', '--disable-updates', '--disable-extension=vscode.vscode-api-tests',
-		...(protocol || keyboard || originatingEditor ? ['--log', 'trace'] : [])];
+		...(protocol || keyboard || paletteSwitch || originatingEditor || reopenSavedEditorFile || reopenSavedDiff || warmWorkspaceSwitch ? ['--log', 'trace'] : [])];
 	// A second instance must omit extensionTestsPath to forward to the isolated app.
 	const forwardingArgs = commonArgs.filter(arg => arg !== '--extensionTestsPath' && arg !== runner);
 	const forwardToRunningApp = async (args: string[]) => {
@@ -325,6 +428,13 @@ try {
 		const window = await launched.browserWindow(page);
 		try { await window.evaluate(nativeWindow => nativeWindow.destroy()); } finally { await window.dispose(); }
 		await closed;
+	};
+	const runWorkbenchCommand = async (page: Page, label: string) => {
+		await page.keyboard.press('Control+Shift+P');
+		const picker = page.locator('.quick-input-widget');
+		await picker.locator('input').first().fill('>' + label);
+		await picker.getByRole('option').filter({ hasText: label }).first().click();
+		await picker.waitFor({ state: 'hidden' });
 	};
 	const rendererLogs = async () => {
 		const logs: string[] = [];
@@ -466,12 +576,24 @@ try {
 	};
 	const activateSwitch = async (page: Page, roundTrip: number, sourceInput: Locator) => {
 		const control = page.getByRole('switch', { name: 'IDE mode', exact: true });
-		if (!keyboard) { await control.click(); return; }
+		const usePalette = paletteSwitch && roundTrip === 1;
+		if (!keyboard && !usePalette) { await control.click(); return; }
 		const toAgents = await control.getAttribute('aria-checked') === 'true';
 		const commandId = toAgents ? 'workbench.action.openWorkspaceInAgentsWindow' : 'agents.openSessionInVSCode';
 		const countCommands = async () => (await rendererLogs()).reduce((total, log) => total + log.split(/\r?\n/).filter(line => line.endsWith(`CommandService#executeCommand ${commandId}`)).length, 0);
 		const before = await countCommands();
-		if (roundTrip === 1) {
+		const paletteLabel = toAgents ? 'Switch to Agents' : 'Switch to IDE';
+		const legacyQuery = toAgents ? 'Open in Agents' : 'Open in Editor';
+		if (usePalette) {
+			await page.keyboard.press('Control+Shift+P');
+			const picker = page.locator('.quick-input-widget');
+			const search = picker.locator('input').first();
+			const result = picker.getByRole('option').filter({ hasText: paletteLabel });
+			await search.fill('>' + legacyQuery);
+			await result.waitFor({ timeout: 10000 });
+			await search.fill('>' + paletteLabel);
+			await result.click({ timeout: 10000 });
+		} else if (roundTrip === 1) {
 			await sourceInput.click();
 			await page.keyboard.press('Control+k');
 			await page.keyboard.press('Control+Shift+a');
@@ -482,8 +604,91 @@ try {
 		}
 		const timeout = Date.now() + 15000;
 		while (await countCommands() === before && Date.now() < timeout) { await new Promise(resolve => setTimeout(resolve, 100)); }
-		assert.equal(await countCommands(), before + 1, 'Each keyboard activation must dispatch exactly one mode command');
-		report.keyboardActivations.push({ stage, method: roundTrip === 1 ? 'global-shortcut' : toAgents ? 'Enter' : 'Space', commandId });
+		assert.equal(await countCommands(), before + 1, 'Each activation must dispatch exactly one mode command');
+		if (usePalette) {
+			report.paletteActivations.push({ label: paletteLabel, commandId, legacyQuery });
+		} else {
+			report.keyboardActivations.push({ stage, method: roundTrip === 1 ? 'global-shortcut' : toAgents ? 'Enter' : 'Space', commandId });
+		}
+	};
+	const exerciseNarrowSwitch = async (page: Page, activate: () => Promise<void>) => {
+		const control = page.getByRole('switch', { name: 'IDE mode', exact: true });
+		const window = await launched.browserWindow(page);
+		const bounds = await window.evaluate(native => native.getBounds());
+		const titleActions = page.locator('.part.titlebar .action-toolbar-container .action-item');
+		const expandedActionCount = await titleActions.count();
+		const checkCompactSwitch = async (width: number, zoom: number) => {
+			await page.waitForFunction(expectedWidth => Math.abs(innerWidth - expectedWidth) <= 1, width / 1.2 ** zoom, { timeout: 15000 });
+			await control.locator('.workspace-mode-icon').waitFor({ timeout: 5000 });
+			assert.equal(await control.getAttribute('aria-checked'), 'true');
+			const compact = await control.evaluate(element => {
+				const { x, y, width, height } = element.getBoundingClientRect();
+				const titlebar = element.closest('.titlebar-container')!;
+				return {
+					focused: document.activeElement === element,
+					pointerTarget: element.contains(document.elementFromPoint(x + width / 2, y + height / 2)),
+					labelsHidden: [...element.querySelectorAll('.workspace-mode-segment')].every(label => getComputedStyle(label).display === 'none'),
+					titlebarFits: titlebar.scrollWidth <= titlebar.clientWidth,
+				};
+			});
+			assert.deepEqual(compact, { focused: true, pointerTarget: true, labelsHidden: true, titlebarFits: true }, `The compact IDE switch must stay operable at ${width}px and zoom ${zoom}`);
+		};
+		try {
+			await control.focus();
+			await window.evaluate((native, height) => native.setSize(500, height), bounds.height);
+			for (const zoom of [1, 2, 3]) {
+				await page.keyboard.press('Control+=');
+				await checkCompactSwitch(500, zoom);
+			}
+			await capture(page, 'ide-switch-narrow.png');
+			const minimumWidth = await window.evaluate((native, height) => {
+				const [width] = native.getMinimumSize();
+				native.setSize(width, height);
+				return width;
+			}, bounds.height);
+			await checkCompactSwitch(minimumWidth, 3);
+			await capture(page, 'ide-switch-minimum-width.png');
+			const overflow = page.locator('.part.titlebar .action-toolbar-container').getByRole('button', { name: 'More Actions...', exact: true });
+			await overflow.click({ timeout: 5000 });
+			const menu = page.locator('.context-view').getByRole('menu').filter({ hasText: 'Primary Side Bar' });
+			await menu.waitFor({ timeout: 5000 });
+			await page.keyboard.press('Escape');
+			await menu.waitFor({ state: 'hidden' });
+			await activate();
+			await window.evaluate((native, originalBounds) => native.setBounds(originalBounds), bounds);
+			await control.getByText('Agents', { exact: true }).waitFor();
+			await control.getByText('IDE', { exact: true }).waitFor();
+			assert.equal(await titleActions.count(), expandedActionCount, 'Widening restores the title actions');
+			report.switchLayoutVerified = true;
+		} finally {
+			try {
+				await page.keyboard.press('Control+Numpad0');
+				await window.evaluate((native, originalBounds) => native.setBounds(originalBounds), bounds);
+			} finally {
+				await window.dispose();
+			}
+		}
+	};
+	const selectMockModel = async (agents: Page) => {
+		const modelButton = agents.locator('.new-chat-widget-container').getByText('Auto', { exact: true });
+		await modelButton.waitFor({ timeout: 60000 });
+		const catalogDeadline = Date.now() + 60000;
+		let catalogReady = false;
+		while (!catalogReady && Date.now() < catalogDeadline) {
+			// Read only this fixture's logs; the SDK publishes its catalog asynchronously.
+			const dirs = await readdir(join(profile, 'logs'), { withFileTypes: true });
+			for (const dir of dirs.filter(entry => entry.isDirectory())) {
+				const log = await readFile(join(profile, 'logs', dir.name, 'agenthost.log'), 'utf8').catch(() => '');
+				catalogReady ||= /Found \d+ models:.*GPT-5\.3-Codex \(Mock\)/.test(log);
+			}
+			if (!catalogReady) { await new Promise(resolve => setTimeout(resolve, 250)); }
+		}
+		assert.ok(catalogReady, 'The native host must discover the mock model catalog');
+		await modelButton.click();
+		const model = agents.locator('.chat-model-picker-widget').getByText('GPT-5.3-Codex (Mock)', { exact: true });
+		await model.waitFor({ timeout: 30000 });
+		assert.equal(await model.evaluate(element => !!element.closest('[aria-disabled="true"], [disabled], .disabled')), false);
+		await model.click();
 	};
 	if (emptyWorkspace) {
 		stage = 'empty Agents';
@@ -496,25 +701,7 @@ try {
 		await input.click(); await agents.keyboard.type(draft);
 		if (conversation) {
 			stage = 'completing the native mock conversation';
-			const modelButton = agents.locator('.new-chat-widget-container').getByText('Auto', { exact: true });
-			await modelButton.waitFor({ timeout: 60000 });
-			const catalogDeadline = Date.now() + 60000;
-			let catalogReady = false;
-			while (!catalogReady && Date.now() < catalogDeadline) {
-				// Read only this fixture's logs; the SDK publishes its catalog asynchronously.
-				const dirs = await readdir(join(profile, 'logs'), { withFileTypes: true });
-				for (const dir of dirs.filter(entry => entry.isDirectory())) {
-					const log = await readFile(join(profile, 'logs', dir.name, 'agenthost.log'), 'utf8').catch(() => '');
-					catalogReady ||= /Found \d+ models:.*GPT-5\.3-Codex \(Mock\)/.test(log);
-				}
-				if (!catalogReady) { await new Promise(resolve => setTimeout(resolve, 250)); }
-			}
-			assert.ok(catalogReady, 'The native host must discover the mock model catalog');
-			await modelButton.click();
-			const model = agents.locator('.chat-model-picker-widget').getByText('GPT-5.3-Codex (Mock)', { exact: true });
-			await model.waitFor({ timeout: 30000 });
-			assert.equal(await model.evaluate(element => !!element.closest('[aria-disabled="true"], [disabled], .disabled')), false);
-			await model.click();
+			await selectMockModel(agents);
 			await input.click(); await agents.keyboard.press('Enter');
 			await agents.locator('.interactive-session').getByText(responseText, { exact: false }).last().waitFor({ timeout: 45000 });
 			report.conversationCompleted = true;
@@ -546,8 +733,8 @@ try {
 				for (const match of renderer.matchAll(/vscode:openChatSession\s+(\S+)/g)) { chatResource = match[1]; }
 			}
 			assert.ok(chatResource, 'The first native handoff must record its conversation identity');
-			const product = JSON.parse(await readFile(join(root, 'product.json'), 'utf8')) as { urlProtocol: string };
-			const link = new URL(`${product.urlProtocol}://editor-window/open`);
+			const scheme = await launched.evaluate(() => (globalThis as typeof globalThis & { _VSCODE_PRODUCT_JSON: { urlProtocol: string } })._VSCODE_PRODUCT_JSON.urlProtocol);
+			const link = new URL(`${scheme}://editor-window/open`);
 			link.searchParams.set('session', chatResource);
 			if (workspaceProtocol) { link.searchParams.set('folders', JSON.stringify(folders.map(folder => pathToFileURL(folder).toString()))); }
 			protocolUri = link.toString();
@@ -739,27 +926,147 @@ try {
 		await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
 		if (appConnections) { await checkAppConnections(ide); }
 		const marker = '// Signal-C native unsaved buffer';
-		await ide.locator('body').click({ position: { x: 600, y: 400 } });
-		await ide.keyboard.press('Control+n');
-		await ide.locator('.monaco-editor').first().waitFor({ state: 'visible' });
-		await ide.keyboard.type(marker);
-		await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
-		await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+		const untitledName = 'new-note.txt';
+		const untitledPath = untitledWorkspaceRoot || explorerFolderMenu ? join(folders[untitledWorkspaceRoot ? 1 : 0], untitledName) : undefined;
+		const createDirtyEditor = async () => {
+			if (untitledPath) {
+				stage = 'opening an unsaved file with a destination in a workspace root';
+				await forwardToRunningApp(['--reuse-window', untitledPath]);
+				await ide.locator('.tabs-container .tab.active').getByText(untitledName, { exact: true }).waitFor();
+			} else {
+				await ide.locator('body').click({ position: { x: 600, y: 400 } });
+				await ide.keyboard.press('Control+n');
+			}
+			await ide.locator('.part.editor .monaco-editor').first().waitFor({ state: 'visible' });
+			await ide.keyboard.type(marker);
+			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
+			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+			console.log('Created a dirty buffer in the hidden native multi-root editor');
+		};
+		const selectedExplorerRoot = ide.locator('.explorer-folders-view [role="treeitem"][aria-selected="true"]').getByText('two', { exact: true });
+		if (recentWorkspaceRoot) {
+			stage = 'opening a second-root file before the untitled scratch buffer';
+			await forwardToRunningApp(['--reuse-window', join(folders[1], 'README.md')]);
+			await ide.locator('.tabs-container .tab.active').getByText('README.md', { exact: true }).waitFor();
+		}
+		if (explorerWorkspaceRoot) {
+			stage = 'selecting the second root in Explorer with no active editor';
+			await ide.getByRole('tree').getByText('two', { exact: true }).click();
+			await selectedExplorerRoot.waitFor();
+			assert.equal(await ide.locator('.tabs-container .tab.active').count(), 0);
+		} else {
+			await createDirtyEditor();
+		}
+		if (recentWorkspaceRoot) {
+			await ide.locator('.tabs-container .tab:not(.active)').getByText('README.md', { exact: true }).waitFor();
+		}
 		await checkWindows('IDE ready');
-		console.log('Created a dirty buffer in the hidden native multi-root editor');
+		if (diffWorkspaceRoot) {
+			stage = focusedDiffSide ? 'focusing the original side of a diff across project roots' : 'opening a diff between the second root and an external file';
+			const comparisonFile = focusedDiffSide ? join(folders[0], 'comparison.txt') : join(run, 'outside.txt');
+			await writeFile(comparisonFile, 'Modified file for the diff fixture\n');
+			await forwardToRunningApp(['--reuse-window', '--diff', join(folders[1], 'README.md'), comparisonFile]);
+			const diff = ide.locator('.part.editor .monaco-diff-editor');
+			await diff.waitFor();
+			await ide.locator('.tabs-container .tab.active').getByText(/(comparison|outside)\.txt/).waitFor();
+			if (focusedDiffSide) {
+				const original = diff.locator('.editor.original .view-line').first();
+				await original.click({ position: { x: 8, y: 8 } });
+				await ide.keyboard.press('Control+Home');
+				await ide.keyboard.press('Shift+End');
+				await diff.locator('.editor.original .monaco-editor.focused').waitFor();
+			}
+		}
 		stage = 'native Agents';
-		const [agents] = await Promise.all([
+		const openExplorerFolderInAgents = async (folderName: string) => {
+			await ide.getByRole('tree').getByText(folderName, { exact: true }).click({ button: 'right' });
+			await ide.getByRole('menuitem', { name: 'Open in Agents', exact: true }).click({ timeout: 10000 });
+		};
+		const openAgents = async () => {
+			if (explorerFolderMenu) {
+				stage = 'opening the second workspace root from the Explorer context menu';
+				await openExplorerFolderInAgents('two');
+				return;
+			}
+			const control = ide.getByRole('switch', { name: 'IDE mode', exact: true });
+			if (!viewMenu) {
+				if (focusedDiffSide) {
+					await control.focus();
+					await ide.locator('.part.editor .monaco-diff-editor .editor.original .monaco-editor.focused').waitFor({ state: 'hidden' });
+					await control.press('Enter');
+				} else {
+					await control.click();
+				}
+				return;
+			}
+			stage = 'opening Agents from the compact View menu';
+			await control.waitFor({ state: 'hidden' });
+			const window = await launched.browserWindow(ide);
+			const bounds = await window.evaluate(native => native.getBounds());
+			try {
+				const width = await window.evaluate((native, height) => {
+					const [width] = native.getMinimumSize();
+					native.setSize(width, height);
+					return width;
+				}, bounds.height);
+				await ide.waitForFunction(expectedWidth => Math.abs(innerWidth - expectedWidth) <= 1, width / 1.2 ** 3, { timeout: 15000 });
+				await ide.getByRole('menuitem', { name: 'Application Menu', exact: true }).click({ timeout: 10000 });
+				const view = ide.getByRole('menuitem', { name: 'View', exact: true });
+				await view.click();
+				const action = ide.locator('.menubar-menu-items-holder').getByText('Open in Agents', { exact: true });
+				await capture(ide, 'view-menu-open-in-agents.png');
+				await action.waitFor({ timeout: 5000 });
+				await action.click();
+				return bounds.width;
+			} finally {
+				try {
+					await window.evaluate((native, originalBounds) => native.setBounds(originalBounds), bounds);
+				} finally {
+					await window.dispose();
+				}
+			}
+		};
+		const [agents, originalIDEWidth] = await Promise.all([
 			launched.waitForEvent('window', { timeout: 45000 }),
-			ide.getByRole('switch', { name: 'IDE mode', exact: true }).click(),
+			openAgents(),
 		]);
 		await agents.locator('.agent-sessions-workbench').waitFor({ timeout: 60000 });
-		await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
+		if (selectsSecondRoot) {
+			stage = 'selecting the second workspace root in Agents';
+			await agents.locator('.new-chat-widget-container').getByText('two', { exact: true }).waitFor({ timeout: 15000 });
+			report.recentWorkspaceRootVerified = !!recentWorkspaceRoot;
+			await capture(agents, 'agents-selected-workspace-root.png');
+		} else {
+			await agents.getByText('one', { exact: true }).first().waitFor({ timeout: 45000 });
+		}
+		if (explorerFolderMenu) {
+			stage = 'opening workspace roots from Explorer with Agents already open';
+			const composer = agents.locator('.new-chat-widget-container');
+			for (const rootName of ['one', 'two']) {
+				await openExplorerFolderInAgents(rootName);
+				await composer.getByText(rootName, { exact: true }).waitFor({ timeout: 15000 });
+			}
+			report.explorerFolderMenuVerified = true;
+		}
+		if (viewMenu) {
+			const settingsFile = join(profile, 'User', 'settings.json');
+			const settings = JSON.parse(await readFile(settingsFile, 'utf8'));
+			delete settings['window.menuBarVisibility'];
+			delete settings['window.zoomLevel'];
+			delete settings['chat.titleBar.openInAgentsWindow.enabled'];
+			await writeFile(settingsFile, JSON.stringify(settings));
+			assert.ok(originalIDEWidth);
+			await ide.waitForFunction(width => Math.abs(innerWidth - width) <= 1, originalIDEWidth, { timeout: 15000 });
+			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).waitFor({ timeout: 15000 });
+			report.viewMenuHandoffVerified = true;
+		}
 		if (switchAccessibility) {
 			stage = 'checking both mode switches in forced colors';
 			await checkSwitchAccessibility(ide, 'IDE');
 			await checkSwitchAccessibility(agents, 'Agents');
 		}
 		const alternateWorkspace = join(run, 'Alternate.code-workspace');
+		const agentsWorkspace = join(profile, 'User', 'agent-sessions.code-workspace');
 		let alternate: Page | undefined;
 		if (originatingEditor) {
 			stage = 'opening a second IDE with the same folders';
@@ -775,7 +1082,7 @@ try {
 				await alternate.locator('.part.editor .monaco-editor-background').first().waitFor();
 			}
 		}
-		const expectedIds = await checkWindows('Agents ready');
+		let expectedIds = await checkWindows('Agents ready');
 		assert.equal(expectedIds.length, alternate ? 3 : 2, 'Only the fixture windows should be open');
 		const workspaceRoutes = async () => {
 			const logs = join(profile, 'logs');
@@ -793,12 +1100,82 @@ try {
 				route = (await workspaceRoutes())[count];
 			}
 			assert.ok(route, 'The desktop main process must record the selected workspace');
-			const paths = JSON.parse(route[1]) as { workspace?: Partial<Record<typeof key, { path: string }>> }[];
-			assert.deepEqual(paths.map(path => path.workspace?.[key]?.path.toLowerCase()), [decodeURIComponent(pathToFileURL(expectedPath).pathname).toLowerCase()]);
+			const paths = JSON.parse(route[1]) as {
+				workspace?: Partial<Record<typeof key, { path: string }>>;
+				fileUri?: { path: string };
+				options?: {
+					viewState?: {
+						cursorState?: { selectionStart: { lineNumber: number; column: number }; position: { lineNumber: number; column: number } }[];
+						viewState?: { firstPosition?: { lineNumber: number } };
+					};
+				};
+			}[];
+			assert.deepEqual(paths.filter(path => path.workspace).map(path => path.workspace?.[key]?.path.toLowerCase()), [decodeURIComponent(pathToFileURL(expectedPath).pathname).toLowerCase()]);
+			return paths;
 		};
 		const input = agents.locator('.new-chat-widget-container .interactive-input-part .monaco-editor');
 		const draft = 'Signal-C native draft preserved across mode switches';
-		await input.click(); await agents.keyboard.type(draft);
+		const inlineDraftNotice = agents.locator('.new-chat-widget-container .chat-input-notification-widget').filter({ hasText: 'Your draft stayed in this workspace.' });
+		let otherIDE: Page | undefined;
+		const useModeSwitch = (page: Page) => page.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+		const notificationsCenter = agents.locator('.notifications-center');
+		const showNotifications = async () => {
+			if (!await notificationsCenter.isVisible()) {
+				await agents.keyboard.press('Control+Shift+P');
+				const picker = agents.locator('.quick-input-widget');
+				await picker.locator('input').first().fill('>Show Notifications');
+				await picker.getByRole('option').filter({ hasText: 'Show Notifications' }).first().click();
+				await notificationsCenter.waitFor({ timeout: 15000 });
+			}
+		};
+		if (warmWorkspaceSwitch) {
+			stage = 'opening a second project with no shared workspace roots';
+			const otherFolder = join(run, 'other-project');
+			await mkdir(otherFolder);
+			await writeFile(join(otherFolder, 'other.txt'), 'Another workspace\n');
+			[otherIDE] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', otherFolder]),
+			]);
+			await otherIDE.getByRole('tree').getByText('other.txt', { exact: true }).waitFor({ timeout: 60000 });
+			expectedIds = await checkWindows(stage);
+			assert.equal(expectedIds.length, 3);
+			const composer = agents.locator('.new-chat-widget-container');
+			stage = 'switching an idle Agents composer to the other project';
+			await useModeSwitch(otherIDE);
+			await composer.getByText('other-project', { exact: true }).waitFor({ timeout: 15000 });
+			stage = 'switching the idle composer back to the first project';
+			await useModeSwitch(ide);
+			await composer.getByText('one', { exact: true }).waitFor({ timeout: 15000 });
+			report.warmWorkspaceSwitchVerified = true;
+			stage = 'preserving the populated composer when switching from the other project';
+			await input.click();
+			await agents.keyboard.type(draft);
+			await useModeSwitch(otherIDE);
+			const noticeAction = saveDraftOnWorkspaceSwitch ? 'Save Draft and Open Workspace' : 'Open Draft Settings';
+			await inlineDraftNotice.getByText('The switch requested other-project.', { exact: true }).waitFor({ timeout: 15000 });
+			await inlineDraftNotice.getByRole('button', { name: `Your draft stayed in this workspace. ${noticeAction}`, exact: true }).waitFor({ timeout: 15000 });
+			await capture(agents, 'agents-inline-workspace-handoff.png');
+			await showNotifications();
+			await notificationsCenter.getByRole('button', { name: noticeAction, exact: true }).first().waitFor({ timeout: 15000 });
+			await agents.keyboard.press('Escape');
+			await notificationsCenter.waitFor({ state: 'hidden' });
+			report.inlineDraftSwitchNoticeVerified = true;
+			if (!saveDraftOnWorkspaceSwitch) {
+				await inlineDraftNotice.getByRole('button', { name: 'Dismiss notification', exact: true }).click();
+				await inlineDraftNotice.waitFor({ state: 'hidden' });
+				await showNotifications();
+				await notificationsCenter.getByRole('button', { name: noticeAction, exact: true }).waitFor({ state: 'hidden' });
+				await agents.keyboard.press('Escape');
+				await notificationsCenter.waitFor({ state: 'hidden' });
+				report.inlineDraftSwitchNoticeDismissed = true;
+			}
+			await composer.getByText('one', { exact: true }).waitFor({ timeout: 15000 });
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			report.warmWorkspaceDraftRetained = true;
+		} else {
+			await input.click(); await agents.keyboard.type(draft);
+		}
 		await capture(agents, 'agents-draft.png');
 		if (themes) {
 			stage = 'live theme change in both modes';
@@ -834,20 +1211,59 @@ try {
 			stage = `return to IDE ${roundTrip}`;
 			if (alternate) {
 				await simulateNativeFocus(alternate);
+				if (focusAgentsFromOtherEditor && roundTrip === 1) {
+					stage = 'focusing Agents from the alternate IDE using Open Agents Window';
+					await expectRoutedWorkspace(agentsWorkspace, async () => {
+						await alternate.keyboard.press('Control+Shift+P');
+						const picker = alternate.locator('.quick-input-widget');
+						await picker.locator('input').first().fill('>Open Agents Window');
+						await picker.getByRole('option').filter({ hasText: 'Open Agents Window' }).first().click();
+					});
+					stage = 'returning to the original IDE after the focus-only command';
+				}
 				await expectRoutedWorkspace(workspace, () => activateSwitch(agents, roundTrip, input));
 				report.originatingEditorVerified = true;
+				report.focusOnlyPreservedOrigin ||= !!focusAgentsFromOtherEditor && roundTrip === 1;
 			} else {
 				await activateSwitch(agents, roundTrip, input);
 			}
 			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds, 'The handoff must not open another editor window');
+			if (diffWorkspaceRoot && roundTrip === 1) {
+				await ide.locator('.tabs-container .tab.active').getByText(/(comparison|outside)\.txt/).waitFor();
+				await ide.locator('.tabs-container .tab.dirty').press('Enter');
+				report.diffWorkspaceRootVerified = true;
+				report.focusedDiffSideVerified = !!focusedDiffSide;
+			}
+			if (explorerWorkspaceRoot && roundTrip === 1) {
+				assert.equal(await ide.locator('.tabs-container .tab.active').count(), 0);
+				await selectedExplorerRoot.waitFor();
+				report.explorerWorkspaceRootVerified = true;
+				await createDirtyEditor();
+			}
 			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
 			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+			if (untitledPath) {
+				await ide.locator('.tabs-container .tab.active.dirty').getByText(untitledName, { exact: true }).waitFor();
+				await assert.rejects(readFile(untitledPath), { code: 'ENOENT' });
+				report.untitledWorkspaceRootVerified = !!untitledWorkspaceRoot;
+			}
 			await ide.getByRole('tree').getByText('two', { exact: true }).waitFor();
 			report.windowReuseVerified = true; report.dirtyBufferRetained = true;
 			await capture(ide, `ide-return-${roundTrip}.png`);
 			stage = `return to Agents ${roundTrip}`;
-			await activateSwitch(ide, roundTrip, ide.getByRole('code').getByText(marker, { exact: false }));
+			const switchToAgents = () => activateSwitch(ide, roundTrip, ide.getByRole('code').getByText(marker, { exact: false }));
+			if (explorerFolderMenu && roundTrip === 1) {
+				stage = 'opening another Explorer root with an unsent Agents draft';
+				await openExplorerFolderInAgents('one');
+				await agents.waitForFunction(() => ['Agents kept the current session.', 'Your draft stayed in this workspace.'].some(message => document.body.innerText.includes(message)), undefined, { timeout: 15000 });
+				await agents.locator('.new-chat-widget-container').getByText('two', { exact: true }).waitFor();
+				report.explorerFolderMenuPreservedDraft = true;
+			} else if (switchLayout && roundTrip === 2) {
+				await exerciseNarrowSwitch(ide, switchToAgents);
+			} else {
+				await switchToAgents();
+			}
 			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
 			assert.deepEqual(await checkWindows(stage), expectedIds);
 			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The original Agents draft must remain');
@@ -855,8 +1271,416 @@ try {
 			console.log(`Native round trip ${roundTrip} retained the window IDs, the dirty buffer, and the Agents draft`);
 		}
 		await capture(agents, 'agents-returned.png');
+		if (reopenSavedDiff) {
+			const selectedRoot = selectsSecondRoot ? 1 : 0;
+			const original = join(folders[selectedRoot], 'compare-original.txt');
+			const modified = join(folders[1 - selectedRoot], 'compare-modified.txt');
+			await writeFile(original, 'The original comparison file.\n');
+			await writeFile(modified, 'The modified comparison file.\n');
+			stage = 'capturing both sides of a saved workspace comparison';
+			await simulateNativeFocus(ide);
+			await forwardToRunningApp(['--reuse-window', '--diff', original, modified]);
+			const originalPane = (page: Page) => page.locator('.part.editor .monaco-diff-editor .editor.original');
+			await originalPane(ide).locator('.view-line').first().click({ position: { x: 8, y: 8 } });
+			await ide.keyboard.press('Control+k');
+			await ide.keyboard.press('Shift+Enter');
+			await ide.locator('.tabs-container .tab.active.sticky').getByText(/compare-modified\.txt/).waitFor();
+			await ide.keyboard.press('Control+Home');
+			await ide.keyboard.press('ArrowRight');
+			await ide.keyboard.press('ArrowRight');
+			for (let i = 0; i < 3; i++) { await ide.keyboard.press('Shift+ArrowRight'); }
+			await originalPane(ide).locator('.monaco-editor.focused .selected-text').first().waitFor();
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(ide));
+			await destroyFixtureWindow(ide);
+
+			stage = 'reopening both sides of the saved workspace comparison';
+			const [reopened, paths] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, () => useModeSwitch(agents)),
+			]);
+			const comparePath = (path: string) => decodeURIComponent(pathToFileURL(path).pathname).toLowerCase();
+			assert.deepEqual(paths.flatMap(path => path.fileUri ? [path.fileUri.path.toLowerCase()] : []), [comparePath(original), comparePath(modified)]);
+			const diff = reopened.locator('.part.editor .monaco-diff-editor');
+			await diff.locator('.editor.original .view-line').getByText('The original comparison file.', { exact: true }).waitFor();
+			await diff.locator('.editor.modified .view-line').getByText('The modified comparison file.', { exact: true }).waitFor();
+			await originalPane(reopened).locator('.monaco-editor.focused .selected-text').first().waitFor();
+			assert.ok(await reopened.locator('.tabs-container .tab.active.sticky').getByText(/compare-modified\.txt/).isVisible(), 'The comparison must reopen as a pinned tab');
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			report.reopenedSavedDiffVerified = true;
+			report.reopenedStickyDiffVerified = true;
+			await capture(reopened, 'saved-workspace-restored-diff.png');
+
+			stage = 'restoring the active file when the other side of the comparison is gone';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(reopened));
+			await destroyFixtureWindow(reopened);
+			await rename(modified, join(folders[1 - selectedRoot], 'moved-comparison-file.txt'));
+			const [fallback, fallbackPaths] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, () => useModeSwitch(agents)),
+			]);
+			assert.deepEqual(fallbackPaths.flatMap(path => path.fileUri ? [path.fileUri.path.toLowerCase()] : []), [comparePath(original)]);
+			await fallback.locator('.tabs-container .tab.active').getByText('compare-original.txt', { exact: true }).waitFor();
+			await fallback.locator('.part.statusbar').getByText('Ln 1, Col 6 (3 selected)', { exact: true }).waitFor();
+			assert.equal(await fallback.locator('.part.editor .monaco-diff-editor').count(), 0);
+			report.reopenedDiffWithMissingFileFallbackVerified = true;
+		}
+		if (reopenSavedEditorFile) {
+			const root = folders[selectsSecondRoot ? 1 : 0];
+			const file = join(root, 'saved-workspace-selection.txt');
+			const firstLine = 'Keep this line and selection in the saved workspace.';
+			const content = [firstLine, 'Keep a second cursor here, too.', ...Array.from({ length: 120 }, (_, index) => 'Viewport test line ' + (index + 1)), ''].join('\n');
+			await writeFile(file, content);
+			const differentPreviewName = 'different-preview.txt';
+			if (previewConflict) {
+				await writeFile(join(root, differentPreviewName), 'Keep this newer preview in its own tab.\n');
+			}
+			const selectionLabel = '2 selections (6 characters selected)';
+			const fileName = 'saved-workspace-selection.txt';
+			const activeTab = (page: Page) => page.locator('.part.editor .editor-group-container.active .tabs-container .tab.active');
+			const previewLabel = (tab: Locator) => tab.locator('.monaco-icon-label.italic');
+			const openExplorerPreview = async (page: Page, name: string) => {
+				const explorer = page.locator('.part.sidebar').getByRole('tree').getByText(name, { exact: true });
+				await explorer.click();
+				await previewLabel(activeTab(page)).getByText(name, { exact: true }).waitFor({ timeout: 15000 });
+			};
+			const activeEditor = (page: Page) => page.locator('.part.editor .editor-group-container.active .monaco-editor').first();
+			const leadingViewportLine = (page: Page) => activeEditor(page).evaluate(editor => {
+				const scrollable = editor.querySelector('.editor-scrollable');
+				if (!scrollable) { return ''; }
+				const top = scrollable.getBoundingClientRect().top;
+				const line = [...editor.querySelectorAll('.view-lines .view-line')].find(line => line.getBoundingClientRect().bottom > top + 1);
+				return line?.textContent?.replaceAll('\u00a0', ' ') ?? '';
+			});
+			const waitForViewportLine = async (page: Page, matches: (text: string) => boolean) => {
+				const until = Date.now() + 15000;
+				let text = await leadingViewportLine(page);
+				while (!matches(text) && Date.now() < until) {
+					await new Promise(resolve => setTimeout(resolve, 100));
+					text = await leadingViewportLine(page);
+				}
+				assert.ok(matches(text), 'Unexpected leading editor line: ' + JSON.stringify(text));
+				return text;
+			};
+			let topLine: string;
+			const captureSelection = async (page: Page) => {
+				await simulateNativeFocus(page);
+				if (reopenSavedEditorPreview) {
+					await openExplorerPreview(page, fileName);
+				} else {
+					await forwardToRunningApp(['--reuse-window', file]);
+					await activeTab(page).getByText(fileName, { exact: true }).waitFor();
+				}
+				await activeEditor(page).click({ position: { x: 120, y: 40 } });
+				await page.keyboard.press('Control+Home');
+				for (let i = 0; i < 5; i++) { await page.keyboard.press('ArrowRight'); }
+				await page.keyboard.press('Control+Alt+ArrowDown');
+				for (let i = 0; i < 3; i++) { await page.keyboard.press('Shift+ArrowLeft'); }
+				await page.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor({ timeout: 15000 });
+				await activeEditor(page).hover();
+				await page.mouse.wheel(0, 700);
+				topLine = await waitForViewportLine(page, text => text.startsWith('Viewport test line '));
+				await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(page));
+			};
+			const reopenSavedWorkspace = async (hasDifferentPreview = false, workspacePath = workspace) => {
+				const [reopened, paths] = await Promise.all([
+					launched.waitForEvent('window', { timeout: 45000 }),
+					expectRoutedWorkspace(workspacePath, () => useModeSwitch(agents)),
+				]);
+				const recovered = paths.find(path => path.fileUri?.path.toLowerCase() === decodeURIComponent(pathToFileURL(file).pathname).toLowerCase());
+				assert.ok(recovered, 'The saved workspace must reopen the captured file');
+				await activeTab(reopened).getByText(fileName, { exact: true }).waitFor({ timeout: 15000 });
+				await reopened.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor({ timeout: 15000 });
+				assert.deepEqual(recovered.options?.viewState?.cursorState?.map(({ selectionStart, position }) => [selectionStart, position]), [
+					[{ lineNumber: 1, column: 6 }, { lineNumber: 1, column: 3 }],
+					[{ lineNumber: 2, column: 6 }, { lineNumber: 2, column: 3 }],
+				]);
+				assert.ok((recovered.options?.viewState?.viewState?.firstPosition?.lineNumber ?? 0) > 2);
+				await waitForViewportLine(reopened, text => text === topLine);
+				report.reopenedSavedEditorViewportVerified = true;
+				if (reopenSavedEditorPreview) {
+					assert.equal(await previewLabel(activeTab(reopened)).count(), hasDifferentPreview ? 0 : 1, 'The recovered tab should remain a preview unless that would replace a different preview');
+					if (hasDifferentPreview) {
+						await previewLabel(reopened.locator('.part.editor .editor-group-container.active .tabs-container .tab')).getByText(differentPreviewName, { exact: true }).waitFor();
+						report.restoredDifferentPreviewVerified = true;
+					} else {
+						report.reopenedPreviewTabVerified = true;
+					}
+				}
+				assert.equal(await readFile(file, 'utf8'), content);
+				assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+				return reopened;
+			};
+			stage = 'capturing an active file and selection from the saved workspace';
+			const editorGroups = (page: Page) => page.locator('.part.editor .editor-group-container');
+			if (reopenSavedEditorGroup) {
+				// Dispose of the synthetic scratch buffer so the fixture can close the IDE normally.
+				await runWorkbenchCommand(ide, 'Revert and Close Editor');
+				await ide.locator('.tabs-container .tab.dirty').waitFor({ state: 'hidden' });
+				const leftFile = join(root, 'left-group.txt');
+				await writeFile(leftFile, 'Keep this file open in the first editor group.\n');
+				await simulateNativeFocus(ide);
+				await forwardToRunningApp(['--reuse-window', leftFile]);
+				await ide.locator('.tabs-container .tab.active').getByText('left-group.txt', { exact: true }).waitFor();
+				await runWorkbenchCommand(ide, 'Split Editor Right');
+				await editorGroups(ide).nth(1).waitFor();
+			}
+			await captureSelection(ide);
+			if (reopenSavedEditorGroup) {
+				await editorGroups(ide).nth(1).locator('.tabs-container .tab.active').getByText('saved-workspace-selection.txt', { exact: true }).waitFor();
+				if (previewConflict) {
+					await openExplorerPreview(ide, differentPreviewName);
+				}
+				const closed = ide.waitForEvent('close', { timeout: 30000 });
+				const window = await launched.browserWindow(ide);
+				try { await window.evaluate(native => native.close()); } finally { await window.dispose(); }
+				await closed;
+			} else {
+				await destroyFixtureWindow(ide);
+			}
+
+			stage = 'reopening the saved workspace with its active file and selection';
+			const reopened = await reopenSavedWorkspace(previewConflict);
+			await reopened.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			if (disableEditorRestoration) {
+				assert.equal(await editorGroups(reopened).count(), 1, 'Turning off editor restoration should still reopen the file in a single group');
+				report.editorRestorationPreferenceVerified = true;
+			} else if (reopenSavedEditorGroup) {
+				assert.equal(await editorGroups(reopened).count(), 2, 'The ordinary IDE close should preserve both editor groups');
+				await editorGroups(reopened).nth(0).locator('.tabs-container .tab.active').getByText('left-group.txt', { exact: true }).waitFor();
+				const right = editorGroups(reopened).nth(1);
+				await right.locator('.tabs-container .tab.active').getByText('saved-workspace-selection.txt', { exact: true }).waitFor();
+				assert.ok(await right.evaluate(group => group.classList.contains('active')), 'The restored file must be active in the original group');
+				report.reopenedSavedEditorGroupVerified = true;
+			}
+			report.reopenedSavedEditorFileVerified = true;
+			await capture(reopened, 'saved-workspace-restored-file.png');
+
+			stage = 'preserving the active tab when the saved workspace is already open';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(reopened));
+			await destroyFixtureWindow(reopened);
+			const [replacement] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', workspace]),
+			]);
+			await replacement.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			await simulateNativeFocus(replacement);
+			await forwardToRunningApp(['--reuse-window', join(root, 'README.md')]);
+			const replacementTab = replacement.locator('.tabs-container .tab.active').getByText('README.md', { exact: true });
+			await replacementTab.waitFor();
+			const liveIds = await checkWindows(stage);
+			const livePaths = await expectRoutedWorkspace(workspace, () => useModeSwitch(agents));
+			assert.equal(livePaths.length, 1, 'Returning to an already open workspace must not request a stale file');
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor();
+			assert.deepEqual(await checkWindows(stage), liveIds);
+			assert.equal(await replacementTab.isVisible(), true);
+			report.reopenedSavedEditorReplacementPreserved = true;
+
+			stage = 'reopening a saved workspace configured with a single root';
+			await destroyFixtureWindow(replacement);
+			const singleRootWorkspace = join(run, 'continuity-single-root.code-workspace');
+			await writeFile(singleRootWorkspace, JSON.stringify({ folders: [{ path: root }] }));
+			const [singleRoot] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', singleRootWorkspace]),
+			]);
+			await captureSelection(singleRoot);
+			await destroyFixtureWindow(singleRoot);
+			await reopenSavedWorkspace(false, singleRootWorkspace);
+			report.reopenedSingleRootWorkspaceFileVerified = true;
+		}
+		if (runningConversation) {
+			stage = 'starting a workspace conversation in Agents';
+			await selectMockModel(agents);
+			await input.click();
+			await agents.keyboard.press('Control+a');
+			await agents.keyboard.type('Start a project conversation for the mode switch');
+			await agents.keyboard.press('Enter');
+			const agentsChat = agents.locator('.interactive-session').filter({ hasText: responseText }).last();
+			await agentsChat.getByText(responseText, { exact: true }).first().waitFor({ timeout: 45000 });
+			const liveInput = agentsChat.locator('.interactive-input-part .monaco-editor');
+			await liveInput.click();
+			await agents.keyboard.type(runningPrompt);
+			await agents.keyboard.press('Enter');
+			const runningRequests = () => mock.getRequests().filter(request => JSON.stringify(request).includes(runningPrompt));
+			const requestDeadline = Date.now() + 15000;
+			while (!runningRequests().length && Date.now() < requestDeadline) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+			assert.ok(runningRequests().length, 'The fixture model must receive the request before switching modes');
+			stage = 'opening an in-progress conversation in the project IDE';
+			await agents.getByRole('switch', { name: 'IDE mode', exact: true }).press('Space');
+			const ideChat = ide.locator('.interactive-session').filter({ hasText: responseText }).last();
+			await ideChat.getByText(runningPrompt, { exact: true }).first().waitFor({ timeout: 25000 });
+			assert.equal(await ideChat.getByText(runningReply, { exact: true }).count(), 0);
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+			report.runningConversationOpenedInIDE = true;
+			runningResponse.resolve();
+			await ideChat.getByText(runningReply, { exact: true }).first().waitFor({ timeout: 25000 });
+			await ide.locator('.tabs-container .tab.active.dirty').waitFor();
+			await ide.getByRole('code').getByText(marker, { exact: false }).waitFor();
+			stage = 'returning to the same conversation in Agents';
+			const requestsAfterReply = runningRequests().length;
+			await ide.getByRole('switch', { name: 'IDE mode', exact: true }).press('Enter');
+			await ide.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor();
+			await agentsChat.getByText(runningReply, { exact: true }).first().waitFor();
+			assert.deepEqual(await checkWindows(stage), expectedIds);
+			assert.equal(runningRequests().length, requestsAfterReply, 'A mode switch must not resend the prompt');
+			report.runningConversationRoundTripVerified = true;
+			console.log('The project IDE received the in-progress chat and returned to Agents with its reply');
+		}
+		if (otherIDE) {
+			stage = 'returning to the draft workspace after the first IDE closed';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(otherIDE));
+			await destroyFixtureWindow(ide);
+			const [reopened] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, () => useModeSwitch(agents)),
+			]);
+			await reopened.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
+			await reopened.getByRole('tree').getByText('two', { exact: true }).waitFor();
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			report.warmWorkspaceReturnRetained = true;
+			if (saveDraftOnWorkspaceSwitch) {
+				stage = 'saving the original draft and opening the requested project from the notice';
+				const composer = agents.locator('.new-chat-widget-container');
+				const action = inlineDraftNotice.getByRole('button', { name: 'Your draft stayed in this workspace. Save Draft and Open Workspace', exact: true });
+				await action.focus({ timeout: 15000 });
+				await action.press('Enter');
+				await composer.getByText('other-project', { exact: true }).waitFor({ timeout: 15000 });
+				await inlineDraftNotice.waitFor({ state: 'hidden' });
+				await agents.waitForFunction(expected => {
+					const editor = document.querySelector<HTMLElement>('.new-chat-widget-container .interactive-input-part .monaco-editor');
+					return !!editor?.getBoundingClientRect().height && !editor.innerText.replaceAll('\u00a0', ' ').includes(expected);
+				}, draft, { timeout: 15000 });
+				stage = 'recovering the saved draft in its original project';
+				await showNotifications();
+				await notificationsCenter.getByRole('link', { name: 'Open Draft', exact: true }).first().click({ timeout: 15000 });
+				await composer.getByText('one', { exact: true }).waitFor({ timeout: 15000 });
+				await agents.waitForFunction(expected => document.querySelector<HTMLElement>('.new-chat-widget-container .interactive-input-part .monaco-editor')?.innerText.replaceAll('\u00a0', ' ').includes(expected), draft, { timeout: 15000 });
+				report.savedDraftWorkspaceSwitchVerified = true;
+			}
+		}
 		if (alternate) {
 			const switchToEditor = () => agents.getByRole('switch', { name: 'IDE mode', exact: true }).click();
+			stage = 'returning to the single-folder editor after switching from a saved workspace';
+			const activeFolder = selectsSecondRoot ? folders[1] : folders[0];
+			const [singleFolderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', activeFolder]),
+			]);
+			await singleFolderEditor.getByRole('tree').getByText('README.md', { exact: true }).waitFor();
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(singleFolderEditor));
+			await expectRoutedWorkspace(activeFolder, switchToEditor, 'uri');
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.equal((await checkWindows(stage)).length, expectedIds.length + 1);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'Switching to the single-folder editor must keep the Agents draft');
+			stage = 'returning to the saved workspace after switching from the single-folder editor';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(ide));
+			await expectRoutedWorkspace(workspace, switchToEditor);
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.equal((await checkWindows(stage)).length, expectedIds.length + 1);
+			report.singleFolderOriginVerified = true;
+
+			stage = 'reopening the closed single-folder editor with its selected file';
+			await singleFolderEditor.getByRole('tree').getByText('README.md', { exact: true }).dblclick();
+			await singleFolderEditor.locator('.tabs-container .tab.active').getByText('README.md', { exact: true }).waitFor();
+			await singleFolderEditor.locator('.part.editor .monaco-editor .view-lines').first().click();
+			await singleFolderEditor.keyboard.press('Control+Home');
+			await singleFolderEditor.keyboard.press('ArrowRight');
+			await singleFolderEditor.keyboard.press('ArrowRight');
+			for (let i = 0; i < 3; i++) {
+				await singleFolderEditor.keyboard.press('Shift+ArrowRight');
+			}
+			const selectionLabel = 'Ln 1, Col 6 (3 selected)';
+			await singleFolderEditor.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor();
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(singleFolderEditor));
+			await destroyFixtureWindow(singleFolderEditor);
+			const [reopenedFolderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(activeFolder, switchToEditor, 'uri'),
+			]);
+			await reopenedFolderEditor.locator('.tabs-container .tab.active').getByText('README.md', { exact: true }).waitFor();
+			await reopenedFolderEditor.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor();
+			assert.equal((await checkWindows(stage)).length, expectedIds.length + 1);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'Reopening the single-folder editor must keep the Agents draft');
+			report.closedSingleFolderOriginVerified = true;
+
+			stage = 'returning to a reopened folder without changing its active tab';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(reopenedFolderEditor));
+			await destroyFixtureWindow(reopenedFolderEditor);
+			const replacementFile = 'replacement.txt';
+			await writeFile(join(activeFolder, replacementFile), 'This is the active file in the replacement editor.\n');
+			const [replacementFolderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', activeFolder]),
+			]);
+			await replacementFolderEditor.getByRole('tree').getByText(replacementFile, { exact: true }).dblclick();
+			const replacementTab = replacementFolderEditor.locator('.tabs-container .tab.active').getByText(replacementFile, { exact: true });
+			await replacementTab.waitFor();
+			const paths = await expectRoutedWorkspace(activeFolder, switchToEditor, 'uri');
+			assert.equal(paths.length, 1, 'Returning to an already open folder must not request a stale file');
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor();
+			assert.equal(await replacementTab.isVisible(), true, 'Returning to an already open folder must keep its active tab');
+			assert.equal((await checkWindows(stage)).length, expectedIds.length + 1);
+			report.replacementFolderEditorPreserved = true;
+
+			stage = 'returning after the original editor switched to a different folder';
+			const anotherFolder = join(run, 'other-project');
+			const anotherFile = 'other.txt';
+			const anotherFilePath = join(anotherFolder, anotherFile);
+			const anotherFileContents = 'Keep this project open in the original window.\n';
+			await mkdir(anotherFolder);
+			await writeFile(anotherFilePath, anotherFileContents);
+			execFileSync('git', ['init', '--quiet'], { cwd: anotherFolder, windowsHide: true, stdio: 'pipe' });
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(replacementFolderEditor));
+			await simulateNativeFocus(replacementFolderEditor);
+			await expectRoutedWorkspace(anotherFolder, () => forwardToRunningApp(['--reuse-window', anotherFolder]), 'uri');
+			await replacementFolderEditor.getByRole('tree').getByText(anotherFile, { exact: true }).dblclick();
+			const anotherTab = replacementFolderEditor.locator('.tabs-container .tab.active').getByText(anotherFile, { exact: true });
+			await anotherTab.waitFor();
+			const anotherEditor = replacementFolderEditor.locator('.part.editor .monaco-editor .view-lines').first();
+			const unsavedEdit = 'Unsaved edit in the other project.';
+			await anotherEditor.click();
+			await replacementFolderEditor.keyboard.press('Control+Home');
+			await replacementFolderEditor.keyboard.type(unsavedEdit);
+			const [restoredFolderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(activeFolder, switchToEditor, 'uri'),
+			]);
+			await restoredFolderEditor.locator('.tabs-container .tab.active').getByText(replacementFile, { exact: true }).waitFor();
+			assert.equal(await anotherTab.isVisible(), true, 'Returning to the old project must leave the other project open');
+			assert.ok((await anotherEditor.innerText()).replaceAll('\u00a0', ' ').includes(unsavedEdit), 'Returning to the old project must preserve the other editor’s unsaved changes');
+			assert.equal(await readFile(anotherFilePath, 'utf8'), anotherFileContents);
+			assert.equal((await checkWindows(stage)).length, expectedIds.length + 2);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'Returning to the old project must keep the Agents draft');
+			report.repurposedFolderEditorPreserved = true;
+			await destroyFixtureWindow(restoredFolderEditor);
+
+			stage = 'keeping the first project file when the same window switches from a second project';
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(replacementFolderEditor));
+			await inlineDraftNotice.getByText('The switch requested other-project.', { exact: true }).waitFor({ timeout: 15000 });
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'The first project must keep its draft when the second project opens Agents');
+			const [draftFolderEditor] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(activeFolder, switchToEditor, 'uri'),
+			]);
+			await draftFolderEditor.locator('.tabs-container .tab.active').getByText(replacementFile, { exact: true }).waitFor();
+			assert.equal(await anotherTab.isVisible(), true, 'Returning to the draft’s editor must keep the second project open');
+			report.reusedWindowDraftFilePreserved = true;
+			await destroyFixtureWindow(draftFolderEditor);
+			await destroyFixtureWindow(replacementFolderEditor);
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(ide));
+
+			if (focusAgentsFromOtherEditor) {
+				stage = 'switching explicitly from the alternate IDE';
+				await expectRoutedWorkspace(agentsWorkspace, () => alternate.getByRole('switch', { name: 'IDE mode', exact: true }).click());
+				await expectRoutedWorkspace(alternateWorkspace, switchToEditor);
+				await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+				assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft), 'Explicitly switching from another IDE must keep the Agents draft');
+				assert.deepEqual(await checkWindows(stage), expectedIds);
+				await expectRoutedWorkspace(agentsWorkspace, () => ide.getByRole('switch', { name: 'IDE mode', exact: true }).click());
+				report.explicitSwitchUpdatedOrigin = true;
+			}
 			stage = 'return after the originating editor closed';
 			await destroyFixtureWindow(ide);
 			await expectRoutedWorkspace(alternateWorkspace, switchToEditor);
@@ -864,31 +1688,137 @@ try {
 			assert.equal((await checkWindows(stage)).length, 2);
 			report.closedOriginFallbackVerified = true;
 
+			stage = 'reopening the originating workspace with its active file while an alternate is open';
+			const alternateBuffer = 'Unsaved content in the alternate workspace';
+			await alternate.keyboard.press('Control+n');
+			await alternate.locator('.part.editor .monaco-editor .view-lines').first().click();
+			await alternate.keyboard.type(alternateBuffer);
+			const alternateText = alternate.getByRole('code').getByText(alternateBuffer, { exact: true });
+			await alternateText.waitFor();
+			const contextFile = join(activeFolder, 'originating-editor-context.txt');
+			await writeFile(contextFile, 'Restore this file and selection to its original workspace.\n');
+			const selectContextText = async (page: Page) => {
+				await page.locator('.part.editor .monaco-editor .view-lines').first().click();
+				await page.keyboard.press('Control+Home');
+				await page.keyboard.press('ArrowRight');
+				await page.keyboard.press('ArrowRight');
+				for (let i = 0; i < 3; i++) {
+					await page.keyboard.press('Shift+ArrowRight');
+				}
+				await page.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor();
+			};
+			const [source] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				forwardToRunningApp(['--new-window', workspace]),
+			]);
+			await source.getByRole('tree').getByText('originating-editor-context.txt', { exact: true }).dblclick();
+			await selectContextText(source);
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(source));
+			await destroyFixtureWindow(source);
+			const [recoveredSource] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, switchToEditor),
+			]);
+			await recoveredSource.locator('.tabs-container .tab.active').getByText('originating-editor-context.txt', { exact: true }).waitFor();
+			await recoveredSource.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor();
+			assert.ok(await alternateText.isVisible(), 'Reopening the originating workspace must keep the alternate editor’s unsaved buffer');
+			assert.equal((await checkWindows(stage)).length, 3);
+			report.closedOriginFilePreferredOverAlternate = true;
+
+			stage = 'returning to the exact reopened workspace without changing its active tab';
+			await recoveredSource.getByRole('tree').getByText('README.md', { exact: true }).first().dblclick();
+			const changedTab = recoveredSource.locator('.tabs-container .tab.active').getByText('README.md', { exact: true });
+			await changedTab.waitFor();
+			const movedContextFile = join(activeFolder, 'moved-originating-editor-context.txt');
+			await rename(contextFile, movedContextFile);
+			await simulateNativeFocus(alternate);
+			const returnPaths = await expectRoutedWorkspace(workspace, switchToEditor);
+			assert.equal(returnPaths.length, 1, 'Returning to a live workspace must not request its stale file');
+			assert.ok(await changedTab.isVisible(), 'Returning to the reopened editor must preserve its active tab');
+			assert.equal((await checkWindows(stage)).length, 3);
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			report.reopenedOriginWindowPreferredOverAlternate = true;
+			await destroyFixtureWindow(recoveredSource);
+
+			stage = 'using the alternate when the originating file is gone';
+			await expectRoutedWorkspace(alternateWorkspace, switchToEditor);
+			await agents.locator('[role="switch"][aria-label="IDE mode"][aria-busy="false"]').waitFor({ timeout: 30000 });
+			assert.equal((await checkWindows(stage)).length, 2);
+			assert.ok(await alternateText.isVisible(), 'The fallback must preserve the alternate editor’s unsaved buffer');
+			report.missingOriginFileFallbackVerified = true;
+			await rename(movedContextFile, contextFile);
+
 			stage = 'reopening the originating workspace after all editors closed';
 			await destroyFixtureWindow(alternate);
 			const [reopened] = await Promise.all([
 				launched.waitForEvent('window', { timeout: 45000 }),
 				expectRoutedWorkspace(workspace, switchToEditor),
 			]);
-			await reopened.getByRole('tree').getByText('one', { exact: true }).waitFor();
+			await reopened.getByRole('tree').getByText('one', { exact: true }).waitFor({ timeout: 60000 });
 			await reopened.getByRole('tree').getByText('two', { exact: true }).waitFor();
 			await reopened.waitForFunction(title => document.title.includes(title), savedWorkspaceTitle);
 			assert.equal(launched.windows().length, 2);
 			report.reopenedOriginWorkspaceVerified = true;
 
+			stage = 'recovering the saved origin after its window changes projects';
+			const contextTab = reopened.locator('.tabs-container .tab.active').getByText('originating-editor-context.txt', { exact: true });
+			await contextTab.waitFor();
+			const scratchTab = reopened.locator('.tabs-container .tab.dirty').filter({ hasText: marker });
+			if (await scratchTab.count()) {
+				await scratchTab.press('Enter');
+				await runWorkbenchCommand(reopened, 'Revert and Close Editor');
+				await scratchTab.waitFor({ state: 'hidden' });
+				await contextTab.waitFor();
+			}
+			await selectContextText(reopened);
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(reopened));
+			const switchedWorkspace = join(run, 'switched-project.code-workspace');
+			await writeFile(switchedWorkspace, JSON.stringify({ folders: [{ path: anotherFolder }] }));
+			await simulateNativeFocus(reopened);
+			await expectRoutedWorkspace(switchedWorkspace, () => forwardToRunningApp(['--reuse-window', switchedWorkspace]));
+			await reopened.getByRole('tree').getByText(anotherFile, { exact: true }).dblclick();
+			const switchedTab = reopened.locator('.tabs-container .tab.active').getByText(anotherFile, { exact: true });
+			await switchedTab.waitFor();
+			const switchedEditor = reopened.locator('.part.editor .monaco-editor .view-lines').first();
+			const switchedEdit = 'Unsaved edit in the newly opened saved workspace.';
+			await switchedEditor.click();
+			await reopened.keyboard.press('Control+Home');
+			await reopened.keyboard.type(switchedEdit);
+			await reopened.locator('.tabs-container .tab.active.dirty').getByText(anotherFile, { exact: true }).waitFor();
+			await expectRoutedWorkspace(agentsWorkspace, () => useModeSwitch(reopened));
+			await inlineDraftNotice.getByText('The switch requested other-project.', { exact: true }).waitFor({ timeout: 15000 });
+			const assertSwitchedWorkspacePreserved = async () => {
+				assert.ok(await switchedTab.isVisible(), 'Returning to the saved origin must keep the other workspace in the existing window');
+				assert.ok((await switchedEditor.innerText()).replaceAll('\u00a0', ' ').includes(switchedEdit), 'Returning to the saved origin must preserve the other workspace’s unsaved edit');
+				assert.equal(await readFile(anotherFilePath, 'utf8'), anotherFileContents);
+			};
+			const [restoredSavedOrigin] = await Promise.all([
+				launched.waitForEvent('window', { timeout: 45000 }),
+				expectRoutedWorkspace(workspace, switchToEditor),
+			]);
+			await restoredSavedOrigin.locator('.tabs-container .tab.active').getByText('originating-editor-context.txt', { exact: true }).waitFor();
+			await restoredSavedOrigin.locator('.part.statusbar').getByText(selectionLabel, { exact: true }).waitFor();
+			await assertSwitchedWorkspacePreserved();
+			assert.ok((await input.innerText()).replaceAll('\u00a0', ' ').includes(draft));
+			assert.equal((await checkWindows(stage)).length, 3);
+			report.repurposedSavedWorkspaceRestored = true;
+			await destroyFixtureWindow(restoredSavedOrigin);
+
 			stage = 'return after the saved workspace no longer contains the Agents folder';
-			await destroyFixtureWindow(reopened);
-			await writeFile(workspace, JSON.stringify({ folders: [{ path: folders[1] }] }));
+			const [agentsFolder, otherFolder] = selectsSecondRoot ? [folders[1], folders[0]] : folders;
+			await writeFile(workspace, JSON.stringify({ folders: [{ path: otherFolder }] }));
 			const [folderEditor] = await Promise.all([
 				launched.waitForEvent('window', { timeout: 45000 }),
-				expectRoutedWorkspace(folders[0], switchToEditor, 'uri'),
+				expectRoutedWorkspace(agentsFolder, switchToEditor, 'uri'),
 			]);
 			await folderEditor.getByRole('tree').getByText('README.md', { exact: true }).waitFor();
-			assert.equal(launched.windows().length, 2);
+			await assertSwitchedWorkspacePreserved();
+			assert.equal((await checkWindows(stage)).length, 3);
 			report.changedOriginFallbackVerified = true;
 		}
 	}
 	if (keyboard) { assert.equal(report.keyboardActivations.length, 4, 'The native fixture must exercise both modes by shortcut and focused control'); }
+	if (paletteSwitch) { assert.equal(report.paletteActivations.length, 2, 'The native fixture must find both mode switches in the Command Palette'); }
 	if (protocol) {
 		stage = 'launch environment trace';
 		const logFiles = await readdir(join(profile, 'logs'), { recursive: true, withFileTypes: true });
@@ -915,6 +1845,7 @@ try {
 	throw error;
 } finally {
 	if (deadline) { clearTimeout(deadline); }
+	runningResponse.resolve();
 	try {
 		await app?.close();
 	} finally {

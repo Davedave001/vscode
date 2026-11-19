@@ -110,6 +110,7 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 		}(),
 		activeSessionResource = observableValue<URI>('activeSessionResource', URI.parse('vscode-chat-session://local/session')),
 		applicationName = 'code-oss',
+		signalCOutlookOAuthClientId?: string,
 	): CustomizationMarketplaceWorkbenchService {
 		const platformSources = platformService.allSources ?? platformService.sources ?? [CustomizationMarketplaceSources.AgentFinderPublicFeed];
 		const normalizedPlatformService = new class extends mock<ICustomizationMarketplaceService>() {
@@ -142,11 +143,11 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			defaultAccountService,
 			authenticationService,
 			telemetryService,
-			{ _serviceBrand: undefined, applicationName },
+			{ _serviceBrand: undefined, applicationName, signalCOutlookOAuthClientId },
 		));
 	}
 
-	function createMixedFixture(enabledIds: readonly string[], applicationName = 'code-oss') {
+	function createMixedFixture(enabledIds: readonly string[], applicationName = 'code-oss', signalCOutlookOAuthClientId?: string) {
 		const configuration = createConfiguration(enabledIds);
 		const publicEntries: ICustomizationMarketplaceEntry[] = Array.from({ length: 45 }, (_, index) => ({
 			identifier: `public-${index}`, displayName: `Mail server ${index}`, description: '', score: 100 - index,
@@ -175,7 +176,7 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			override readonly allSources = this.sources;
 			override async query() { return { items: [], total: 0 }; }
 		}();
-		const service = createService(configuration, platformService, connectorsService, harnessProvider, undefined, undefined, undefined, undefined, undefined, undefined, undefined, applicationName);
+		const service = createService(configuration, platformService, connectorsService, harnessProvider, undefined, undefined, undefined, undefined, undefined, undefined, undefined, applicationName, signalCOutlookOAuthClientId);
 		return { configuration, service, publicEntries, connectors, connectorsService, nativeRequests, connectorCalls };
 	}
 
@@ -190,6 +191,10 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 			[signalCAppConnectionSource.id, 'amplitude-eu'], [signalCAppConnectionSource.id, 'amplitude-us'],
 		]);
 		assert.strictEqual(second.nextCursor, undefined);
+		for (const query of ['Outlook', 'Office 365', 'SharePoint']) {
+			const apps = await service.query({ ...options, query }, CancellationToken.None);
+			assert.deepStrictEqual(apps.items.map(item => [item.sourceId, item.identifier]), [[signalCAppConnectionSource.id, 'microsoft-365']]);
+		}
 		assert.deepStrictEqual(nativeRequests, []);
 		assert.deepStrictEqual(connectorCalls, []);
 
@@ -197,6 +202,12 @@ suite('CustomizationMarketplaceWorkbenchService', () => {
 		assert.deepStrictEqual(plugins.items, []);
 		await setEnabled(configuration, CustomizationMarketplaceConfiguration.MarketplaceEnabled, false);
 		await assert.rejects(service.query(options, CancellationToken.None), isCancellationError);
+	});
+
+	test('shows Outlook mail first for Microsoft 365 when a desktop registration is bundled', async () => {
+		const { service } = createMixedFixture([], 'signal-c', '4aaa0011-bbbb-4ccc-8ddd-eeee12345678');
+		const apps = await service.query({ sourceIds: [signalCAppConnectionSource.id], query: 'Microsoft 365' }, CancellationToken.None);
+		assert.deepStrictEqual(apps.items.map(item => item.identifier), ['outlook-direct', 'microsoft-365']);
 	});
 
 	test('Local omits the GitHub Feed while keeping existing platform registries', async () => {

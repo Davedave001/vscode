@@ -4,13 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { DeferredPromise } from '../../../base/common/async.js';
 import { mock, upcastPartial } from '../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
 import { INativeHostService } from '../../../platform/native/common/native.js';
 import { IOpenedMainWindow, IOpenEmptyWindowOptions, IOpenWindowOptions, IWindowOpenable, isFolderToOpen } from '../../../platform/window/common/window.js';
 import { constObservable, observableValue } from '../../../base/common/observable.js';
 import { URI } from '../../../base/common/uri.js';
-import { openSessionInVSCode, returnToVSCodeEditor, shouldShowReturnToVSCodeEditor } from '../../electron-browser/actions/vscodeActions.js';
+import { OpenSessionInVSCodeAction, openSessionInVSCode, returnToVSCodeEditor, shouldShowReturnToVSCodeEditor } from '../../electron-browser/actions/vscodeActions.js';
 import { getChatSessionToOpenInEditor } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
 import { IChat, ISession, SessionStatus } from '../../../workbench/services/sessions/common/session.js';
 import { ISessionsProvidersService } from '../../../workbench/contrib/sessions/browser/sessionsProvidersService.js';
@@ -32,6 +33,9 @@ import { PathStyle } from '../../../platform/agentHost/common/state/protocol/com
 import { ISSHAgentHostConnection, ISSHRemoteAgentHostService } from '../../../platform/agentHost/common/sshRemoteAgentHost.js';
 import { ITunnelAgentHostService, TunnelGatewayServerType } from '../../../platform/agentHost/common/tunnelAgentHost.js';
 import { IWorkbenchEnvironmentService } from '../../../workbench/services/environment/common/environmentService.js';
+import { ICustomViewDescriptor, ICustomViewService } from '../../../workbench/contrib/sessions/browser/customView.js';
+import { ASSISTANT_CUSTOM_VIEW_ID } from '../../../workbench/contrib/sessions/common/chatConstants.js';
+import { AssistantWorktreeStatus, IAssistantAgentChats } from '../../contrib/sessions/browser/assistantAgentChats.js';
 
 suite('VS Code Actions', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
@@ -54,6 +58,113 @@ suite('VS Code Actions', () => {
 		notifications = [];
 		instantiationService.stub(INotificationService, upcastPartial<INotificationService>({ info: message => { notifications.push(String(message)); } }));
 	});
+
+	test('repeated mode switches to the IDE share one attempt and can retry after failure', async () => {
+		const firstHandoff = new DeferredPromise<void>();
+		let openCount = 0;
+		const workspace = URI.file('/workspace');
+		instantiationService.stub(ICustomViewService, upcastPartial<ICustomViewService>({
+			activeCustomView: constObservable(upcastPartial<ICustomViewDescriptor>({ id: ASSISTANT_CUSTOM_VIEW_ID })),
+		}));
+		instantiationService.stub(IAssistantAgentChats, upcastPartial<IAssistantAgentChats>({ target: { workspace, fileRoots: [workspace] } }));
+		instantiationService.stub(INativeHostService, upcastPartial<INativeHostService>({
+			openWindow: () => ++openCount === 1 ? firstHandoff.p : Promise.resolve(),
+		}));
+		const action = new OpenSessionInVSCodeAction();
+		const switchToIDE = () => instantiationService.invokeFunction(accessor => action.run(accessor));
+		const first = assert.rejects(switchToIDE(), /Could not open editor/);
+		const repeated = switchToIDE();
+		try {
+			assert.strictEqual(openCount, 1);
+		} finally {
+			await firstHandoff.error(new Error('Could not open editor'));
+			await Promise.all([first, repeated]);
+		}
+		await switchToIDE();
+		assert.strictEqual(openCount, 2);
+	});
+	test('opens Assistant’s exact worktree and blocks fallback when it is missing or untrusted', async () => {
+		const project = URI.file('/project');
+		const checkout = URI.file('/project-feature');
+		const opened: (IOpenEmptyWindowOptions | IWindowOpenable[] | undefined)[] = [];
+		let status: AssistantWorktreeStatus = 'ready';
+		instantiationService.stub(ICustomViewService, upcastPartial<ICustomViewService>({
+			activeCustomView: constObservable(upcastPartial<ICustomViewDescriptor>({ id: ASSISTANT_CUSTOM_VIEW_ID })),
+		}));
+		instantiationService.stub(IAssistantAgentChats, upcastPartial<IAssistantAgentChats>({
+			target: { workspace: project, fileRoots: [project, URI.file('/utilities')], worktree: { uri: checkout, label: 'feature' } },
+			getWorktreeStatus: async worktree => { assert.deepStrictEqual(worktree.uri, checkout); return status; },
+		}));
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(toOpen?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { opened.push(toOpen); }
+		}());
+		instantiationService.stub(INotificationService, upcastPartial<INotificationService>({ warn: message => { notifications.push(String(message)); } }));
+		const action = new OpenSessionInVSCodeAction();
+		const switchToIDE = () => instantiationService.invokeFunction(accessor => action.run(accessor));
+		await switchToIDE();
+		status = 'missing';
+		await switchToIDE();
+		status = 'untrusted';
+		await switchToIDE();
+		status = 'changed';
+		await switchToIDE();
+		assert.deepStrictEqual(opened, [[{ folderUri: checkout }]]);
+		assert.match(notifications[0], /worktree is unavailable/);
+		assert.match(notifications[1], /worktree needs trust/);
+		assert.match(notifications[2], /Git checkout at the selected path has changed/);
+	});
+
+	test('Assistant switches to IDE with every saved root and the same window reuse as regular chat', async () => {
+		const folders = [URI.file('/workspace/ui'), URI.file('/workspace/service')];
+		const calls: { target: IOpenEmptyWindowOptions | IWindowOpenable[] | undefined; options: IOpenWindowOptions | undefined }[] = [];
+		instantiationService.stub(ICustomViewService, upcastPartial<ICustomViewService>({
+			activeCustomView: constObservable(upcastPartial<ICustomViewDescriptor>({ id: ASSISTANT_CUSTOM_VIEW_ID })),
+		}));
+		instantiationService.stub(IAssistantAgentChats, upcastPartial<IAssistantAgentChats>({
+			target: { workspace: folders[0], fileRoots: folders },
+		}));
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(target?: IOpenEmptyWindowOptions | IWindowOpenable[], options?: IOpenWindowOptions): Promise<void> { calls.push({ target, options }); }
+		}());
+		await instantiationService.invokeFunction(accessor => new OpenSessionInVSCodeAction().run(accessor));
+		assert.deepStrictEqual(calls.map(({ target, options }) => ({
+			folders: Array.isArray(target) ? target.filter(isFolderToOpen).map(folder => folder.folderUri) : [],
+			reuse: options?.reuseWorkspaceContainingFolder,
+			chat: options?.chatSessionToOpen,
+		})), [{ folders, reuse: true, chat: undefined }]);
+	});
+
+	test('Assistant refuses a split workspace instead of choosing one of its connections', async () => {
+		instantiationService.stub(ICustomViewService, upcastPartial<ICustomViewService>({
+			activeCustomView: constObservable(upcastPartial<ICustomViewDescriptor>({ id: ASSISTANT_CUSTOM_VIEW_ID })),
+		}));
+		const project = URI.file('/workspace/ui');
+		instantiationService.stub(IAssistantAgentChats, upcastPartial<IAssistantAgentChats>({
+			target: { workspace: project, fileRoots: [project, URI.parse('vscode-remote://ssh-remote+fixture/workspace/service')] },
+		}));
+		const opened: unknown[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(target?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { opened.push(target); }
+		}());
+		await instantiationService.invokeFunction(accessor => new OpenSessionInVSCodeAction().run(accessor));
+		assert.deepStrictEqual(opened, []);
+		assert.match(notifications[0], /different remote connections/);
+	});
+
+	test('a folderless Assistant stays on the current connection without borrowing a chat workspace', async () => {
+		instantiationService.stub(ICustomViewService, upcastPartial<ICustomViewService>({
+			activeCustomView: constObservable(upcastPartial<ICustomViewDescriptor>({ id: ASSISTANT_CUSTOM_VIEW_ID })),
+		}));
+		instantiationService.stub(IAssistantAgentChats, upcastPartial<IAssistantAgentChats>({ target: { fileRoots: [] } }));
+		instantiationService.stub(IWorkbenchEnvironmentService, upcastPartial<IWorkbenchEnvironmentService>({ remoteAuthority: 'ssh-remote+assistant-fixture' }));
+		const opened: unknown[] = [];
+		instantiationService.stub(INativeHostService, new class extends mock<INativeHostService>() {
+			override async openWindow(target?: IOpenEmptyWindowOptions | IWindowOpenable[]): Promise<void> { opened.push(target); }
+		}());
+		await instantiationService.invokeFunction(accessor => new OpenSessionInVSCodeAction().run(accessor));
+		assert.deepStrictEqual(opened, [{ remoteAuthority: 'ssh-remote+assistant-fixture', reuseExistingWindow: true }]);
+	});
+
 	for (const source of [undefined, 'ssh-remote+source']) {
 		for (const count of [0, 1, 2]) {
 			for (const sent of [false, true]) {

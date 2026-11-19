@@ -74,6 +74,8 @@ export interface ICommandAction {
 	id: string;
 	title: string | ICommandActionTitle;
 	shortTitle?: string | ICommandActionTitle;
+	/** An alternate name used to find the command in the Command Palette. */
+	searchAlias?: ILocalizedString;
 	/**
 	 * Metadata about this command, used for:
 	 * - API commands

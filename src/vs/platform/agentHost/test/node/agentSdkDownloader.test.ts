@@ -93,12 +93,12 @@ async function startServer(body: Buffer): Promise<ITestServer> {
 	});
 }
 
-function makeEnvService(userDataPath: string): INativeEnvironmentService {
+function makeEnvService(userDataPath: string, appRoot?: string): INativeEnvironmentService {
 	// `RequestService.request` calls `getResolvedShellEnv(configService, logService, args, process.env)`.
 	// `force-disable-user-env: true` short-circuits before spawning a shell —
 	// without it `shellEnv.ts:140` registers a cancellation listener that
 	// leaks across tests and trips ensureNoDisposablesAreLeakedInTestSuite.
-	return { userDataPath, args: { 'force-disable-user-env': true } as never } as unknown as INativeEnvironmentService;
+	return { userDataPath, appRoot, args: { 'force-disable-user-env': true } as never } as unknown as INativeEnvironmentService;
 }
 
 function makeProductService(config: { version: string; urlTemplate: string } | undefined): IProductService {
@@ -250,6 +250,7 @@ suite('AgentSdkDownloader', () => {
 		productConfig?: { version?: string; urlTemplate?: string } | null,
 		telemetryService: ITelemetryService = NullTelemetryService,
 		storageService?: IAgentHostStorageService,
+		appRoot?: string,
 	) {
 		const config = productConfig === null ? undefined : {
 			version: productConfig?.version ?? '1.0.0',
@@ -257,7 +258,7 @@ suite('AgentSdkDownloader', () => {
 		};
 		const storage = storageService ?? disposables.add(new AgentHostStorageService(undefined, new NullLogService()));
 		return disposables.add(new AgentSdkDownloader(
-			makeEnvService(userDataPath),
+			makeEnvService(userDataPath, appRoot),
 			makeProductService(config),
 			makeRequestService(disposables),
 			makeFileService(disposables),
@@ -269,6 +270,19 @@ suite('AgentSdkDownloader', () => {
 
 	test('isAvailable: false when no env override and no product config', () => {
 		assert.strictEqual(makeDownloader(null).isAvailable(ClaudeSdkPackage), false);
+	});
+
+	test('loads the complete bundled SDK without a product CDN or environment override', async () => {
+		const appRoot = path.join(userDataPath, 'app');
+		const bundled = path.join(appRoot, 'agent-sdks', 'claude');
+		const downloader = makeDownloader(null, NullTelemetryService, undefined, appRoot);
+		await fsp.mkdir(bundled, { recursive: true });
+		assert.strictEqual(downloader.isAvailable(ClaudeSdkPackage), false);
+		await fsp.writeFile(path.join(bundled, '.complete'), '');
+		assert.strictEqual(downloader.isAvailable(ClaudeSdkPackage), true);
+		assert.strictEqual(await downloader.resolveInstalledSdkRoot(ClaudeSdkPackage), bundled);
+		assert.strictEqual(await downloader.loadSdkRoot(ClaudeSdkPackage, newToken()), bundled);
+		assert.strictEqual(server.requestCount, 0);
 	});
 
 	test('isAvailable: true when env override set', () => {

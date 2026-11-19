@@ -613,6 +613,8 @@ export interface IMcpPromptMessage extends MCP.PromptMessage { }
 export interface IMcpToolCallContext {
 	chatSessionResource: URI | undefined;
 	chatRequestId?: string;
+	/** A background caller cannot resolve authentication, trust, or URL prompts. */
+	errorOnUserInteraction?: boolean;
 	/**
 	 * Optional W3C trace context `traceparent` value to forward to the MCP server
 	 * via `_meta.traceparent` on the JSON-RPC `tools/call` request (MCP SEP-414).
@@ -920,7 +922,7 @@ export namespace McpConnectionState {
 	export const toString = (s: McpConnectionState): string => {
 		switch (s.state) {
 			case Kind.Stopped:
-				return localize('mcpstate.stopped', 'Stopped');
+				return needsSignIn(s) ? localize('mcpstate.signInRequired', 'Sign-in required') : localize('mcpstate.stopped', 'Stopped');
 			case Kind.Starting:
 				return localize('mcpstate.starting', 'Starting');
 			case Kind.Running:
@@ -952,6 +954,8 @@ export namespace McpConnectionState {
 
 	/** Gets whether the state is a running state. */
 	export const isRunning = (s: McpConnectionState) => !canBeStarted(s.state);
+
+	export const needsSignIn = (s: McpConnectionState) => s.state === Kind.Stopped && s.reason === 'needs-user-interaction';
 
 	export interface Stopped {
 		readonly state: Kind.Stopped;
@@ -991,8 +995,8 @@ export class McpConnectionFailedError extends Error { }
 export class UserInteractionRequiredError extends Error {
 	private static readonly prefix = 'User interaction required: ';
 
-	public static is(error: Error): boolean {
-		return error.message.startsWith(this.prefix);
+	public static is(error: unknown): boolean {
+		return error instanceof Error && error.message.startsWith(this.prefix);
 	}
 
 	constructor(public readonly reason: string) {

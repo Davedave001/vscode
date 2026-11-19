@@ -13,10 +13,10 @@ import { URI } from '../../../../../base/common/uri.js';
 import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { runWithFakedTimers } from '../../../../../base/test/common/timeTravelScheduler.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
-import { INotificationService, IPromptChoice, IPromptChoiceWithMenu, NoOpNotification } from '../../../../../platform/notification/common/notification.js';
+import { INotificationService, IPromptChoice, IPromptChoiceWithMenu, NoOpNotification, NotificationPriority } from '../../../../../platform/notification/common/notification.js';
 import { ILifecycleService, LifecyclePhase } from '../../../../../workbench/services/lifecycle/common/lifecycle.js';
 import { IViewsService } from '../../../../../workbench/services/views/common/viewsService.js';
 import { SessionView } from '../../../../../workbench/contrib/sessions/browser/parts/sessionView.js';
@@ -36,12 +36,15 @@ import { writeNewChatDraftState } from '../../../../../workbench/contrib/session
 import { ITestSessionsService, ITestSessionWithChat, stubFocusedSessionHostFromSessionsService, withCreatedStatus } from '../../../../../workbench/contrib/sessions/test/browser/sessionHostTestUtils.js';
 import { IRemoteWorkspaceFolder, IRemoteWorkspaceHandoffService, RemoteWorkspaceHandoffResult } from '../../../../common/remoteWorkspaceHandoff.js';
 import { AGENT_HOST_SCHEME } from '../../../../../platform/agentHost/common/agentHostUri.js';
+import { ISessionDraftsService } from '../../../../../workbench/contrib/sessions/browser/sessionDraftsService.js';
+import { ChatInputNotificationActionKind, IChatInputNotification, IChatInputNotificationService, isChatInputNotificationApplicableToSession } from '../../../../../workbench/contrib/chat/browser/widget/input/chatInputNotificationService.js';
+import { IFocusedSessionHostService } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 
 suite('Agents Window workspace handoff', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 	const folderUri = URI.file('/private/from-editor');
 
-	function createHarness(whenStartupProvidersRegistered: Promise<unknown> = Promise.resolve()) {
+	function createHarness(whenStartupProvidersRegistered: Promise<unknown> = Promise.resolve(), inputUri?: URI) {
 		const instantiationService = disposables.add(new TestInstantiationService());
 		const composerService = disposables.add(new NewSessionComposerService());
 		const activeSession = observableValue<ITestSessionWithChat | undefined>('activeSession', undefined);
@@ -56,6 +59,8 @@ suite('Agents Window workspace handoff', () => {
 		const noWorkspaceSelections: ISelectNoWorkspaceOptions[] = [];
 		const selections: { folder: URI; options?: ISelectWorkspaceOptions }[] = [];
 		const notifications: (IPromptChoice | IPromptChoiceWithMenu)[][] = [];
+		const notificationPriorities: (NotificationPriority | undefined)[] = [];
+		let inputNotice: IChatInputNotification | undefined;
 		const notificationMessages: string[] = [];
 		const remoteRequests: IRemoteWorkspaceFolder[] = [];
 		const states: WorkspaceHandoffState[] = [];
@@ -73,6 +78,10 @@ suite('Agents Window workspace handoff', () => {
 		let input: IChatDraft = { inputText: '', attachments: [] };
 		let inputReady = true;
 		let draftReady = Promise.resolve();
+		const savedDraftsEnabled = observableValue('savedDraftsEnabled', true);
+		const stowedInputs: IChatDraft[] = [];
+		const commands: { id: string; args: unknown[] }[] = [];
+		let canStow = true;
 		const sessionsService = upcastPartial<ITestSessionsService>({
 			activeSession,
 			initialRestoreComplete,
@@ -134,6 +143,7 @@ suite('Agents Window workspace handoff', () => {
 		instantiationService.stub(INewSessionComposerService, composerService);
 		instantiationService.stub(IStorageService, storage);
 		disposables.add(composerService.registerComposer({
+			inputUri,
 			sessionResource: composerSessionResource,
 			get canApplyWorkspaceDefault() { return defaultAllowed; },
 			get isInputReady() { return inputReady; },
@@ -141,15 +151,21 @@ suite('Agents Window workspace handoff', () => {
 			onDidChangeInput: inputChanged.event,
 			animatePrompt: async () => false,
 			showPromptOptions: () => false,
-		}));
+		}, undefined, inputUri ? instantiationService.get(IFocusedSessionHostService).focusedHost.get() : undefined));
 		instantiationService.stub(ILifecycleService, upcastPartial<ILifecycleService>({ when: async () => { }, phase: LifecyclePhase.Eventually, onWillShutdown: Event.None }));
 		instantiationService.stub(IViewsService, upcastPartial<IViewsService>({ getViewWithId: () => null }));
 		instantiationService.stub(INotificationService, upcastPartial<INotificationService>({
-			prompt: (_severity, message, choices) => {
+			info: message => { notificationMessages.push(String(message)); },
+			prompt: (_severity, message, choices, options) => {
 				notifications.push(choices);
+				notificationPriorities.push(options?.priority);
 				notificationMessages.push(String(message));
 				return new NoOpNotification();
 			},
+		}));
+		instantiationService.stub(IChatInputNotificationService, upcastPartial<IChatInputNotificationService>({
+			setNotification: notice => { inputNotice = notice; },
+			deleteNotification: id => { if (inputNotice?.id === id) { inputNotice = undefined; } },
 		}));
 		instantiationService.stub(IRemoteWorkspaceHandoffService, upcastPartial<IRemoteWorkspaceHandoffService>({
 			resolveFolder: async folder => {
@@ -157,12 +173,34 @@ suite('Agents Window workspace handoff', () => {
 				return remoteResolution;
 			},
 		}));
-		instantiationService.stub(ICommandService, upcastPartial<ICommandService>({ executeCommand: async () => undefined }));
+		instantiationService.stub(ICommandService, upcastPartial<ICommandService>({ executeCommand: async (id, ...args) => { commands.push({ id, args }); return undefined; } }));
+		instantiationService.stub(ISessionDraftsService, upcastPartial<ISessionDraftsService>({
+			enabled: savedDraftsEnabled,
+			stowAndClear: (_composer, options) => {
+				assert.deepStrictEqual(options, { keepScheduledPreview: true });
+				if (!canStow) {
+					return undefined;
+				}
+				const saved = input;
+				stowedInputs.push(saved);
+				input = { inputText: '', attachments: [] };
+				inputChanged.fire();
+				return { id: 'kept-draft', revision: 'first', createdAt: 0, updatedAt: 0, input: saved, target: {} };
+			},
+		}));
 		instantiationService.stub(ILogService, upcastPartial<ILogService>({ warn: () => { }, error: () => { } }));
 		const handoff = disposables.add(instantiationService.createInstance(AgentsWindowWorkspaceHandoff, whenStartupProvidersRegistered));
 		return {
 			handoff, composerService, sessionsService, sessionsPartService, activeSession, initialRestoreComplete, onWillSend, states, selections, notifications, openingOptions, storage, drafts,
-			draftOptions, noWorkspaceSelections, notificationMessages, remoteRequests,
+			draftOptions, noWorkspaceSelections, notificationMessages, remoteRequests, savedDraftsEnabled, stowedInputs, commands,
+			notificationPriorities,
+			get inputNotice() { return inputNotice; },
+			runInputAction: async (notice: IChatInputNotification) => {
+				const [action] = notice.actions;
+				assert.ok(action.kind === ChatInputNotificationActionKind.Command);
+				await instantiationService.invokeFunction(CommandsRegistry.getCommand(action.commandId)!.handler, ...(action.commandArgs ?? []));
+			},
+			set canStow(value: boolean) { canStow = value; },
 			set providerReady(value: boolean) { providerReady = value; },
 			set providerId(value: string) { providerId = value; },
 			set acceptsWorkspace(value: (folder: URI) => boolean) { acceptsWorkspace = value; },
@@ -181,6 +219,81 @@ suite('Agents Window workspace handoff', () => {
 			openDraft: (draft: IChatDraft, folder: URI | undefined = folderUri) => handoff.selectWorkspace({ folderUri: folder, preferDevContainer: true, isDefault: false, draft: serializeChatDraft(draft) }, state => states.push(state)),
 			open: (isDefault = false, folder = folderUri) => handoff.selectWorkspace({ folderUri: folder, preferDevContainer: true, isDefault }, state => states.push(state)),
 		};
+	}
+
+	test('the workspace notice targets the kept composer and expires its older command', async () => {
+		const inputUri = URI.parse('vscode-chat-input:kept-draft');
+		const harness = createHarness(Promise.resolve(), inputUri);
+		const input = { inputText: 'Retain this draft', attachments: [] };
+		harness.edit(input);
+		harness.handoff.promptOpenPreservedWorkspace({ folderUri, preferDevContainer: false });
+		const original = harness.inputNotice;
+		assert.ok(original);
+		assert.deepStrictEqual({ matching: isChatInputNotificationApplicableToSession(original, undefined, undefined, inputUri), unrelated: isChatInputNotificationApplicableToSession(original, undefined, undefined, URI.parse('vscode-chat-input:other-draft')), label: original.actions[0].label, fallback: harness.notificationPriorities[0] }, {
+			matching: true, unrelated: false, label: 'Save Draft and Open Workspace', fallback: NotificationPriority.SILENT,
+		});
+		const newerFolder = URI.file('/other-project');
+		harness.handoff.promptOpenPreservedWorkspace({ folderUri: newerFolder, preferDevContainer: false });
+		await harness.runInputAction(original);
+		assert.deepStrictEqual(harness.stowedInputs, []);
+		await harness.runInputAction(harness.inputNotice!);
+		assert.deepStrictEqual({ saved: harness.stowedInputs, selected: harness.selections.map(selection => selection.folder), notice: harness.inputNotice }, { saved: [input], selected: [newerFolder], notice: undefined });
+	});
+
+	test('dismissing the inline notice also retires the notification-center action', async () => {
+		const harness = createHarness(Promise.resolve(), URI.parse('vscode-chat-input:kept-draft'));
+		const input = { inputText: 'Keep this draft', attachments: [] };
+		harness.edit(input);
+		harness.handoff.promptOpenPreservedWorkspace({ folderUri, preferDevContainer: false });
+		assert.ok(harness.inputNotice?.onDismiss);
+		const [fallback] = harness.notifications[0];
+		harness.inputNotice.onDismiss();
+		await fallback.run();
+		assert.deepStrictEqual({ input: harness.input, notice: harness.inputNotice, stowed: harness.stowedInputs }, { input, notice: undefined, stowed: [] });
+	});
+
+	test('the preserved-workspace notice saves the draft before opening the requested folder', async () => {
+		const harness = createHarness();
+		const input = { inputText: 'Keep this draft', attachments: [toFileVariableEntry(URI.file('/private/context'))] };
+		harness.edit(input);
+		harness.handoff.promptOpenPreservedWorkspace({ folderUri, preferDevContainer: false });
+		const [choice] = harness.notifications[0];
+		assert.strictEqual(choice.label, 'Save Draft and Open Workspace');
+		await choice.run();
+		assert.deepStrictEqual({ saved: harness.stowedInputs, opened: harness.openingOptions, selected: harness.selections.map(selection => selection.folder) }, {
+			saved: [input], opened: [true], selected: [folderUri],
+		});
+	});
+
+	test('the preserved-workspace notice opens Drafts settings when saving is disabled', async () => {
+		const harness = createHarness();
+		harness.savedDraftsEnabled.set(false, undefined);
+		const input = { inputText: 'Keep this draft', attachments: [] };
+		harness.edit(input);
+		harness.handoff.promptOpenPreservedWorkspace({ folderUri, preferDevContainer: false });
+		const [choice] = harness.notifications[0];
+		assert.strictEqual(choice.label, 'Open Draft Settings');
+		await choice.run();
+		assert.deepStrictEqual({ input: harness.input, opened: harness.openingOptions, commands: harness.commands }, {
+			input, opened: [], commands: [{ id: 'workbench.action.openSettings', args: ['@id:sessions.drafts.enabled'] }],
+		});
+	});
+
+	for (const reason of ['cannot save', 'newer navigation'] as const) {
+		test(`the preserved-workspace action leaves the draft alone after ${reason}`, async () => {
+			const harness = createHarness();
+			const input = { inputText: 'Keep this draft', attachments: [] };
+			harness.edit(input);
+			harness.handoff.promptOpenPreservedWorkspace({ folderUri, preferDevContainer: false });
+			const [choice] = harness.notifications[0];
+			if (reason === 'cannot save') {
+				harness.canStow = false;
+			} else {
+				harness.composerService.notifyUserNavigation();
+			}
+			await choice.run();
+			assert.deepStrictEqual({ input: harness.input, saved: harness.stowedInputs, opened: harness.openingOptions }, { input, saved: [], opened: [] });
+		});
 	}
 
 	test('retains the requested folder through setup and late provider and view readiness, past Eventually', async () => {
@@ -422,6 +535,27 @@ suite('Agents Window workspace handoff', () => {
 		assert.deepStrictEqual({
 			state: harness.states.at(-1), remoteRequests: harness.remoteRequests, selections: harness.selections, noWorkspaceSelections: harness.noWorkspaceSelections,
 		}, { state: 'preservedSession', remoteRequests: [], selections: [], noWorkspaceSelections: [] });
+	});
+
+	test('an inferred remote default preserves an attachments-only draft before connecting', async () => {
+		const harness = createHarness();
+		const input = { inputText: '', attachments: [toFileVariableEntry(URI.file('/destination/context'))] };
+		harness.edit(input);
+		harness.remoteResolution = { folderUri: agentHostFolder };
+		await harness.handoff.selectWorkspace({ remote: { kind: 'ssh', folder: remoteFolder }, preferDevContainer: false, isDefault: true }, state => harness.states.push(state));
+		assert.deepStrictEqual({
+			state: harness.states.at(-1), input: harness.input, remoteRequests: harness.remoteRequests, selections: harness.selections,
+		}, { state: 'preservedSession', input, remoteRequests: [], selections: [] });
+	});
+
+	test('the first workspace switch can replace a startup pick while remaining an automatic workspace choice', async () => {
+		const harness = createHarness();
+		harness.defaultAllowed = false;
+		await harness.handoff.selectWorkspace({ folderUri, preferDevContainer: false, isDefault: false, initialWorkspaceSwitch: true }, state => harness.states.push(state));
+		assert.deepStrictEqual({ state: harness.states.at(-1), selections: harness.selections }, {
+			state: 'applied',
+			selections: [{ folder: folderUri, options: { providerId: 'local', preferDevContainer: false, selectionOrigin: WorkspaceSelectionOrigin.WindowContext, isDefault: false } }],
+		});
 	});
 
 	for (const authority of ['ssh-remote+host', 'tunnel+host']) {

@@ -34,7 +34,7 @@ export function getClaudeSubscriptionPresentation(state: {
 	}
 	const agent = state.root.agents.find(agent => agent.provider === CLAUDE_AGENT_PROVIDER_ID);
 	if (!agent) {
-		return { description: localize('claude.agentUnavailable', "Native agent unavailable"), detail: localize('claude.agentUnavailableDetail', "Choose Use in Agent Workspace to restart the host and register the enabled Claude agent.") };
+		return { description: localize('claude.agentUnavailable', "Native agent unavailable"), detail: localize('claude.agentUnavailableDetail', "Choose Use in Agent Workspace for the option to restart Signal-C and load Claude.") };
 	}
 	const setup = readAgentSdkSetupInfos(state.root).find(setup => setup.agent === CLAUDE_AGENT_PROVIDER_ID);
 	if (setup?.download === 'downloading') {

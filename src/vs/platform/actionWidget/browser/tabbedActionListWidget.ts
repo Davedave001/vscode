@@ -27,7 +27,7 @@ import { URI } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { IAccessibilityService } from '../../accessibility/common/accessibility.js';
 import { IContextViewService } from '../../contextview/browser/contextView.js';
-import { IHoverService } from '../../hover/browser/hover.js';
+import { IHoverService, nativeHoverDelegate } from '../../hover/browser/hover.js';
 import { IInstantiationService } from '../../instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../keybinding/common/keybinding.js';
 import { defaultButtonStyles, defaultMenuStyles } from '../../theme/browser/defaultStyles.js';
@@ -397,6 +397,8 @@ export class TabbedActionListWidget extends Disposable {
 				}));
 
 				const radio = renderDisposables.add(new Radio({
+					// Native tooltips keep tab labels available without intercepting clicks on list rows.
+					hoverDelegate: nativeHoverDelegate,
 					items: options.tabs.map(tab => {
 						const label = tab.label ?? tab.id;
 						return { text: tabTexts.get(tab.id)!, tooltip: tab.tooltip ?? label, ariaLabel: label, isActive: tab.id === activeTab };

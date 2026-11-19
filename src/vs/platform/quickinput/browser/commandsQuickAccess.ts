@@ -33,6 +33,7 @@ export interface ICommandQuickPick extends IPickerQuickAccessItem {
 	readonly commandId: string;
 	readonly commandWhen?: string;
 	readonly commandAlias?: string;
+	readonly searchAlias?: ILocalizedString;
 	readonly commandDescription?: ILocalizedString;
 	readonly commandCategory?: string;
 
@@ -106,8 +107,12 @@ export abstract class AbstractCommandsQuickAccessProvider extends PickerQuickAcc
 				aliasHighlights = AbstractCommandsQuickAccessProvider.WORD_FILTER(filter, commandPick.commandAlias) ?? undefined;
 			}
 
+			const { searchAlias } = commandPick;
+			const matchesSearchAlias = searchAlias && (AbstractCommandsQuickAccessProvider.WORD_FILTER(filter, searchAlias.value)
+				|| (searchAlias.original !== searchAlias.value && AbstractCommandsQuickAccessProvider.WORD_FILTER(filter, searchAlias.original)));
+
 			// Add if matching in label or alias
-			if (labelHighlights || aliasHighlights) {
+			if (labelHighlights || aliasHighlights || matchesSearchAlias) {
 				commandPick.highlights = {
 					label: labelHighlights,
 					detail: this.options.showAlias ? aliasHighlights : undefined

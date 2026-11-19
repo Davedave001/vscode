@@ -6,7 +6,29 @@
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import { formatOptions, Option, OptionDescriptions, Subcommand, parseArgs, ErrorReporter } from '../../node/argv.js';
-import { addArg } from '../../node/argvHelper.js';
+import { NativeParsedArgs } from '../../common/argv.js';
+import { addArg, isUnqualifiedWindowLaunch } from '../../node/argvHelper.js';
+
+suite('Desktop window launch arguments', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('allows the desktop default with settings that do not select a window', () => {
+		assert.strictEqual(isUnqualifiedWindowLaunch({ _: [] }), true);
+		assert.strictEqual(isUnqualifiedWindowLaunch({ _: [], 'user-data-dir': '/isolated', 'disable-extensions': true }), true);
+	});
+
+	test('preserves explicitly requested windows, files, and deep links', () => {
+		const requests: NativeParsedArgs[] = [
+			{ _: ['/project'] }, { _: [], 'folder-uri': ['file:///project'] }, { _: [], 'file-uri': ['file:///project/file.txt'] },
+			{ _: [], 'new-window': true }, { _: [], 'reuse-window': true }, { _: [], profile: 'work' },
+			{ _: [], 'open-url': true }, { _: [], remote: 'ssh-remote+project' }, { _: [], chat: { _: ['hello'] } },
+			{ _: [], extensionDevelopmentPath: ['/extension'] }, { _: [], extensionTestsPath: '/tests' },
+		];
+		for (const request of requests) {
+			assert.strictEqual(isUnqualifiedWindowLaunch(request), false, JSON.stringify(request));
+		}
+	});
+});
 
 function o(description: string, type: 'boolean' | 'string' | 'string[]' = 'string'): Option<any> {
 	return {

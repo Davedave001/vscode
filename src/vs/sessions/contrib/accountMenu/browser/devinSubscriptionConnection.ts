@@ -131,7 +131,11 @@ export class DevinSubscriptionConnection extends Disposable implements IDevinSub
 				this.updateStatus();
 				if (token === this.forwardedToken && !(refreshModels && token && !this.getProvider()?.models.length)) { return; }
 				if (!token && !this.hasProvider()) { return; }
-				if (!this.hasProvider()) { throw new Error(localize('devin.providerMissing', "The agent host has not loaded Devin Subscription. Check the Devin executable setting and restart the local agent host after updating the fork. Your saved sign-in will be reused.")); }
+				if (!this.hasProvider()) {
+					// Initial background sync runs before the agent host delivers rootState; bindRoot() retries once it hydrates.
+					if (!refreshModels && this.agentHost.rootState.value === undefined) { return; }
+					throw new Error(localize('devin.providerMissing', "The agent host has not loaded Devin Subscription. Check the Devin executable setting and restart the local agent host after updating the fork. Your saved sign-in will be reused."));
+				}
 				const result = await this.agentHost.authenticate({ resource: DevinSubscriptionResource, scopes: [], token });
 				if (!isCurrent()) { return; }
 				if (!result.authenticated) { throw new Error(localize('devin.restartHost', "The agent host has not loaded Devin Subscription. Restart the agent host after updating the fork, then connect again; your saved sign-in will be reused.")); }

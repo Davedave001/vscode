@@ -35,6 +35,20 @@
 	text-underline-offset: 2px;
 }
 
+.monaco-workbench .workspace-mode-switch .workspace-mode-icon,
+.monaco-workbench .compact-switch .workspace-mode-segment {
+	display: none;
+}
+
+.monaco-workbench .compact-switch .workspace-mode-switch .workspace-mode-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	color: var(--vscode-titleBar-activeForeground);
+}
+
 .monaco-workbench .workspace-mode-switch:hover:not(.disabled) {
 	border-color: var(--vscode-focusBorder);
 }
@@ -47,4 +61,8 @@
 .monaco-workbench .workspace-mode-switch.disabled {
 	opacity: 0.5;
 	cursor: default;
+}
+
+.monaco-workbench .workspace-mode-switch[aria-busy="true"] {
+	cursor: progress;
 }

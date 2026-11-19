@@ -4,8 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
-import { IAuthorizationTokenResponse } from '../../../../base/common/oauth.js';
+import { SequencerByKey } from '../../../../base/common/async.js';
+import { IAuthorizationProtectedResourceMetadata, IAuthorizationTokenResponse } from '../../../../base/common/oauth.js';
 import { Event } from '../../../../base/common/event.js';
+import { URI } from '../../../../base/common/uri.js';
+import { getDynamicAuthenticationProviderId, IAuthenticationService } from './authentication.js';
 
 export const IDynamicAuthenticationProviderStorageService = createDecorator<IDynamicAuthenticationProviderStorageService>('dynamicAuthenticationProviderStorageService');
 
@@ -81,4 +84,32 @@ export interface IDynamicAuthenticationProviderStorageService {
 	 * @param sessions Array of authorization tokens with creation timestamps.
 	 */
 	setSessionsForDynamicAuthProvider(authProviderId: string, clientId: string, sessions: (IAuthorizationTokenResponse & { created_at: number })[]): Promise<void>;
+}
+
+/** Retain previously stored grants for a matching client and separate other explicit clients. */
+export async function resolveDynamicAuthenticationProviderId(
+	authorizationServer: URI,
+	resource: IAuthorizationProtectedResourceMetadata | undefined,
+	client: { readonly clientId: string; readonly clientSecret?: string } | undefined,
+	storage: IDynamicAuthenticationProviderStorageService,
+): Promise<string> {
+	const legacyId = getDynamicAuthenticationProviderId(authorizationServer, resource);
+	if (!client) {
+		return legacyId;
+	}
+	const registration = await storage.getClientRegistration(legacyId);
+	return registration?.clientId === client.clientId && registration.clientSecret === client.clientSecret
+		? legacyId : getDynamicAuthenticationProviderId(authorizationServer, resource, client.clientId);
+}
+
+const providerOperationsByService = new WeakMap<IAuthenticationService, SequencerByKey<string>>();
+
+/** Serializes registration and credential rotation across MCP hosts in the workbench. */
+export function getMcpAuthenticationOperations(authenticationService: IAuthenticationService): SequencerByKey<string> {
+	let operations = providerOperationsByService.get(authenticationService);
+	if (!operations) {
+		operations = new SequencerByKey();
+		providerOperationsByService.set(authenticationService, operations);
+	}
+	return operations;
 }

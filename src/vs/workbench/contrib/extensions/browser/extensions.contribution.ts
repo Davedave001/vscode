@@ -52,6 +52,7 @@ import { IWorkbenchContribution, IWorkbenchContributionsRegistry, registerWorkbe
 import { EditorExtensions } from '../../../common/editor.js';
 import { IViewContainersRegistry, Extensions as ViewContainerExtensions, ViewContainerLocation } from '../../../common/views.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { EnablementState, IExtensionManagementServerService, IPublisherInfo, IWorkbenchExtensionEnablementService, IWorkbenchExtensionManagementService } from '../../../services/extensionManagement/common/extensionManagement.js';
 import { IExtensionIgnoredRecommendationsService, IExtensionRecommendationsService } from '../../../services/extensionRecommendations/common/extensionRecommendations.js';
 import { IWorkspaceExtensionsConfigService } from '../../../services/extensionRecommendations/common/workspaceExtensionsConfig.js';
@@ -62,10 +63,12 @@ import { CONTEXT_SYNC_ENABLEMENT } from '../../../services/userDataSync/common/u
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { WORKSPACE_TRUST_EXTENSION_SUPPORT } from '../../../services/workspaces/common/workspaceTrust.js';
 import { IPluginInstallService } from '../../chat/common/plugins/pluginInstallService.js';
+import { AICustomizationManagementCommands, AICustomizationManagementSection } from '../../chat/common/aiCustomizationWorkspaceService.js';
 import { ILanguageModelToolsService } from '../../chat/common/tools/languageModelToolsService.js';
 import { CONTEXT_KEYBINDINGS_EDITOR } from '../../preferences/common/preferences.js';
 import { IWebview } from '../../webview/browser/webview.js';
 import { Query } from '../common/extensionQuery.js';
+import { SignalCExtensionsMarketplaceView } from './signalCExtensionsMarketplace.js';
 import { AutoRestartConfigurationKey, AutoUpdateConfigurationKey, CONTEXT_EXTENSIONS_GALLERY_STATUS, CONTEXT_HAS_GALLERY, DefaultViewsContext, ExtensionEditorTab, ExtensionRuntimeActionType, EXTENSIONS_CATEGORY, extensionsFilterSubMenu, extensionsSearchActionsMenu, HasOutdatedExtensionsContext, IExtensionArg, IExtensionsViewPaneContainer, IExtensionsWorkbenchService, INSTALL_ACTIONS_GROUP, INSTALL_EXTENSION_FROM_VSIX_COMMAND_ID, IWorkspaceRecommendedExtensionsView, LIST_WORKSPACE_UNSUPPORTED_EXTENSIONS_COMMAND_ID, OUTDATED_EXTENSIONS_VIEW_ID, SELECT_INSTALL_VSIX_EXTENSION_COMMAND_ID, THEME_ACTIONS_GROUP, TOGGLE_IGNORE_EXTENSION_ACTION_ID, UPDATE_ACTIONS_GROUP, VIEWLET_ID, WORKSPACE_RECOMMENDATIONS_VIEW_ID } from '../common/extensions.js';
 import { ExtensionsConfigurationSchema, ExtensionsConfigurationSchemaId } from '../common/extensionsFileTemplate.js';
 import { ExtensionsInput } from '../common/extensionsInput.js';
@@ -91,6 +94,19 @@ import { UnsupportedExtensionsMigrationContrib } from './unsupportedExtensionsMi
 registerSingleton(IExtensionsWorkbenchService, ExtensionsWorkbenchService, InstantiationType.Eager /* Auto updates extensions */);
 registerSingleton(IExtensionRecommendationNotificationService, ExtensionRecommendationNotificationService, InstantiationType.Delayed);
 registerSingleton(IExtensionRecommendationsService, ExtensionRecommendationsService, InstantiationType.Eager /* Prompts recommendations in the background */);
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({ id: 'workbench.extensions.action.openSignalCMarketplace', title: localize2('openSignalCMarketplace', "Open Signal-C Marketplace"), f1: true });
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		if (accessor.get(IWorkbenchEnvironmentService).isSessionsWindow) {
+			await accessor.get(ICommandService).executeCommand(AICustomizationManagementCommands.OpenEditor, AICustomizationManagementSection.Extensions);
+		} else {
+			await accessor.get(IViewsService).openView(SignalCExtensionsMarketplaceView.ID, true);
+		}
+	}
+});
 
 // Quick Access
 Registry.as<IQuickAccessRegistry>(Extensions.Quickaccess).registerQuickAccessProvider({

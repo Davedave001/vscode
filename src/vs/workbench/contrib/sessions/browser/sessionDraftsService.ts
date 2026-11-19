@@ -58,7 +58,7 @@ export interface ISessionDraftsService {
 	readonly onDidOpenDraft: Event<string>;
 	createComposer(): SessionDraftComposer;
 	registerComposer(composer: SessionDraftComposer, restore: (draft: ISavedSessionDraft, token?: CancellationToken, preserveFocus?: boolean) => Promise<void>, clear: () => void, focus?: () => void): IDisposable;
-	stowAndClear(composer?: SessionDraftComposer): ISavedSessionDraft | undefined;
+	stowAndClear(composer?: SessionDraftComposer, options?: { readonly keepScheduledPreview?: boolean }): ISavedSessionDraft | undefined;
 	open(id: string, options?: { removeFromDrafts?: boolean }): Promise<void>;
 	save(input: IChatDraft, target: ISavedSessionDraftTarget, id?: string): ISavedSessionDraft;
 	restoreRecovery(input: IChatDraft, target: ISavedSessionDraftTarget): Promise<void>;
@@ -361,9 +361,12 @@ export class SessionDraftsService extends Disposable implements ISessionDraftsSe
 		}
 	}
 
-	stowAndClear(composer = this.current?.composer): ISavedSessionDraft | undefined {
+	stowAndClear(composer = this.current?.composer, options?: { readonly keepScheduledPreview?: boolean }): ISavedSessionDraft | undefined {
 		const current = this.current;
 		if (current && current.composer === composer) {
+			if (options?.keepScheduledPreview && composer.preview.get()) {
+				return undefined;
+			}
 			this.cancelRecovery(composer);
 			if ((this.opening && !this.opening.isCancellationRequested) || composer.isRestoring || composer.isScheduling) {
 				throw new Error(localize('draft.newSessionBusy', "Wait for the draft to finish opening or scheduling before starting a new session."));

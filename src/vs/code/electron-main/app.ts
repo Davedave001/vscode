@@ -43,7 +43,7 @@ import { BrowserViewMainService, IBrowserViewMainService } from '../../platform/
 import { BrowserViewGroupMainService, IBrowserViewGroupMainService } from '../../platform/browserView/electron-main/browserViewGroupMainService.js';
 import { NativeParsedArgs } from '../../platform/environment/common/argv.js';
 import { IEnvironmentMainService } from '../../platform/environment/electron-main/environmentMainService.js';
-import { isLaunchedFromCli } from '../../platform/environment/node/argvHelper.js';
+import { isLaunchedFromCli, isUnqualifiedWindowLaunch } from '../../platform/environment/node/argvHelper.js';
 import { getResolvedShellEnv } from '../../platform/shell/node/shellEnv.js';
 import { IExtensionHostStarter, ipcExtensionHostStarterChannelName } from '../../platform/extensions/common/extensionHostStarter.js';
 import { ExtensionHostStarter } from '../../platform/extensions/electron-main/extensionHostStarter.js';
@@ -1656,6 +1656,10 @@ export class CodeApplication extends Disposable {
 					initialStartup: true,
 					// remoteAuthority: will be determined based on macOpenFiles
 				});
+			}
+
+			if (this.productService.openAgentsWindowByDefault && context === OpenContext.DESKTOP && !initialProtocolUrls?.urls.length && isUnqualifiedWindowLaunch(args)) {
+				return windowsMainService.openAgentsWindow({ context, cli: args, initialStartup: true });
 			}
 		}
 

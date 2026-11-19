@@ -62,6 +62,7 @@ import { MOUSE_BACK_FORWARD_NAVIGATION_SETTING } from '../../../../workbench/ser
 import { IEditorGroup } from '../../../../workbench/services/editor/common/editorGroupsService.js';
 import { IExtensionEditorOptions } from '../../../../workbench/contrib/extensions/common/extensionsInput.js';
 import { AgentsWindowExtensionPage } from './agentsWindowExtensionPage.js';
+import { SignalCExtensionsMarketplace } from '../../../../workbench/contrib/extensions/browser/signalCExtensionsMarketplace.js';
 import { AgentsWindowMarketplaceSearch, getMarketplaceExtensionAriaLabel, getMarketplaceStatisticsLabels, IAgentsWindowMarketplaceEntry, IAgentsWindowMarketplaceMessageEntry, IMarketplaceSearchResult, MARKETPLACE_MESSAGE_TEMPLATE_ID, MARKETPLACE_ROW_TEMPLATE_ID, MarketplaceExtensionRowRenderer, MarketplaceMessageRenderer, MarketplaceSearchStatus } from './agentsWindowExtensionsMarketplace.js';
 import { IAgentsWindowExtensionSuggestionsService } from '../../../../workbench/contrib/sessions/browser/agentsWindowExtensionSuggestions.js';
 
@@ -579,7 +580,13 @@ export class AgentsWindowExtensionsWidget extends Disposable implements IAICusto
 		const searchContainer = DOM.append(this.element, $('.agents-window-extensions-search'));
 		// Its placeholder and accessible name depend on whether the Marketplace can be searched, which is tracked below.
 		this.searchInput = this._register(new InputBox(searchContainer, contextViewService, { inputBoxStyles: defaultInputBoxStyles }));
+		const signalCMarketplace = this._register(instantiationService.createInstance(SignalCExtensionsMarketplace, this.element, {
+			showSearch: false,
+			enableInAgents: true,
+			onDidInstall: (extension: IExtension) => this.onDidInstall(extension),
+		}));
 		this._register(this.searchInput.onDidChange(value => {
+			signalCMarketplace.setQuery(value);
 			this.delayedSearch.trigger(() => {
 				if (value.trim() && value.trim() !== this.searchQuery.trim()) {
 					this.collapsedGroups.delete(AgentsWindowExtensionGroup.Marketplace);

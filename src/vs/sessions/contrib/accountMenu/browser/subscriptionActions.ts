@@ -3,18 +3,25 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { DeferredPromise, raceTimeout } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
+import { isWindows } from '../../../../base/common/platform.js';
+import { joinPath } from '../../../../base/common/resources.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
-import { CLAUDE_AGENT_PROVIDER_ID } from '../../../../platform/agentHost/common/agent.js';
+import { CLAUDE_AGENT_PROVIDER_ID, CODEX_AGENT_PROVIDER_ID } from '../../../../platform/agentHost/common/agent.js';
 import { IConfigurationService, ConfigurationTarget } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
+import type { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -22,12 +29,15 @@ import { ITerminalLaunchError, TerminalLocation } from '../../../../platform/ter
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IsSessionsWindowContext } from '../../../../workbench/common/contextkeys.js';
 import { resolveSessionCommandTarget } from '../../../../workbench/contrib/sessions/browser/sessionCommandTarget.js';
-import { ITerminalInstance, ITerminalService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
+import { ITerminalInstance, ITerminalInstanceService, ITerminalService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
 import { ICodexAccountService, getCodexAccountPlanName } from '../../../../workbench/services/agentHost/browser/codexAccountService.js';
 import { IAgentSdkSetupService } from '../../../../workbench/services/agentHost/browser/agentSdkSetupService.js';
 import { IWorkbenchEnvironmentService } from '../../../../workbench/services/environment/common/environmentService.js';
-import { AgentHostDevinExecutableSettingId, DevinSubscriptionProviderId } from '../../../../platform/agentHost/common/devinAgentConfiguration.js';
+import { IHostService } from '../../../../workbench/services/host/browser/host.js';
+import { IPathService } from '../../../../workbench/services/path/common/pathService.js';
+import { AgentHostDevinExecutableSettingId, DevinSubscriptionProviderId, getWindowsDevinExecutable } from '../../../../platform/agentHost/common/devinAgentConfiguration.js';
 import { IDevinSubscriptionConnection } from './devinSubscriptionConnection.js';
+import { IReachSubscriptionConnection } from './reachSubscriptionConnection.js';
 import { getClaudeSubscriptionPresentation } from './claudeSubscriptionPresentation.js';
 import { AgentsWindowMenus } from '../../../browser/agentsWindowMenus.js';
 
@@ -56,11 +66,46 @@ export async function connectCodexSubscription(accessor: ServicesAccessor): Prom
 		return;
 	}
 	const account = accessor.get(ICodexAccountService);
-	await configuration.updateValue(AgentHostCodexAgentEnabledSettingId, true, ConfigurationTarget.USER);
+	const host = accessor.get(IAgentHostService);
+	if (configuration.getValue<boolean>(AgentHostCodexAgentEnabledSettingId) !== true) {
+		await configuration.updateValue(AgentHostCodexAgentEnabledSettingId, true, ConfigurationTarget.USER);
+	}
+	// Setting changes travel separately to the host. An unregistered provider cannot consume a sign-in request.
+	if (!await waitForCodexRegistration(host)) {
+		notifications.warn(localize('subscriptions.codexUnavailable', "The local agent host did not load Codex. Check Codex runtime setup and try again."));
+		return;
+	}
+	if (configuration.inspect<boolean>(AgentHostCodexAgentEnabledSettingId)?.policyValue === false || configuration.getValue<boolean>(AgentHostCodexAgentEnabledSettingId) !== true) {
+		notifications.info(localize('subscriptions.codexEnablementChanged', "Codex is disabled under the current settings."));
+		return;
+	}
 	if (account.account.status === 'signedIn') {
 		notifications.info(localize('subscriptions.codexReady', "Codex is enabled with your {0}. Choose Codex in the agent picker to start a session.", getCodexAccountPlanName(account.account)));
 	} else {
 		account.signIn();
+	}
+}
+
+async function waitForCodexRegistration(host: IAgentHostService): Promise<boolean> {
+	const registered = () => {
+		const root = host.rootState.value;
+		return !!root && !(root instanceof Error) && root.agents.some(agent => agent.provider === CODEX_AGENT_PROVIDER_ID);
+	};
+	if (registered()) { return true; }
+	const ready = new DeferredPromise<boolean>();
+	const listeners = new DisposableStore();
+	const rootListener = listeners.add(new MutableDisposable());
+	const check = () => { if (registered()) { void ready.complete(true); } };
+	const bind = () => {
+		rootListener.value = host.rootState.onDidChange(check);
+		check();
+	};
+	listeners.add(host.onAgentHostStart(bind));
+	bind();
+	try {
+		return (await raceTimeout(ready.p, 15_000)) === true;
+	} finally {
+		listeners.dispose();
 	}
 }
 
@@ -78,6 +123,7 @@ export async function enableClaudeAgent(accessor: ServicesAccessor): Promise<voi
 	}
 	const host = accessor.get(IAgentHostService);
 	const setup = accessor.get(IAgentSdkSetupService);
+	const workbenchHost = accessor.get(IHostService);
 	if (configuration.inspect<boolean>(AgentHostClaudeAgentEnabledSettingId)?.policyValue !== true && configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) !== true) {
 		await configuration.updateValue(AgentHostClaudeAgentEnabledSettingId, true, ConfigurationTarget.USER);
 	}
@@ -90,19 +136,19 @@ export async function enableClaudeAgent(accessor: ServicesAccessor): Promise<voi
 		setup.requestReload(CLAUDE_AGENT_PROVIDER_ID);
 		notifications.info(localize('subscriptions.claudeEnabled', "Claude is enabled in the agent workspace. Its configured account and model catalog are being checked. Choose Claude and an Anthropic model when setup is ready."));
 	} else {
-		// Registering a disabled provider needs a new host; leave active chats alone until the user chooses it.
-		notifications.prompt(Severity.Info, localize('subscriptions.claudeRestartRequired', "Claude is enabled. Restart the local agent host to make it available; running agent turns will be interrupted."), [{
-			label: localize('subscriptions.restartAgentHost', "Restart Agent Host"),
+		// Claude's startup configuration is read by the desktop process.
+		notifications.prompt(Severity.Info, localize('subscriptions.claudeRestartAppRequired', "Claude is enabled. Restart Signal-C to make it available. Running agent turns will be interrupted."), [{
+			label: localize('subscriptions.restartSignalC', "Restart Signal-C"),
 			run: async () => {
 				if (configuration.inspect<boolean>(AgentHostClaudeAgentEnabledSettingId)?.policyValue === false || configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) === false) { return; }
-				await host.restartAgentHost();
+				await workbenchHost.restart();
 				// The newly constructed provider enumerates its account/models during startup.
 			},
 		}]);
 	}
 }
 
-function refreshClaudeAfterSignIn(terminal: ITerminalInstance, configuration: IConfigurationService, setup: IAgentSdkSetupService): void {
+function onSuccessfulSignIn(terminal: ITerminalInstance, onSuccess: () => void): void {
 	if (terminal.isDisposed) { return; }
 	const listeners = new DisposableStore();
 	let settled = false;
@@ -110,9 +156,7 @@ function refreshClaudeAfterSignIn(terminal: ITerminalInstance, configuration: IC
 		if (settled) { return; }
 		settled = true;
 		listeners.dispose();
-		if (code === 0 && configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) !== false && configuration.inspect<boolean>(AgentHostClaudeAgentEnabledSettingId)?.policyValue !== false && setup.setups.some(info => info.agent === CLAUDE_AGENT_PROVIDER_ID)) {
-			setup.requestReload(CLAUDE_AGENT_PROVIDER_ID);
-		}
+		if (code === 0) { onSuccess(); }
 	};
 	listeners.add(terminal.onDisposed(() => { settled = true; listeners.dispose(); }));
 	listeners.add(terminal.onExit(exited));
@@ -123,28 +167,55 @@ function refreshClaudeAfterSignIn(terminal: ITerminalInstance, configuration: IC
 
 export async function openSubscriptionClient(accessor: ServicesAccessor, provider: 'claude' | 'devin', signIn: boolean): Promise<void> {
 	const target = resolveSessionCommandTarget(accessor, []);
-	const folder = (target?.chat ?? target?.session?.mainChat.get())?.workspace.get()?.folders[0]?.workingDirectory
+	let folder = (target?.chat ?? target?.session?.mainChat.get())?.workspace.get()?.folders[0]?.workingDirectory
 		?? accessor.get(IWorkspaceContextService).getWorkspace().folders[0]?.uri;
+	if (signIn && folder?.scheme !== Schemas.file) {
+		folder = accessor.get(IPathService).userHome({ preferLocal: true });
+	}
 	if (!folder || folder.scheme !== Schemas.file) {
 		accessor.get(INotificationService).info(localize('subscriptions.localFolderRequired', "Select a local workspace before opening a subscription client."));
 		return;
 	}
 	const setting = provider === 'claude' ? CLAUDE_SUBSCRIPTION_EXECUTABLE_SETTING : DEVIN_SUBSCRIPTION_EXECUTABLE_SETTING;
 	const configuration = accessor.get(IConfigurationService);
-	const executable = configuration.getValue<string>(setting)?.trim() || provider;
-	const claudeSetup = provider === 'claude' && signIn ? accessor.get(IAgentSdkSetupService) : undefined;
+	let executable = configuration.getValue<string>(setting)?.trim() || provider;
+	const claudeSignIn = provider === 'claude' && signIn;
+	const initiallyEnabled = claudeSignIn && configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) !== false;
+	const instantiation = claudeSignIn ? accessor.get(IInstantiationService) : undefined;
+	const notifications = claudeSignIn ? accessor.get(INotificationService) : undefined;
 	const name = provider === 'claude' ? localize('subscriptions.claudeTerminal', "Claude Code · Subscription") : localize('subscriptions.devinTerminal', "Devin CLI");
 	const terminals = accessor.get(ITerminalService);
+	if (provider === 'devin' && executable === 'devin' && isWindows) {
+		const fileService = accessor.get(IFileService);
+		const environment = await (await accessor.get(ITerminalInstanceService).getBackend())?.getEnvironment();
+		const installed = environment && getWindowsDevinExecutable(environment);
+		if (installed && await fileService.exists(URI.file(installed))) { executable = installed; }
+	} else if (provider === 'claude' && executable === 'claude' && isWindows) {
+		const appRoot = (accessor.get(IWorkbenchEnvironmentService) as IWorkbenchEnvironmentService & INativeEnvironmentService).appRoot;
+		if (appRoot) {
+			const fileService = accessor.get(IFileService);
+			const { arch } = await accessor.get(INativeHostService).getOSProperties();
+			const bundled = joinPath(URI.file(appRoot), 'agent-sdks', 'claude', 'node_modules', '@anthropic-ai', `claude-agent-sdk-win32-${arch}`, 'claude.exe');
+			if (await fileService.exists(bundled)) {
+				executable = bundled.fsPath;
+			}
+		}
+	}
 	const terminal = await terminals.createTerminal({
 		config: {
-			name, executable, args: signIn ? ['auth', 'login'] : [], cwd: folder,
+			name, executable, args: signIn ? provider === 'claude' ? ['auth', 'login', '--claudeai'] : ['auth', 'login'] : [], cwd: folder,
 			// Subscription entry points must not silently select inherited API billing.
 			env: provider === 'claude' ? { ANTHROPIC_API_KEY: null, ANTHROPIC_AUTH_TOKEN: null } : { WINDSURF_API_KEY: null },
 			waitOnExit: true,
 		},
 		location: TerminalLocation.Editor,
 	});
-	if (claudeSetup) { refreshClaudeAfterSignIn(terminal, configuration, claudeSetup); }
+	if (instantiation) {
+		onSuccessfulSignIn(terminal, () => {
+			if (configuration.inspect<boolean>(AgentHostClaudeAgentEnabledSettingId)?.policyValue === false || (initiallyEnabled && configuration.getValue<boolean>(AgentHostClaudeAgentEnabledSettingId) === false)) { return; }
+			void instantiation.invokeFunction(enableClaudeAgent).catch(error => notifications?.error(error));
+		});
+	}
 	terminals.setActiveInstance(terminal);
 	await terminals.revealTerminal(terminal);
 }
@@ -169,6 +240,7 @@ export class AgentSubscriptionsAction extends Action2 {
 		const quickInput = accessor.get(IQuickInputService);
 		const instantiation = accessor.get(IInstantiationService);
 		const devin = accessor.get(IDevinSubscriptionConnection);
+		const reach = accessor.get(IReachSubscriptionConnection);
 		const notifications = accessor.get(INotificationService);
 		const codex = accessor.get(ICodexAccountService).account;
 		const configuration = accessor.get(IConfigurationService);
@@ -188,13 +260,34 @@ export class AgentSubscriptionsAction extends Action2 {
 			failed: localize('subscriptions.devinFailed', "Connection needs attention"),
 			ready: devinStatus.kind === 'ready' ? localize('subscriptions.devinModelsReady', "{0} models ready", devinStatus.modelCount) : '',
 		};
+		const reachAccount = await reach.getAccount();
+		const reachLabel = localize('subscriptions.reach', "REACH Subscription");
 		const provider = await quickInput.pick([
 			{ id: 'codex' as const, label: localize('subscriptions.codex', "Codex"), description: codex.status === 'signedIn' ? getCodexAccountPlanName(codex) : localize('subscriptions.chatGPT', "ChatGPT subscription"), detail: localize('subscriptions.codexDetail', "Connect your ChatGPT account to the native Codex agent.") },
 			{ id: 'claude' as const, label: localize('subscriptions.claude', "Anthropic"), ...claude },
 			{ id: 'devin-subscription' as const, label: localize('subscriptions.devinSubscription', "Devin Subscription"), description: devinDescriptions[devinStatus.kind], detail: devinStatus.kind === 'unavailable' ? localize('subscriptions.devinUnavailableDetail', "Check the Devin executable setting and restart the local agent host. Your saved sign-in will be reused.") : localize('subscriptions.devinSubscriptionDetail', "Connect your Devin account and load its models into the native Devin Subscription agent. Select to retry a saved connection or sign in again in your browser.") },
 			{ id: 'devin' as const, label: localize('subscriptions.devinCLI', "Devin CLI"), description: localize('subscriptions.devinClient', "Official command-line client"), detail: localize('subscriptions.devinDetail', "Open the installed Devin CLI using its own account sign-in.") },
+			{ id: 'reach' as const, label: reachLabel, description: reachAccount ? reachAccount.subscriptionActive ? localize('subscriptions.reachActive', "Subscription active") : localize('subscriptions.reachInactive', "Signed in · Subscription inactive") : localize('subscriptions.reachSignedOut', "Not signed in"),
+				detail: localize('subscriptions.reachDetail', "Sign in to your SignalREACH account in your browser.") },
 		], { title: localize('subscriptions.title', "Agent Subscriptions"), placeHolder: localize('subscriptions.chooseProvider', "Choose the subscription you want to use"), matchOnDescription: true, matchOnDetail: true });
 		if (!provider) { return; }
+		if (provider.id === 'reach') {
+			if (reachAccount) {
+				const action = await quickInput.pick([{ label: localize('subscriptions.reachSignOut', "Sign Out") }], { title: reachLabel });
+				if (action) {
+					await reach.signOut();
+					notifications.info(localize('subscriptions.reachDisconnected', "Signed out of REACH Subscription."));
+				}
+			} else {
+				const account = await reach.signIn();
+				if (account) {
+					notifications.info(account.subscriptionActive
+						? localize('subscriptions.reachConnected', "Signed in to REACH Subscription.")
+						: localize('subscriptions.reachConnectedInactive', "Signed in to SignalREACH. The account’s subscription is inactive."));
+				}
+			}
+			return;
+		}
 		if (provider.id === 'devin-subscription') {
 			const current = devin.status.get();
 			if (current.kind === 'ready' || current.kind === 'failed' || current.kind === 'connecting' || current.kind === 'unavailable') {
@@ -224,7 +317,9 @@ export class AgentSubscriptionsAction extends Action2 {
 		const action = await quickInput.pick([
 			...(provider.id === 'claude' ? [{ id: 'native', label: localize('subscriptions.claudeNative', "Use in Agent Workspace"), detail: localize('subscriptions.claudeNativeDetail', "Enable the native Claude agent. It uses your local Claude Code configuration; API keys or cloud-provider settings can affect billing.") }] : []),
 			{ id: 'open', label: localize('subscriptions.openClient', "Open {0}", provider.id === 'claude' ? 'Claude Code' : 'Devin CLI'), detail: localize('subscriptions.openDetail', "Continue in the official client using its saved sign-in.") },
-			{ id: 'signIn', label: localize('subscriptions.signIn', "Sign in"), detail: localize('subscriptions.signInDetail', "Open the provider's own account sign-in flow.") },
+			{ id: 'signIn', label: localize('subscriptions.signIn', "Sign in"), detail: provider.id === 'claude'
+				? localize('subscriptions.claudeSignInDetail', "Sign in with Claude Code. Signal-C checks native agent setup after sign-in completes.")
+				: localize('subscriptions.signInDetail', "Open the provider's own account sign-in flow.") },
 		], { title: provider.label });
 		if (action?.id === 'native') { await instantiation.invokeFunction(enableClaudeAgent); }
 		else if (action) { await instantiation.invokeFunction(openSubscriptionClient, provider.id, action.id === 'signIn'); }

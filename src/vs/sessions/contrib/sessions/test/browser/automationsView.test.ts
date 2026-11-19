@@ -2834,7 +2834,7 @@ suite('AutomationsCardsWidget', () => {
 			description: 'Describe what you want to automate, then choose when it runs.',
 			buttons: 1,
 			templateSections: 1,
-			templateNames: ['Catch up on main', 'Issue triage', 'Find bugs'],
+			templateNames: ['Catch up on main', 'Issue triage', 'Find bugs', 'Morning briefing', 'Evening briefing'],
 		});
 	});
 
@@ -2848,7 +2848,7 @@ suite('AutomationsCardsWidget', () => {
 				order: Array.from(card.children, element => element.className),
 				promptDescribed: !!descriptionId && descriptionId === card.querySelector('.automations-template-card-prompt')?.id,
 			};
-		}), ['Catch up on main', 'Issue triage', 'Find bugs'].map(name => ({
+		}), AUTOMATION_TEMPLATES.map(({ name }) => ({
 			name,
 			order: ['automations-template-card-name', 'automations-template-card-prompt', 'automations-template-card-schedule'],
 			promptDescribed: true,
@@ -2908,7 +2908,7 @@ suite('AutomationsCardsWidget', () => {
 			},
 			disabledNames,
 		}, {
-			enabledNames: ['Catch up on main', 'Issue triage', 'Find bugs', 'Weekly review'],
+			enabledNames: [...AUTOMATION_TEMPLATES.map(template => template.name), 'Weekly review'],
 			sourceBadge: 'Plugin',
 			sourceLabel: 'From Review plugin',
 			initialValues: {
@@ -2929,7 +2929,7 @@ suite('AutomationsCardsWidget', () => {
 				open: true,
 				unreadVisible: false,
 			},
-			disabledNames: ['Catch up on main', 'Issue triage', 'Find bugs'],
+			disabledNames: AUTOMATION_TEMPLATES.map(template => template.name),
 		});
 	});
 

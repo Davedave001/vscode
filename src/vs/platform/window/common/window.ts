@@ -266,6 +266,7 @@ export const enum AgentsWindowOpenSource {
 	CommandPalette = 'commandPalette',
 	KeyboardShortcut = 'keyboardShortcut',
 	TitleBar = 'titleBar',
+	Explorer = 'explorer',
 	ChatTitleBar = 'chatTitleBar',
 	ChatViewTitle = 'chatViewTitle',
 	CurrentChatHandoff = 'currentChatHandoff',
@@ -289,6 +290,7 @@ export function isAgentsWindowOpenSource(value: unknown): value is AgentsWindowO
 		case AgentsWindowOpenSource.CommandPalette:
 		case AgentsWindowOpenSource.KeyboardShortcut:
 		case AgentsWindowOpenSource.TitleBar:
+		case AgentsWindowOpenSource.Explorer:
 		case AgentsWindowOpenSource.ChatTitleBar:
 		case AgentsWindowOpenSource.ChatViewTitle:
 		case AgentsWindowOpenSource.CurrentChatHandoff:
@@ -566,6 +568,9 @@ export interface IPathData<T = IEditorOptions> {
 	 * Optional editor options to apply in the file
 	 */
 	readonly options?: T;
+
+	/** An editor recovered through the Agents handoff belongs in this restored group. */
+	readonly restoreEditorGroupId?: number;
 
 	/**
 	 * A hint that the file exists. if true, the

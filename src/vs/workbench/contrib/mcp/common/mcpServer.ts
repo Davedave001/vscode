@@ -350,8 +350,8 @@ export class McpServer extends Disposable implements IMcpServer {
 	 * Helper function to call the function on the handler once it's online. The
 	 * connection started if it is not already.
 	 */
-	public static async callOn<R>(server: IMcpServer, fn: (handler: McpServerRequestHandler, connection: IMcpServerConnection) => Promise<R>, token: CancellationToken = CancellationToken.None): Promise<R> {
-		await server.start({ promptType: 'all-untrusted' }); // idempotent
+	public static async callOn<R>(server: IMcpServer, fn: (handler: McpServerRequestHandler, connection: IMcpServerConnection) => Promise<R>, token: CancellationToken = CancellationToken.None, errorOnUserInteraction?: boolean): Promise<R> {
+		await server.start(errorOnUserInteraction ? { promptType: 'never', errorOnUserInteraction: true } : { promptType: 'all-untrusted' }); // idempotent
 
 		let ranOnce = false;
 		let d: IDisposable;
@@ -882,7 +882,7 @@ export class McpServer extends Disposable implements IMcpServer {
 						}
 
 						const s = connection.state.read(reader);
-						if (s.state === McpConnectionState.Kind.Stopped && s.reason === 'needs-user-interaction') {
+						if (McpConnectionState.needsSignIn(s)) {
 							reject(new UserInteractionRequiredError('auth'));
 						}
 
@@ -1422,7 +1422,7 @@ export class McpTool implements IMcpTool {
 				return result;
 			} catch (err) {
 				// Handle URL elicitation required error
-				if (err instanceof MpcResponseError && err.code === MCP.URL_ELICITATION_REQUIRED && allowRetry) {
+				if (err instanceof MpcResponseError && err.code === MCP.URL_ELICITATION_REQUIRED && allowRetry && !context?.errorOnUserInteraction) {
 					await this._handleElicitationErr(err, context, token);
 					return this._callWithProgress(params, progress, context, requestMeta, token, false);
 				}
@@ -1436,7 +1436,7 @@ export class McpTool implements IMcpTool {
 			} finally {
 				store.dispose();
 			}
-		}, token);
+		}, token, context?.errorOnUserInteraction);
 	}
 
 	private async _handleElicitationErr(err: MpcResponseError, context: IMcpToolCallContext | undefined, token: CancellationToken) {

@@ -9,11 +9,12 @@ import { isCancellationError } from '../../../../base/common/errors.js';
 import { Event } from '../../../../base/common/event.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { autorun, waitForState } from '../../../../base/common/observable.js';
+import { posix } from '../../../../base/common/path.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { INotificationService, Severity } from '../../../../platform/notification/common/notification.js';
+import { INotificationService, NotificationPriority, Severity } from '../../../../platform/notification/common/notification.js';
 import { ILifecycleService, LifecyclePhase } from '../../../../workbench/services/lifecycle/common/lifecycle.js';
 import { IViewsService } from '../../../../workbench/services/views/common/viewsService.js';
 import { ISessionsSetUpService } from '../../../browser/sessionsSetUpService.js';
@@ -31,8 +32,14 @@ import { readNewChatDraftState } from '../../../../workbench/contrib/sessions/co
 import { IRemoteWorkspaceHandoffService } from '../../../common/remoteWorkspaceHandoff.js';
 import { IAgentsWindowRemoteWorkspace } from './agentsWindowOpenIntent.js';
 import { isSessionCreated } from '../../../../workbench/services/sessions/common/session.js';
+import { ISessionDraftsService } from '../../../../workbench/contrib/sessions/browser/sessionDraftsService.js';
+import { SESSIONS_DRAFTS_ENABLED_SETTING } from '../../../../workbench/contrib/sessions/common/sessionConfig.js';
+import { ChatInputNotificationActionKind, ChatInputNotificationSeverity, IChatInputNotificationService } from '../../../../workbench/contrib/chat/browser/widget/input/chatInputNotificationService.js';
 
 export const WORKSPACE_HANDOFF_TIMEOUT_MS = 15_000;
+
+const preservedWorkspaceNoticeId = 'agents.workspaceHandoff.preserved';
+const openPreservedWorkspaceCommandId = 'sessions.workspaceHandoff.openPreservedWorkspace';
 
 export interface IAgentsWindowWorkspaceHandoff {
 	readonly folderUri?: URI;
@@ -47,6 +54,10 @@ export interface IAgentsWindowWorkspaceHandoff {
 	readonly draft?: IAgentsWindowDraft;
 	readonly noWorkspace?: boolean;
 	readonly revealNewSession?: boolean;
+	/** The first editor mode switch takes precedence over automatic picks made during startup. */
+	readonly initialWorkspaceSwitch?: boolean;
+	/** Called only when the composer actually applies this folder, including an explicit retry. */
+	readonly onWorkspaceSelected?: (folder: URI) => void;
 }
 
 /** Keeps one opening intent alive until the target composer applies it or a newer user intent wins. */
@@ -55,6 +66,7 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 	private readonly _notification = this._register(new MutableDisposable());
 	private _cancelPending: ((state: WorkspaceHandoffState) => void) | undefined;
 	private _startupProvidersRegistered = false;
+	private _noticeVersion = 0;
 
 	/**
 	 * @param whenStartupProvidersRegistered Settles once the providers that register during startup have
@@ -76,6 +88,8 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 		@ILogService private readonly logService: ILogService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IRemoteWorkspaceHandoffService private readonly remoteWorkspaceHandoffService: IRemoteWorkspaceHandoffService,
+		@ISessionDraftsService private readonly sessionDraftsService: ISessionDraftsService,
+		@IChatInputNotificationService private readonly inputNotifications: IChatInputNotificationService,
 	) {
 		super();
 		this._register(lifecycleService.onWillShutdown(() => this.cancel()));
@@ -138,7 +152,7 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 			previousCreated = created;
 		}));
 		try {
-			if (intent.draft && !intent.revealNewSession && this._hasDraftInput()) {
+			if ((intent.initialWorkspaceSwitch || (intent.draft && !intent.revealNewSession)) && this._hasDraftInput()) {
 				onState('preservedSession');
 				return;
 			}
@@ -159,15 +173,17 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 			onState('waitingForSessionView');
 			if (inferredDefault) {
 				await waitForState(this.sessionsService.initialRestoreComplete, complete => complete, undefined, source.token);
-				if (!isSessionCreated(this._focusedSessionHostService.focusedHost.get().session.get())) {
-					remoteResolution = startRemoteResolution();
+				if (isSessionCreated(this._focusedSessionHostService.focusedHost.get().session.get()) || this._hasDraftInput()) {
+					onState('preservedSession');
+					return;
 				}
+				remoteResolution = startRemoteResolution();
 			} else {
 				await raceCancellationError(this.lifecycleService.when(LifecyclePhase.Restored), source.token);
 				if (source.token.isCancellationRequested) {
 					return;
 				}
-				if (intent.draft && !intent.revealNewSession && this._hasDraftInput()) {
+				if ((intent.initialWorkspaceSwitch || (intent.draft && !intent.revealNewSession)) && this._hasDraftInput()) {
 					onState('preservedSession');
 					return;
 				}
@@ -203,7 +219,7 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 			const deadline = Date.now() + WORKSPACE_HANDOFF_TIMEOUT_MS;
 			while (!source.token.isCancellationRequested) {
 				const currentSession = this._focusedSessionHostService.focusedHost.get().session.get();
-				if ((!intent.draft && isSessionCreated(currentSession)) || ((intent.draft || intent.revealNewSession) && this._hasDraftInput())) {
+				if ((!intent.draft && isSessionCreated(currentSession)) || ((intent.isDefault || intent.initialWorkspaceSwitch || intent.draft || intent.revealNewSession) && this._hasDraftInput())) {
 					onState('preservedSession');
 					return;
 				}
@@ -246,7 +262,7 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 				const options = {
 					providerId: resolved?.providerId,
 					preferDevContainer: intent.preferDevContainer,
-					selectionOrigin: intent.isDefault && !intent.draft ? WorkspaceSelectionOrigin.WindowContext : WorkspaceSelectionOrigin.WindowOpen,
+					selectionOrigin: (intent.isDefault || intent.initialWorkspaceSwitch) && !intent.draft ? WorkspaceSelectionOrigin.WindowContext : WorkspaceSelectionOrigin.WindowOpen,
 					isDefault: intent.isDefault && !intent.draft,
 				};
 				const result = intent.draft
@@ -262,6 +278,7 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 				if (result === 'applied') {
 					onState('applied');
 					if (folderUri) {
+						intent.onWorkspaceSelected?.(folderUri);
 						this.viewsService.getViewWithId<SessionsView>(SessionsViewId)?.sessionsControl?.setOpenWindowSourceFolder(folderUri);
 					}
 					return;
@@ -310,6 +327,100 @@ export class AgentsWindowWorkspaceHandoff extends Disposable {
 		}
 		const savedDraft = readNewChatDraftState(this.storageService);
 		return !!savedDraft && (!!savedDraft.inputText || savedDraft.attachments.length > 0);
+	}
+
+	/** Offers an explicit way to continue after an automatic workspace switch preserves the current session. */
+	promptOpenPreservedWorkspace(target: Pick<IAgentsWindowWorkspaceHandoff, 'folderUri' | 'remote' | 'preferDevContainer' | 'onWorkspaceSelected'>): void {
+		const message = localize('agentsHandoff.sessionPreserved', "Agents kept the current session. Start a new session to open another workspace.");
+		if (!target.folderUri && !target.remote?.folder) {
+			this.notificationService.info(message);
+			return;
+		}
+
+		const hasDraft = this._hasDraftInput();
+		const draftSettings = hasDraft && !this.sessionDraftsService.enabled.get();
+		const notice = new DisposableStore();
+		const host = this._focusedSessionHostService.focusedHost.get();
+		const composer = this.composerService.activeComposer.get();
+		const inputUri = composer && !isSessionCreated(host.session.get()) && this.composerService.getComposer(host) === composer ? composer.inputUri : undefined;
+		const choice = draftSettings
+			? {
+				label: localize('agentsHandoff.openDraftSettings', "Open Draft Settings"),
+				run: () => this.commandService.executeCommand('workbench.action.openSettings', `@id:${SESSIONS_DRAFTS_ENABLED_SETTING}`),
+			}
+			: {
+				label: hasDraft ? localize('agentsHandoff.saveAndOpenWorkspace', "Save Draft and Open Workspace") : localize('agentsHandoff.openWorkspace', "Open Workspace"),
+				run: async () => {
+					if (this._hasDraftInput()) {
+						try {
+							const saved = this.sessionDraftsService.enabled.get() && this.sessionDraftsService.stowAndClear(undefined, { keepScheduledPreview: true });
+							if (!saved) {
+								this.notificationService.info(localize('agentsHandoff.couldNotStowDraft', "Agents kept the current draft because it could not be saved to Drafts."));
+								return;
+							}
+						} catch (error) {
+							this.notificationService.error(error);
+							return;
+						}
+					}
+					await this.selectWorkspace({ ...target, isDefault: false, revealNewSession: true }, () => {});
+				},
+			};
+		let running = false;
+		const activate = async () => {
+			if (this._notification.value !== notice || running) {
+				return;
+			}
+			running = true;
+			try {
+				await choice.run();
+			} finally {
+				if (this._notification.value === notice) {
+					this._notification.clear();
+				}
+			}
+		};
+		this._notification.value = notice;
+		const notification = this.notificationService.prompt(Severity.Info, message, [{ label: choice.label, run: activate }], inputUri ? { priority: NotificationPriority.SILENT } : undefined);
+		notice.add(toDisposable(() => notification.close()));
+		notice.add(Event.once(notification.onDidClose)(() => {
+			if (!notice.isDisposed && this._notification.value === notice) {
+				this._notification.clear();
+			}
+		}));
+		notice.add(Event.once(this.composerService.onWillSendRequest)(() => this._notification.clear()));
+		if (inputUri) {
+			const version = ++this._noticeVersion;
+			const folderPath = target.folderUri?.path ?? target.remote?.folder?.path;
+			const folderName = folderPath && (posix.basename(folderPath) || folderPath);
+			notice.add(CommandsRegistry.registerCommand(openPreservedWorkspaceCommandId, (_accessor, requestedVersion: unknown) => {
+				if (requestedVersion === version && this._notification.value === notice && this.composerService.activeComposer.get() === composer) {
+					return activate();
+				}
+				return undefined;
+			}));
+			this.inputNotifications.setNotification({
+				id: preservedWorkspaceNoticeId,
+				inputUri,
+				severity: ChatInputNotificationSeverity.Info,
+				message: hasDraft ? localize('agentsHandoff.inlineDraftKept', "Your draft stayed in this workspace.") : localize('agentsHandoff.inlineWorkspaceKept', "Agents kept this workspace."),
+				description: folderName ? localize('agentsHandoff.inlineRequestedWorkspace', "The switch requested {0}.", folderName) : undefined,
+				actions: [{ kind: ChatInputNotificationActionKind.Command, label: choice.label, primary: true, commandId: openPreservedWorkspaceCommandId, commandArgs: [version], keepOpen: true }],
+				dismissible: true,
+				onDismiss: () => { if (this._notification.value === notice) { this._notification.clear(); } },
+				autoDismissOnMessage: true,
+			});
+			notice.add(toDisposable(() => this.inputNotifications.deleteNotification(preservedWorkspaceNoticeId)));
+		}
+		const navigationVersion = this.composerService.userNavigationVersion.get();
+		const selectionVersion = this.composerService.userWorkspaceSelectionVersion.get();
+		notice.add(autorun(reader => {
+			const navigation = this.composerService.userNavigationVersion.read(reader);
+			const selection = this.composerService.userWorkspaceSelectionVersion.read(reader);
+			if (navigation !== navigationVersion || selection !== selectionVersion) {
+				this._notification.clear();
+			}
+		}));
 	}
 
 	private _showRecovery(intent: IAgentsWindowWorkspaceHandoff, onState: (state: WorkspaceHandoffState) => void): void {

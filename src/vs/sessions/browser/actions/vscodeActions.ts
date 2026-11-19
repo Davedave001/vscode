@@ -9,7 +9,7 @@ import { KeybindingWeight } from '../../../platform/keybinding/common/keybinding
 import { Schemas } from '../../../base/common/network.js';
 import { URI } from '../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../editor/browser/editorExtensions.js';
-import { localize, localize2 } from '../../../nls.js';
+import { localize } from '../../../nls.js';
 import { Action2 } from '../../../platform/actions/common/actions.js';
 import { AGENT_HOST_SCHEME, fromAgentHostUri } from '../../../platform/agentHost/common/agentHostUri.js';
 import { IRemoteAgentHostService } from '../../../platform/agentHost/common/remoteAgentHostService.js';
@@ -32,7 +32,7 @@ import { IActionViewItemService } from '../../../platform/actions/browser/action
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution } from '../../../workbench/common/contributions.js';
 import { getChatSessionToOpenInEditor, getEditorWindowSessionResource, notifyEditorWindowSessionUnsupported, resolveRemoteAuthority, resolveRemoteFolderUri } from '../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
-import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
+import { onDidChangeWorkspaceModeSwitch, OPEN_IN_EDITOR_SEARCH_ALIAS, SWITCH_TO_IDE_TITLE, WorkspaceModeSwitch, WORKSPACE_MODE_SWITCH_SETTING, WORKSPACE_MODE_SWITCH_KEYBINDING } from '../../../workbench/browser/parts/titlebar/workspaceModeSwitch.js';
 import { OpenInVSCodeTitleBarWidget } from '../widget/openInVSCodeWidget.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IChat, ISession } from '../../../workbench/services/sessions/common/session.js';
@@ -45,7 +45,8 @@ export class OpenInVSCodeAction extends Action2 {
 	constructor() {
 		super({
 			id: OpenInVSCodeAction.ID,
-			title: localize2('openInVSCode', 'Open in Editor'),
+			title: SWITCH_TO_IDE_TITLE,
+			searchAlias: OPEN_IN_EDITOR_SEARCH_ALIAS,
 			f1: true,
 			keybinding: { primary: WORKSPACE_MODE_SWITCH_KEYBINDING, weight: KeybindingWeight.SessionsContrib, when: ContextKeyExpr.and(IsSessionsWindowContext, IsPhoneLayoutContext.negate()) },
 			icon: Codicon.vscodeInsiders,

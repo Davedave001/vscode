@@ -1714,7 +1714,7 @@ export async function pathsToEditors(paths: IPathData[] | undefined, fileService
 
 		const options: IEditorOptions = {
 			...path.options,
-			pinned: true
+			pinned: path.restoreEditorGroupId === undefined || (path.options?.pinned ?? true)
 		};
 
 		if (!exists) {

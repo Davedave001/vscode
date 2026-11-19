@@ -111,6 +111,12 @@ export interface IComposerRepositoryControls extends IDisposable {
 }
 
 /** Options a new-session or new-chat host supplies to its composer input. */
+export interface IComposerSlashCommand {
+	readonly label: `/${string}`;
+	readonly description: string;
+	readonly acceptsArguments?: boolean;
+}
+
 export interface INewChatComposerInputOptions {
 	readonly inputEditorOptions?: IChatViewOptions['inputEditorOptions'];
 	/** A host-owned composition can save instead of sending; undefined keeps the normal send path. */
@@ -155,6 +161,12 @@ export interface INewChatComposerInputOptions {
 	readonly hasAdditionalSendContent?: IObservable<boolean>;
 	readonly loading: IObservable<boolean>;
 	readonly placeholder?: string;
+	/** Hosts that submit plain messages and supply their own controls. */
+	readonly textOnly?: boolean;
+	/** A request owned by the text-only host that can be stopped from the composer. */
+	readonly hostRequest?: { readonly isRunning: IObservable<boolean>; readonly stop: () => void };
+	/** Commands interpreted by the host's submit handler in its text-only composer. */
+	readonly slashCommands?: readonly IComposerSlashCommand[];
 	/** Marks the input box as this onboarding spotlight target. */
 	readonly onboardingTargetId?: string;
 	/**

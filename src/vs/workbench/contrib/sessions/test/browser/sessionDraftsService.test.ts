@@ -219,6 +219,9 @@ suite('Saved session draft lifecycle', () => {
 				stowed: service.stow(composer),
 				navigation: navigation.at(-1),
 			};
+			assert.strictEqual(service.stowAndClear(composer, { keepScheduledPreview: true }), undefined);
+			assert.ok(composer.preview.get());
+			assert.strictEqual(cleared, 0);
 			service.stowAndClear(composer);
 			assert.deepStrictEqual({
 				duringPreview, cleared, afterPreview: composer.preview.get(), input: composer.input.inputText,

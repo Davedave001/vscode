@@ -51,8 +51,11 @@ export class LoopbackAuthServer implements ILoopbackServer {
 
 	constructor(
 		private readonly _logger: ILogger,
-		private readonly _appUri: URI,
-		private readonly _appName: string
+		private readonly _appUri: URI | undefined,
+		private readonly _appName: string,
+		private readonly _allowAlternatePort = true,
+		private readonly _callbackHost: '127.0.0.1' | 'localhost' = '127.0.0.1',
+		private readonly _callbackPath: '/' | '/oauth/callback' = '/',
 	) {
 		const deferredPromise = new DeferredPromise<IOAuthResult>();
 		this._resultPromise = deferredPromise.p;
@@ -63,7 +66,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 			return http.createServer((req, res) => {
 				const reqUrl = new URL(req.url!, `http://${req.headers.host}`);
 				switch (reqUrl.pathname) {
-					case '/': {
+					case this._callbackPath: {
 						const code = reqUrl.searchParams.get('code') ?? undefined;
 						const state = reqUrl.searchParams.get('state') ?? undefined;
 						const error = reqUrl.searchParams.get('error') ?? undefined;
@@ -107,7 +110,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 		if (this._port === undefined) {
 			throw new Error('Server is not started yet');
 		}
-		return `http://127.0.0.1:${this._port}/`;
+		return `http://${this._callbackHost}:${this._port}${this._callbackPath}`;
 	}
 
 	private _sendPage(res: http.ServerResponse): void {
@@ -143,9 +146,14 @@ export class LoopbackAuthServer implements ILoopbackServer {
 		});
 		server.on('error', err => {
 			if ('code' in err && err.code === 'EADDRINUSE') {
+				if (!this._allowAlternatePort) {
+					clearTimeout(portTimeout);
+					deferredPromise.error(new Error(`OAuth callback port ${DEFAULT_AUTH_FLOW_PORT} is in use. Finish the other sign-in or close the app using that port, then try again.`));
+					return;
+				}
 				this._logger.error('Address in use, retrying with a different port...');
 				// Best effort to use a specific port, but fallback to a random one if it is in use
-				server.listen(0, '127.0.0.1');
+				server.listen(0, this._callbackHost);
 				return;
 			}
 			clearTimeout(portTimeout);
@@ -155,7 +163,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 			deferredPromise.error(new Error('Closed'));
 		});
 		// Best effort to use a specific port, but fallback to a random one if it is in use
-		server.listen(DEFAULT_AUTH_FLOW_PORT, '127.0.0.1');
+		server.listen(DEFAULT_AUTH_FLOW_PORT, this._callbackHost);
 		return deferredPromise.p;
 	}
 
@@ -188,7 +196,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 
 	getHtml(): string {
 		// Neither value is static; encode each for its context and keep the URI out of the script.
-		const appUri = htmlAttributeEncodeValue(this._appUri.toString(true));
+		const appUri = this._appUri ? htmlAttributeEncodeValue(this._appUri.toString(true)) : undefined;
 		const appName = escape(this._appName);
 		// TODO: Bring this in via mixin. Skipping exploration for now.
 		let backgroundImage = 'url(\'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABAAAAAQABAMAAACNMzawAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAJ1BMVEUAAAD///9Qm8+ozed8tNsWer+Lvd9trNfF3u9Ck8slgsMzi8eZxeM/Qa6mAAAAAXRSTlMAQObYZgAAAAFiS0dEAf8CLd4AAAAHdElNRQfiCwYULRt0g+ZLAAAJRUlEQVR42u3SUY0CQRREUSy0hSZtBA+wfOwv4wAPYwAJSMAfAthkB6YD79HnKqikzmYjSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIk6cmKhg4AAASAABAAAkAACAABIAAEgAAQAAJAAAgAAaBvBVAjtV2wfFe1ogcA+0gdFgBoe60IAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAnAjAP/1MkWoAvBvAsUTqBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJAAgAASAABIAAEAACQAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKA7gDlbFwC6AijZagAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQDM2boA0BXAqAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIATARAAAkAAvF7N1hWArgBKthoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfBrAlK0bAF0BjBoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4EQABIAAEwOtN2boB0BVAyVYDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgE8DqNm6AtAVwKgBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAEwEQAAJAAPzd7xypMwDvBnAskToBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAIAAkAACAABIAAEgAAQAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAkAACAABIAAEgAAQAAJAAAgAASAABIAAEAACQAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIBKBGarsAwK5qRQ8ANGYAACAABIAAEAACQAAIAAEgAASAABAAAkDfCUCSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJC3uDtO80OSql+i8AAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDE4LTExLTA2VDIwOjQ1OjI3KzAwOjAwEjLurQAAACV0RVh0ZGF0ZTptb2RpZnkAMjAxOC0xMS0wNlQyMDo0NToyNyswMDowMGNvVhEAAAAZdEVYdFNvZnR3YXJlAEFkb2JlIEltYWdlUmVhZHlxyWU8AAAAAElFTkSuQmCC\')';
@@ -202,7 +210,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 
 <head>
 	<meta charset="utf-8" />
-	<title>GitHub Authentication - Sign In</title>
+	<title>${appName} - Sign In</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<style>
 		html {
@@ -309,9 +317,9 @@ export class LoopbackAuthServer implements ILoopbackServer {
 	</a>
 	<div class="message-container">
 		<div class="message">
-			Sign-in successful! Returning to ${appName}...
+			${appUri ? `Sign-in successful! Returning to ${appName}...` : `Authorization received. Return to ${appName} to finish connecting.`}
 			<br><br>
-			If you're not redirected automatically, <a id="redirect-link" href="${appUri}" style="color: #85CEFF;">click here</a> or close this page.
+			${appUri ? `If you're not redirected automatically, <a id="redirect-link" href="${appUri}" style="color: #85CEFF;">click here</a> or close this page.` : 'You can close this page.'}
 		</div>
 		<div class="error-message">
 			An error occurred while signing in:
@@ -326,7 +334,7 @@ export class LoopbackAuthServer implements ILoopbackServer {
 				.textContent = decodeURIComponent(error);
 			document.querySelector('body')
 				.classList.add('error');
-		} else {
+		} else if (document.getElementById('redirect-link')) {
 			// Redirect to the app URI after a 1-second delay to allow page to load
 			setTimeout(function() {
 				window.location.href = document.getElementById('redirect-link').getAttribute('href');

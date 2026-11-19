@@ -84,6 +84,8 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 	private readonly _accessibleDiffViewer: IObservable<AccessibleDiffViewer>;
 	private readonly _options: DiffEditorOptions;
 	private readonly _editors: DiffEditorEditors;
+	private _lastFocusedEditor: ICodeEditor | undefined;
+	private _restoreOriginalFocus = false;
 
 	private readonly _overviewRulerPart: IObservable<OverviewRulerFeature | undefined>;
 	private readonly _movedBlocksLinesPart;
@@ -292,6 +294,8 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 			codeEditorWidgetOptions,
 			(i, c, o, o2) => this._createInnerEditor(i, c, o, o2),
 		));
+		this._register(this._editors.original.onDidFocusEditorWidget(() => this._lastFocusedEditor = this._editors.original));
+		this._register(this._editors.modified.onDidFocusEditorWidget(() => this._lastFocusedEditor = this._editors.modified));
 
 		this._register(bindContextKey(EditorContextKeys.diffEditorOriginalWritable, this._contextKeyService,
 			reader => this._options.originalEditable.read(reader)
@@ -535,6 +539,16 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 
 	override hasTextFocus(): boolean { return this._editors.original.hasTextFocus() || this._editors.modified.hasTextFocus(); }
 
+	override focus(): void {
+		const restoreOriginalFocus = this._restoreOriginalFocus;
+		this._restoreOriginalFocus = false;
+		if (restoreOriginalFocus && this._options.renderSideBySide.get()) {
+			this._editors.original.focus();
+		} else {
+			super.focus();
+		}
+	}
+
 	public override saveViewState(): IDiffEditorViewState {
 		const originalViewState = this._editors.original.saveViewState();
 		const modifiedViewState = this._editors.modified.saveViewState();
@@ -550,6 +564,7 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 			const diffEditorState = s;
 			this._editors.original.restoreViewState(diffEditorState.original);
 			this._editors.modified.restoreViewState(diffEditorState.modified);
+			this._restoreOriginalFocus = diffEditorState.focusedSide === 'original';
 			if (diffEditorState.modelState) {
 				// eslint-disable-next-line local/code-no-any-casts, @typescript-eslint/no-explicit-any
 				this._diffModel.get()?.restoreSerializedState(diffEditorState.modelState as any);
@@ -590,6 +605,8 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 					currentModel?.model.original !== vm?.model.original
 					|| currentModel?.model.modified !== vm?.model.modified
 				) {
+					this._lastFocusedEditor = undefined;
+					this._restoreOriginalFocus = false;
 					this._options.resetWidthBasedLayout(tx);
 				}
 				/** @description DiffEditorWidget.setModel */
@@ -622,6 +639,13 @@ export class DiffEditorWidget extends DelegatingEditor implements IDiffEditor {
 	getContainerDomNode(): HTMLElement { return this._domElement; }
 	getOriginalEditor(): ICodeEditor { return this._editors.original; }
 	getModifiedEditor(): ICodeEditor { return this._editors.modified; }
+
+	getLastFocusedEditor(): ICodeEditor {
+		if (!this._options.renderSideBySide.get() || this._editors.modified.hasWidgetFocus()) {
+			return this._editors.modified;
+		}
+		return this._editors.original.hasWidgetFocus() ? this._editors.original : this._lastFocusedEditor ?? this._editors.modified;
+	}
 
 	setBoundarySashes(sashes: IBoundarySashes): void {
 		this._boundarySashes.set(sashes, undefined);

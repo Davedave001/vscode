@@ -836,7 +836,7 @@ export class ChatSubmitWithCodebaseAction extends Action2 {
 
 class SendToNewChatAction extends Action2 {
 	constructor() {
-		const precondition = ChatContextKeys.inputHasText;
+		const precondition = ContextKeyExpr.and(ChatContextKeys.inputHasText, ChatContextKeys.hostOnlyInput.negate());
 
 		super({
 			id: 'workbench.action.chat.sendToNewChat',

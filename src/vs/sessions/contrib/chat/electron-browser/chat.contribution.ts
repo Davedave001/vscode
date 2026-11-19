@@ -4,16 +4,19 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
-import { URI, UriComponents } from '../../../../base/common/uri.js';
-import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { isUriComponents, URI, UriComponents } from '../../../../base/common/uri.js';
+import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { raceCancellation, Sequencer } from '../../../../base/common/async.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
-import { isEqual } from '../../../../base/common/resources.js';
+import { Schemas } from '../../../../base/common/network.js';
+import { extUriBiasedIgnorePathCase, isEqual } from '../../../../base/common/resources.js';
 import { localize } from '../../../../nls.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IAgentHostByokLmHandler } from '../../../../platform/agentHost/common/agentHostByokLm.js';
 import { IAgentHostConnectionsService } from '../../../../platform/agentHost/common/agentHostConnectionsService.js';
+import { AGENT_HOST_SCHEME } from '../../../../platform/agentHost/common/agentHostUri.js';
+import { IRemoteAgentHostService } from '../../../../platform/agentHost/common/remoteAgentHostService.js';
 import { toRemoteAgentHostSessionType } from '../../../../platform/agentHost/common/agentHostSessionType.js';
 import { buildExternalOpenSessionLinkUri, parseOpenSessionLinkChatId, parseOpenSessionLinkConnectionAuthority, parseOpenSessionLinkTurnId, parseOpenSessionLinkUri } from '../../../../platform/agentHost/common/openSessionLink.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -28,7 +31,7 @@ import { ILifecycleService, LifecyclePhase } from '../../../../workbench/service
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
-import { INativeHostService } from '../../../../platform/native/common/native.js';
+import { INativeHostService, IOpenAgentsWindowOptions, isAgentsEditorSelection } from '../../../../platform/native/common/native.js';
 import { ISessionsSetUpService } from '../../../browser/sessionsSetUpService.js';
 import { ISessionsPartService } from '../../../../workbench/services/sessions/browser/sessionsPartService.js';
 import { SessionsCopilotConfigSlashSubmitHandlerContribution } from '../browser/copilotConfigSlashSubmitHandler.js';
@@ -58,6 +61,10 @@ import { ISession, isSessionCreated } from '../../../../workbench/services/sessi
 import { IRemoteWorkspaceHandoffService, RemoteAgentHostHandoffResult } from '../../../common/remoteWorkspaceHandoff.js';
 import { IChatWindowService } from '../../../../workbench/contrib/chatWindow/browser/chatWindow.js';
 import { getRemoteName } from '../../../../platform/remote/common/remoteHosts.js';
+import { ICustomViewService } from '../../../../workbench/contrib/sessions/browser/customView.js';
+import { ASSISTANT_CUSTOM_VIEW_ID } from '../../../../workbench/contrib/sessions/common/chatConstants.js';
+import { resolveRemoteFolderUri } from '../../../../workbench/contrib/sessions/browser/openInVSCodeUtils.js';
+import { getAssistantEditorFolders, IAssistantAgentChats } from '../../sessions/browser/assistantAgentChats.js';
 
 /** Revokes editor request ownership when the next request is submitted here. */
 export class AgentsWindowRequestActivity extends Disposable implements IWorkbenchContribution {
@@ -92,7 +99,7 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 	static readonly ID = 'sessions.selectAgentsFolder';
 	private readonly _windowOpenTelemetry = this._register(new MutableDisposable<SessionsWindowOpenTelemetry>());
 	private readonly _workspaceSelectionTelemetry = this._register(new MutableDisposable<SessionsWorkspaceSelectionTelemetry>());
-	private readonly _openIntent = this._register(new MutableDisposable());
+	private readonly _openIntent = this._register(new MutableDisposable<IDisposable & { readonly isWorkspaceDefault: boolean }>());
 	private readonly _workspaceHandoff: AgentsWindowWorkspaceHandoff;
 	private readonly _invitationOnboarding: AgentsWindowInvitationOnboarding;
 	private _didHandleInitialWindowOpen = false;
@@ -116,16 +123,28 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IRemoteWorkspaceHandoffService private readonly remoteWorkspaceHandoffService: IRemoteWorkspaceHandoffService,
 		@IChatWindowService private readonly chatWindowService: IChatWindowService,
+		@ICustomViewService private readonly customViews: ICustomViewService,
+		@IAssistantAgentChats private readonly assistantChats: IAssistantAgentChats,
+		@IRemoteAgentHostService private readonly remoteAgentHostService: IRemoteAgentHostService,
 	) {
 		super();
 		// Session providers register in contributions instantiated after restore.
 		this._workspaceHandoff = this._register(instantiationService.createInstance(AgentsWindowWorkspaceHandoff, Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench).whenRestored));
 		this._invitationOnboarding = this._register(instantiationService.createInstance(AgentsWindowInvitationOnboarding));
 		const handleSelectAgentsFolder = (_: unknown, ...args: unknown[]) => {
-			this._workspaceHandoff.cancel();
-			const cancellation = new CancellationTokenSource();
-			this._openIntent.value = toDisposable(() => cancellation.dispose(true));
+			const workspaceSwitch = args[7] === 'warm' || args[7] === 'cold' ? args[7] : undefined;
+			if (workspaceSwitch === 'warm' && this._openIntent.value?.isWorkspaceDefault === false) {
+				return;
+			}
 			const workspaceUri = args[0] ? URI.revive(args[0] as UriComponents) : undefined;
+			const payload = args[8] as { readonly folders?: unknown; readonly activeFile?: unknown; readonly selection?: unknown } | undefined;
+			const editorWorkspace: IOpenAgentsWindowOptions['editorWorkspace'] = workspaceSwitch && Array.isArray(payload?.folders)
+				&& payload.folders.every(folder => folder && typeof folder.name === 'string' && isUriComponents(folder.uri))
+				? {
+					folders: payload.folders,
+					activeFile: isUriComponents(payload.activeFile) ? payload.activeFile : undefined,
+					selection: isAgentsEditorSelection(payload.selection) ? payload.selection : undefined,
+				} : undefined;
 			const showNewSession = args[1] === 'new';
 			const sessionResource = args[1] && !showNewSession ? URI.revive(args[1] as UriComponents) : undefined;
 			const source = isAgentsWindowOpenSource(args[2]) ? args[2] : AgentsWindowOpenSource.Unknown;
@@ -138,6 +157,11 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 				this.notificationService.warn(localize('agentsHandoff.invalidDraft', "The draft could not be copied. Your prompt and attachments are still in the editor."));
 				return;
 			}
+			this._workspaceHandoff.cancel();
+			const cancellation = new CancellationTokenSource();
+			const isWorkspaceDefault = (workspaceArgumentIsDefault || workspaceSwitch === 'cold') && !sessionResource && !showNewSession && draftPayload === undefined;
+			const openIntent = { isWorkspaceDefault, dispose: () => cancellation.dispose(true) };
+			this._openIntent.value = openIntent;
 			const draft = draftPayload;
 			const noWorkspace = source === AgentsWindowOpenSource.Link && draft !== undefined && workspaceUri === undefined;
 			this.logService.info(`[AgentsHandoff] IPC received: folderUri=${workspaceUri?.toString() ?? '(none)'} sessionResource=${sessionResource?.toString() ?? '(none)'}`);
@@ -148,14 +172,22 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 				workspaceArgumentIsDefault,
 			});
 
-			const handoff = () => this._handleOpenIntentAndCaptureInitialState(workspaceUri, sessionResource, workspaceArgumentIsDefault, cancellation.token, telemetry, draft, noWorkspace, showNewSession, revealRemoteAuthority);
+			const handoff = () => this.handleOpenIntent(workspaceUri, sessionResource, workspaceArgumentIsDefault, cancellation.token, telemetry, draft, noWorkspace, showNewSession, revealRemoteAuthority, source, workspaceSwitch, editorWorkspace);
 			const opening = onboardingSessionResource && (!sessionResource || isEqual(onboardingSessionResource, sessionResource))
 				? this._invitationOnboarding.runWithHandoff(handoff, async () => {
 					const available = await this.waitForSessionAvailable(onboardingSessionResource, cancellation.token);
 					return available ? this.getSessionForResource(onboardingSessionResource) : undefined;
 				}, cancellation.token, sessionResource !== undefined)
 				: handoff();
-			opening.catch(err => this.logService.error('[AgentsHandoff] handleOpenIntent failed', err));
+			void opening.catch(err => {
+				telemetry?.recordWorkspaceHandoffState('error');
+				this.logService.error('[AgentsHandoff] handleOpenIntent failed', err);
+			}).finally(async () => {
+				if (this._openIntent.value === openIntent) {
+					this._openIntent.clear();
+				}
+				await this._captureInitialWindowViewState(telemetry);
+			});
 		};
 		ipcRenderer.on('vscode:selectAgentsFolder', handleSelectAgentsFolder);
 		this._register({ dispose: () => ipcRenderer.removeListener('vscode:selectAgentsFolder', handleSelectAgentsFolder) });
@@ -189,18 +221,9 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 	}
 
 	private async _captureInitialWindowViewState(telemetry: SessionsWindowOpenTelemetry | undefined): Promise<void> {
-		await this.lifecycleService.when(LifecyclePhase.Eventually);
-		telemetry?.captureInitialViewState();
-	}
-
-	private async _handleOpenIntentAndCaptureInitialState(workspaceUri: URI | undefined, sessionResource: URI | undefined, isDefault: boolean, token: CancellationToken, telemetry: SessionsWindowOpenTelemetry | undefined, draft?: IAgentsWindowDraft, noWorkspace = false, showNewSession = false, revealRemoteAuthority?: string): Promise<void> {
-		try {
-			await this.handleOpenIntent(workspaceUri, sessionResource, isDefault, token, telemetry, draft, noWorkspace, showNewSession, revealRemoteAuthority);
-		} catch (error) {
-			telemetry?.recordWorkspaceHandoffState('error');
-			throw error;
-		} finally {
-			await this._captureInitialWindowViewState(telemetry);
+		if (telemetry) {
+			await this.lifecycleService.when(LifecyclePhase.Eventually);
+			telemetry.captureInitialViewState();
 		}
 	}
 
@@ -227,7 +250,35 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 		};
 	}
 
-	private async handleOpenIntent(workspaceUri: URI | undefined, sessionResource: URI | undefined, isDefault: boolean, token: CancellationToken, telemetry: SessionsWindowOpenTelemetry | undefined, draft?: IAgentsWindowDraft, noWorkspace = false, showNewSession = false, revealRemoteAuthority?: string): Promise<void> {
+	private async handleOpenIntent(workspaceUri: URI | undefined, sessionResource: URI | undefined, isDefault: boolean, token: CancellationToken, telemetry: SessionsWindowOpenTelemetry | undefined, draft?: IAgentsWindowDraft, noWorkspace = false, showNewSession = false, revealRemoteAuthority?: string, source?: AgentsWindowOpenSource, workspaceSwitch?: 'warm' | 'cold', editorWorkspace?: IOpenAgentsWindowOptions['editorWorkspace']): Promise<void> {
+		const file = URI.revive(editorWorkspace?.activeFile);
+		const editorSelection = file?.scheme === Schemas.file && editorWorkspace?.selection ? { file, selection: editorWorkspace.selection } : undefined;
+		if (workspaceSwitch === 'warm' && workspaceUri && !sessionResource && !draft && !showNewSession && this.customViews.activeCustomView.get()?.id === ASSISTANT_CUSTOM_VIEW_ID) {
+			const target = this.assistantChats.target;
+			const folders = getAssistantEditorFolders(target);
+			const matches = folders.some(folder => {
+				if (extUriBiasedIgnorePathCase.isEqual(workspaceUri, folder)) {
+					return true;
+				}
+				if (workspaceUri.scheme === Schemas.vscodeRemote && folder.scheme === AGENT_HOST_SCHEME && target?.providerId) {
+					try {
+						return extUriBiasedIgnorePathCase.isEqual(workspaceUri, resolveRemoteFolderUri(folder, target.providerId, this.sessionsProvidersService, this.remoteAgentHostService));
+					} catch {
+						// An unprepared sample cannot identify an existing editor folder.
+					}
+				}
+				return false;
+			});
+			if (matches) {
+				const selectionInWorkspace = editorSelection && folders.some(folder => extUriBiasedIgnorePathCase.isEqualOrParent(editorSelection.file, folder));
+				this.assistantChats.editorSelection.set(selectionInWorkspace ? editorSelection : undefined, undefined);
+				telemetry?.recordWorkspaceHandoffState('preservedSession');
+				return;
+			}
+		}
+		if (workspaceSwitch) {
+			this.assistantChats.editorSelection.set(undefined, undefined);
+		}
 		const resolved = resolveAgentsWindowFolderIntent(workspaceUri, this.configurationService);
 		// Opening an existing session establishes its own workspace context, so
 		// the folder selection is only needed for the folder-only handoff (no
@@ -254,10 +305,48 @@ export class SelectAgentsFolderContribution extends Disposable implements IWorkb
 			if (showNewSession) {
 				this.newSessionComposerService.notifyUserNavigation();
 			}
+			const onWorkspaceSelected = workspaceSwitch ? (selectedFolder: URI) => {
+				const folders = editorWorkspace?.folders.map(({ uri, name }) => ({ uri: URI.revive(uri), name }));
+				const primary = folders?.find(folder => extUriBiasedIgnorePathCase.isEqual(folder.uri, selectedFolder));
+				if (selectedFolder.scheme !== Schemas.file || !primary || !folders?.every(folder => folder.uri.scheme === Schemas.file)) {
+					this.assistantChats.editorWorkspace = undefined;
+					return;
+				}
+				const ordered = [{ uri: selectedFolder, name: primary.name }, ...folders.filter(folder => !extUriBiasedIgnorePathCase.isEqual(folder.uri, selectedFolder))];
+				const activeFile = file?.scheme === Schemas.file && ordered.some(folder => extUriBiasedIgnorePathCase.isEqualOrParent(file, folder.uri)) ? file : undefined;
+				this.assistantChats.editorWorkspace = {
+					selectedFolder,
+					fileRoots: ordered.map(folder => folder.uri),
+					fileRootNames: ordered.map(folder => folder.name),
+					activeFile,
+					selectionVersion: this.newSessionComposerService.userWorkspaceSelectionVersion.get(),
+					navigationVersion: this.newSessionComposerService.userNavigationVersion.get(),
+				};
+				this.assistantChats.editorSelection.set(activeFile ? editorSelection : undefined, undefined);
+			} : undefined;
+			const handoffTarget = {
+				folderUri, ...(resolved.remote ? { remote: resolved.remote } : {}), preferDevContainer: resolved.preferDevContainer,
+				...(onWorkspaceSelected ? { onWorkspaceSelected } : {}),
+			};
 			await this._workspaceHandoff.selectWorkspace({
-				folderUri, ...(resolved.remote ? { remote: resolved.remote } : {}), preferDevContainer: resolved.preferDevContainer, isDefault, draft, noWorkspace, revealNewSession: showNewSession,
-			}, state => telemetry?.recordWorkspaceHandoffState(state));
+				...handoffTarget, isDefault, draft, noWorkspace, revealNewSession: showNewSession,
+				...(workspaceSwitch === 'cold' ? { initialWorkspaceSwitch: true } : undefined),
+			}, state => {
+				telemetry?.recordWorkspaceHandoffState(state);
+				if (state === 'preservedSession' && !token.isCancellationRequested && (source === AgentsWindowOpenSource.Explorer || (workspaceSwitch && workspaceUri && !this._isCurrentWorkspace(workspaceUri)))) {
+					this._workspaceHandoff.promptOpenPreservedWorkspace(handoffTarget);
+				}
+			});
 		}
+	}
+
+	private _isCurrentWorkspace(workspaceUri: URI): boolean {
+		const selected = this.newSessionComposerService.workspaceSelection.get();
+		if (selected?.state === 'selected') {
+			return extUriBiasedIgnorePathCase.isEqual(selected.folderUri, workspaceUri);
+		}
+		const workspace = this._focusedSessionHostService.focusedHost.get().chat.get()?.workspace.get();
+		return workspace?.folders.some(folder => extUriBiasedIgnorePathCase.isEqual(folder.root, workspaceUri) || extUriBiasedIgnorePathCase.isEqual(folder.workingDirectory, workspaceUri)) ?? false;
 	}
 
 	/** Returns `'unsupported'` when this window can't open the session of a remote window, whose folder it can open instead. */

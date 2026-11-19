@@ -116,3 +116,12 @@ export function addArg(argv: string[], ...args: string[]): string[] {
 export function isLaunchedFromCli(env: IProcessEnvironment): boolean {
 	return env['VSCODE_CLI'] === '1';
 }
+
+/** Whether a desktop launch leaves the destination window up to the product default. */
+export function isUnqualifiedWindowLaunch(args: NativeParsedArgs): boolean {
+	return args._.length === 0 && !(
+		args['folder-uri'] || args['file-uri'] || args['open-url'] || args.remote || args.chat || args.editSessionId || args.continueOn
+		|| args['new-window'] || args['reuse-window'] || args.profile || args['profile-temp'] || args.transient
+		|| args.extensionDevelopmentPath || args.extensionTestsPath || args.wait || args.diff || args.merge || args.add || args.remove || args.goto
+	);
+}

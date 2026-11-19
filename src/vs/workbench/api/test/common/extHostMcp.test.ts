@@ -6,7 +6,7 @@
 import * as assert from 'assert';
 import * as sinon from 'sinon';
 import { DeferredPromise } from '../../../../base/common/async.js';
-import { isCancellationError } from '../../../../base/common/errors.js';
+import { CancellationError, isCancellationError, transformErrorForSerialization, transformErrorFromSerialization } from '../../../../base/common/errors.js';
 import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { mock } from '../../../../base/test/common/mock.js';
@@ -14,7 +14,7 @@ import { LogLevel, NullLogService } from '../../../../platform/log/common/log.js
 import { MainThreadMcpShape } from '../../common/extHost.protocol.js';
 import { createAuthMetadata, CommonRequestInit, CommonResponse, IAuthMetadata, McpHTTPHandle } from '../../common/extHostMcp.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { McpConnectionState, McpServerTransportHTTP, McpServerTransportType } from '../../../contrib/mcp/common/mcpTypes.js';
+import { McpConnectionState, McpServerTransportHTTP, McpServerTransportType, UserInteractionRequiredError } from '../../../contrib/mcp/common/mcpTypes.js';
 import { MCP } from '../../../contrib/mcp/common/modelContextProtocol.js';
 
 // Test constants to avoid magic strings
@@ -188,6 +188,7 @@ suite('ExtHostMcp', () => {
 			check?: (url: string) => Promise<string | undefined>;
 			respond?: (url: string, init: CommonRequestInit) => CommonResponse;
 			onState?: (state: McpConnectionState) => void;
+			getToken?: () => Promise<string>;
 		} = {}) {
 			const requests: { url: string; method: string; headers: Record<string, string>; body: Uint8Array<ArrayBuffer> | undefined }[] = [];
 			const checkedUrls: string[] = [];
@@ -206,7 +207,7 @@ suite('ExtHostMcp', () => {
 					}
 				}
 				override async $getTokenFromServerMetadata(): Promise<string> {
-					return 'test-access-token';
+					return options.getToken ? options.getToken() : 'test-access-token';
 				}
 				override $logMcpAuthSetup(): void { }
 			}, {
@@ -478,6 +479,80 @@ suite('ExtHostMcp', () => {
 			assert.ok(requests.some(request => request.url.startsWith(TEST_AUTH_SERVER)));
 			assert.deepStrictEqual(checkedUrls, [TEST_MCP_URL, TEST_MCP_URL]);
 		});
+
+		for (const [name, error] of [
+			['dismissed', new CancellationError()],
+			['required during a quiet start', new UserInteractionRequiredError('authentication')],
+			['cancelled by Microsoft sign-in', Object.assign(new Error('user_canceled: See https://aka.ms/msal.js.errors#user_canceled for details'), { name: 'ClientAuthError' })],
+		] as const) {
+			test(`stops for sign-in without retrying the request when OAuth is ${name}`, async () => {
+				const { handle, requests, states, signals } = createHandle({
+					getToken: async () => { throw transformErrorFromSerialization(transformErrorForSerialization(error)); },
+					respond: url => {
+						if (url === TEST_MCP_URL) {
+							return createMockResponse({ status: 401 });
+						}
+						if (url.includes('oauth-protected-resource')) {
+							return createMockResponse({ body: JSON.stringify({ resource: TEST_MCP_URL, authorization_servers: [TEST_AUTH_SERVER] }) });
+						}
+						return createMockResponse({
+							body: JSON.stringify({
+								issuer: TEST_AUTH_SERVER,
+								authorization_endpoint: `${TEST_AUTH_SERVER}/authorize`,
+								token_endpoint: `${TEST_AUTH_SERVER}/token`,
+								response_types_supported: ['code'],
+							})
+						});
+					},
+				});
+
+				await handle.send('test-message');
+				assert.deepStrictEqual(states, [
+					{ state: McpConnectionState.Kind.Running },
+					{ state: McpConnectionState.Kind.Stopped, reason: 'needs-user-interaction' },
+				]);
+				assert.strictEqual(requests.filter(request => request.url === TEST_MCP_URL).length, 1);
+				assert.ok(signals.length && signals.every(signal => signal.aborted));
+			});
+		}
+
+		for (const invalidToken of [false, true]) {
+			test(invalidToken ? 'retries a Google Workspace invalid-token challenge' : 'keeps the Gmail API-disabled response without replacing the signed-in account', async () => {
+				const gmailUrl = 'https://gmailmcp.googleapis.com/mcp/v1';
+				const googleAuth = 'https://accounts.google.com';
+				const disabled = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text: 'Gmail MCP API has not been used in this project before or it is disabled.' }] } });
+				let authenticatedRequests = 0;
+				const { handle, requests } = createHandle({
+					uri: URI.parse(gmailUrl),
+					respond: (url, init) => {
+						if (url === gmailUrl) {
+							if (!init.headers.Authorization) {
+								return createMockResponse({ status: 401, url });
+							}
+							authenticatedRequests++;
+							return authenticatedRequests === 1
+								? createMockResponse({ status: 403, url, body: disabled, ...(invalidToken ? { headers: { 'WWW-Authenticate': 'Bearer error="invalid_token"' } } : {}) })
+								: createMockResponse({ status: 202, url });
+						}
+						if (url.includes('oauth-protected-resource')) {
+							return createMockResponse({ url, body: JSON.stringify({ resource: gmailUrl, authorization_servers: [googleAuth] }) });
+						}
+						return createMockResponse({ url, body: JSON.stringify({
+							issuer: googleAuth,
+							authorization_endpoint: `${googleAuth}/o/oauth2/v2/auth`,
+							token_endpoint: 'https://oauth2.googleapis.com/token',
+							response_types_supported: ['code'],
+						}) });
+					},
+				});
+				const headers: Record<string, string> = {};
+				const response = await handle['_fetchWithAuthRetry'](gmailUrl, { method: 'POST', headers }, headers);
+				assert.strictEqual(response.status, invalidToken ? 202 : 403);
+				assert.deepStrictEqual(requests.filter(request => request.url === gmailUrl).map(request => request.headers.Authorization),
+					invalidToken ? [undefined, 'Bearer test-access-token', 'Bearer test-access-token'] : [undefined, 'Bearer test-access-token']);
+				if (!invalidToken) { assert.strictEqual(await response.text(), disabled); }
+			});
+		}
 
 		test('continues rejecting non-HTTP redirect destinations', async () => {
 			const { handle, requests } = createHandle({

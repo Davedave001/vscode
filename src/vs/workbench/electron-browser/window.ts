@@ -1123,7 +1123,7 @@ export class NativeWindow extends BaseWindow {
 			const diffEditor: IResourceDiffEditorInput = {
 				original: { resource: resources[0].resource },
 				modified: { resource: resources[1].resource },
-				options: { pinned: true }
+				options: { pinned: true, viewState: resources[1].options?.viewState }
 			};
 			editors.push(diffEditor);
 		} else {

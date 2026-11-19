@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { DeferredPromise, raceCancellationError, Sequencer, timeout } from '../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../base/common/cancellation.js';
-import { CancellationError } from '../../../base/common/errors.js';
+import { CancellationError, isCancellationError } from '../../../base/common/errors.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, DisposableMap, DisposableStore, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { AUTH_SCOPE_SEPARATOR, fetchAuthorizationServerMetadata, fetchResourceMetadata, getDefaultMetadataForUrl, IAuthorizationProtectedResourceMetadata, IAuthorizationServerMetadata, parseWWWAuthenticateHeader, scopesMatch } from '../../../base/common/oauth.js';
@@ -23,6 +23,7 @@ import product from '../../../platform/product/common/product.js';
 import { StorageScope } from '../../../platform/storage/common/storage.js';
 import { extensionPrefixedIdentifier, McpCollectionDefinition, McpConnectionState, McpServerDefinition, McpServerEnvironmentVariableExpansion, McpServerLaunch, McpServerStaticMetadata, McpServerStaticToolAvailability, McpServerTransportHTTP, McpServerTransportType, UserInteractionRequiredError } from '../../contrib/mcp/common/mcpTypes.js';
 import { MCP } from '../../contrib/mcp/common/modelContextProtocol.js';
+import { isGoogleWorkspaceOAuth } from '../../services/authentication/common/authentication.js';
 import { checkProposedApiEnabled, isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
 import { ExtHostMcpShape, IMcpAuthenticationDetails, IAuthMetadataSource, IStartMcpOptions, MainContext, MainThreadMcpShape, IAuthResourceMetadataSource, IAuthServerMetadataSource } from './extHost.protocol.js';
 import { IExtHostInitDataService } from './extHostInitDataService.js';
@@ -696,7 +697,9 @@ export class McpHTTPHandle extends Disposable {
 				return;
 			}
 		} catch (e) {
-			this._proxy.$onDidChangeState(this._id, { state: McpConnectionState.Kind.Error, message: `Error connecting to ${this._launch.uri} as SSE: ${e}` });
+			if (!this._store.isDisposed) {
+				this._proxy.$onDidChangeState(this._id, { state: McpConnectionState.Kind.Error, message: `Error connecting to ${this._launch.uri} as SSE: ${e}` });
+			}
 			return;
 		}
 
@@ -793,11 +796,7 @@ export class McpHTTPHandle extends Disposable {
 					setHostHeader(headers, 'Authorization', `Bearer ${token}`);
 				}
 			} catch (e) {
-				if (UserInteractionRequiredError.is(e)) {
-					this._proxy.$onDidChangeState(this._id, { state: McpConnectionState.Kind.Stopped, reason: 'needs-user-interaction' });
-					throw new CancellationError();
-				}
-				this._log(LogLevel.Warning, `Error getting token from server metadata: ${String(e)}`);
+				this._handleAuthError(e, 'server metadata');
 			}
 		}
 		if (this._launch.authentication) {
@@ -818,14 +817,23 @@ export class McpHTTPHandle extends Disposable {
 					this._log(LogLevel.Info, 'Successfully obtained token from provided authentication config');
 				}
 			} catch (e) {
-				if (UserInteractionRequiredError.is(e)) {
-					this._proxy.$onDidChangeState(this._id, { state: McpConnectionState.Kind.Stopped, reason: 'needs-user-interaction' });
-					throw new CancellationError();
-				}
-				this._log(LogLevel.Warning, `Error getting token from provided authentication config: ${String(e)}`);
+				this._handleAuthError(e, 'provided authentication config');
 			}
 		}
 		return headers;
+	}
+
+	private _handleAuthError(error: unknown, source: string): void {
+		// The Microsoft authentication provider can return MSAL's ClientAuthError across the extension host RPC.
+		const microsoftCancelled = error instanceof Error && error.name === 'ClientAuthError' && /^user_canceled(?::|$)/.test(error.message);
+		if (microsoftCancelled || isCancellationError(error) || UserInteractionRequiredError.is(error)) {
+			if (!this._store.isDisposed && !this._didSendClose) {
+				this.dispose();
+				this._proxy.$onDidChangeState(this._id, { state: McpConnectionState.Kind.Stopped, reason: 'needs-user-interaction' });
+			}
+			throw new CancellationError();
+		}
+		this._log(LogLevel.Warning, `Error getting token from ${source}: ${String(error)}`);
 	}
 
 	private _log(level: LogLevel, message: string) {
@@ -887,6 +895,14 @@ export class McpHTTPHandle extends Disposable {
 		}
 		// If we have an Authorization header and still get an auth error, we should retry with a new auth registration
 		if (headers['Authorization'] && isAuthStatusCode(res.status)) {
+			const metadata = this._authMetadata;
+			if (res.status === 403 && metadata && isGoogleWorkspaceOAuth(metadata.authorizationServer, metadata.serverMetadata, this._launch.uri)) {
+				const challenges = parseWWWAuthenticateHeader(res.headers.get('WWW-Authenticate') ?? '');
+				if (!challenges.some(challenge => challenge.scheme.toLowerCase() === 'bearer' && challenge.params['error'] === 'invalid_token')) {
+					// Google uses 403 for project and permission errors after accepting the token.
+					return res;
+				}
+			}
 			const errorText = await this._getErrText(res);
 			this._log(LogLevel.Info, `Received ${res.status} status with Authorization header, retrying with new auth registration. Error details: ${errorText || 'no additional details'}`);
 			await this._addAuthHeader(headers, { forceNewRegistration: true });

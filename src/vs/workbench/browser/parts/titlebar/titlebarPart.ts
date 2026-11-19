@@ -16,7 +16,7 @@ import { DisposableStore, IDisposable, MutableDisposable } from '../../../../bas
 import { IBrowserWorkbenchEnvironmentService } from '../../../services/environment/browser/environmentService.js';
 import { IColorTheme, IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { MODERN_UI_INACTIVE_SHELL_BACKGROUND, MODERN_UI_SHELL_BACKGROUND, TITLE_BAR_ACTIVE_BACKGROUND, TITLE_BAR_ACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_FOREGROUND, TITLE_BAR_INACTIVE_BACKGROUND, TITLE_BAR_BORDER, WORKBENCH_BACKGROUND } from '../../../common/theme.js';
-import { onDidChangeWorkspaceModeSwitch } from './workspaceModeSwitch.js';
+import { onDidChangeWorkspaceModeSwitch, WorkspaceModeSwitch } from './workspaceModeSwitch.js';
 import { isMacintosh, isWindows, isLinux, isWeb, isNative, platformLocale } from '../../../../base/common/platform.js';
 import { Color } from '../../../../base/common/color.js';
 import { EventType, EventHelper, Dimension, append, $, addDisposableListener, prepend, reset, getWindow, getWindowId, isAncestor, getActiveDocument, isHTMLElement, AnimationFrameScheduler } from '../../../../base/browser/dom.js';
@@ -275,10 +275,13 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 	private lastLayoutDimensions: Dimension | undefined;
 
 	private actionToolBar!: WorkbenchToolBar;
+	private titleBarActionsInOverflow = false;
+	private expandedTitleBarActionsWidth = 0;
 	private readonly actionToolBarDisposable = this._register(new DisposableStore());
 	private readonly editorActionsChangeDisposable = this._register(new DisposableStore());
 	private actionToolBarElement!: HTMLElement;
 	private readonly centerAdjacentToolBarDisposable = this._register(new DisposableStore());
+	private centerAdjacentToolBar: MenuWorkbenchToolBar | undefined;
 	private centerAdjacentToolBarElement: HTMLElement | undefined;
 	private readonly updateToolBarDisposable = this._register(new DisposableStore());
 	private updateToolBarElement: HTMLElement | undefined;
@@ -549,6 +552,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 				actionViewItemProvider: (action, options) => createActionViewItem(this.instantiationService, action, options),
 				hoverDelegate: this.hoverDelegate
 			}));
+			this.centerAdjacentToolBar = centerAdjacentToolBar;
 
 			// Re-evaluate fit when items change, see #303222.
 			this.centerAdjacentToolBarDisposable.add(centerAdjacentToolBar.onDidChangeMenuItems(() => this.titleBarToolBarOverflowScheduler.schedule()));
@@ -735,6 +739,12 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 			ariaLabel: localize('ariaLabelTitleActions', "Title actions"),
 			getKeyBinding: action => this.getKeybinding(action),
 			overflowBehavior: { maxItems: 12, exempted: [ACCOUNTS_ACTIVITY_ID, GLOBAL_ACTIVITY_ID, ...EDITOR_CORE_NAVIGATION_COMMANDS] },
+			responsiveBehavior: {
+				enabled: true,
+				kind: 'all',
+				reserveMinWidth: false,
+				getAvailableWidth: () => this.titleBarActionsInOverflow ? 0 : Number.POSITIVE_INFINITY,
+			},
 			anchorAlignmentProvider: () => AnchorAlignment.RIGHT,
 			dropdownMenuClassName: WORKBENCH_MENU_MOTION_CLASS,
 			dropdownMenuCloseAnimation: workbenchMenuCloseAnimation,
@@ -815,7 +825,9 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 				actions.primary.push(GLOBAL_ACTIVITY_TITLE_ACTION);
 			}
 
+			this.titleBarActionsInOverflow = false;
 			this.actionToolBar.setActions(prepareActions(actions.primary), prepareActions(actions.secondary));
+			this.titleBarToolBarOverflowScheduler.schedule();
 		};
 
 		// Create/Update the menus which should be in the title tool bar
@@ -983,6 +995,26 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 		this.titleBarToolBarOverflowScheduler.schedule();
 	}
 
+	private setTitleBarActionsInOverflow(inOverflow: boolean): void {
+		if (this.titleBarActionsInOverflow !== inOverflow) {
+			this.titleBarActionsInOverflow = inOverflow;
+			this.actionToolBar.relayout();
+		}
+	}
+
+	private hasWorkspaceModeSwitch(): boolean {
+		const toolbar = this.centerAdjacentToolBar;
+		if (!toolbar) {
+			return false;
+		}
+		for (let index = 0; index < toolbar.getItemsLength(); index++) {
+			if (toolbar.getItemViewItem(index) instanceof WorkspaceModeSwitch) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/**
 	 * Hides optional title bar toolbars when showing them would push the trailing window controls off-screen (#303222).
 	 */
@@ -990,13 +1022,54 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 		const centerAdjacentToolBarElement = this.centerAdjacentToolBarElement?.classList.contains('has-no-actions') ? undefined : this.centerAdjacentToolBarElement;
 		const updateToolBarElement = this.updateToolBarElement?.classList.contains('has-no-actions') ? undefined : this.updateToolBarElement;
 
-		this.centerAdjacentToolBarElement?.classList.remove('overflowing');
+		this.centerAdjacentToolBarElement?.classList.remove('overflowing', 'compact-switch', 'switch-only');
 		this.updateToolBarElement?.classList.remove('overflowing');
 
-		if (this.rootContainer.scrollWidth <= this.rootContainer.clientWidth) {
+		const fits = () => this.rootContainer.scrollWidth <= this.rootContainer.clientWidth;
+		const fitModeSwitch = () => {
+			if (fits()) {
+				return true;
+			}
+			if (!centerAdjacentToolBarElement) {
+				return false;
+			}
+			// Keep the same switch focusable when the labels no longer fit.
+			centerAdjacentToolBarElement.classList.add('compact-switch');
+			if (fits()) {
+				return true;
+			}
+			centerAdjacentToolBarElement.classList.add('switch-only');
+			return fits();
+		};
+
+		let fitWithExpandedActions: boolean;
+		if (this.titleBarActionsInOverflow) {
+			// Measure the full toolbar footprint without rebuilding a menu the user may be interacting with.
+			const previousMinWidth = this.actionToolBarElement.style.minWidth;
+			this.actionToolBarElement.style.minWidth = `${this.expandedTitleBarActionsWidth}px`;
+			try {
+				fitWithExpandedActions = fitModeSwitch();
+			} finally {
+				this.actionToolBarElement.style.minWidth = previousMinWidth;
+			}
+		} else {
+			this.expandedTitleBarActionsWidth = this.actionToolBarElement?.offsetWidth ?? 0;
+			fitWithExpandedActions = fitModeSwitch();
+		}
+		if (fitWithExpandedActions) {
+			this.setTitleBarActionsInOverflow(false);
 			return;
 		}
 
+		// Accounts and Manage tiles handle clicks in their own view items.
+		if (centerAdjacentToolBarElement && !this.activityActionsEnabled && this.expandedTitleBarActionsWidth > 0 && this.hasWorkspaceModeSwitch()) {
+			this.setTitleBarActionsInOverflow(true);
+			if (fits()) {
+				return;
+			}
+		}
+
+		this.setTitleBarActionsInOverflow(false);
 		centerAdjacentToolBarElement?.classList.add('overflowing');
 		if (this.rootContainer.scrollWidth > this.rootContainer.clientWidth) {
 			updateToolBarElement?.classList.add('overflowing');

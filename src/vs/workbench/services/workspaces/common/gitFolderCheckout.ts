@@ -17,12 +17,9 @@ export interface IFolderGitCheckout {
 }
 
 /**
- * The git repository that a local folder is a checkout of, read from its `.git`: the folder itself when `.git` is a
- * directory, and the main checkout when `.git` is the file of a worktree (`gitdir: <repository>/.git/worktrees/<name>`).
- * `undefined` for a folder without `.git`, or whose `.git` names no worktree, such as a submodule's. Throws when `.git`
- * exists but cannot be read.
+ * The directory named by a folder's `.git` entry. For a marker file, its path is relative to that folder.
  */
-export async function readFolderGitCheckout(fileService: IFileService, folder: URI): Promise<IFolderGitCheckout | undefined> {
+export async function readFolderGitDirectory(fileService: IFileService, folder: URI): Promise<{ uri: URI; isSeparate: boolean } | undefined> {
 	const dotGit = joinPath(folder, '.git');
 	let isDirectory: boolean;
 	try {
@@ -34,14 +31,28 @@ export async function readFolderGitCheckout(fileService: IFileService, folder: U
 		throw error;
 	}
 	if (isDirectory) {
-		return { repository: folder };
+		return { uri: dotGit, isSeparate: false };
 	}
-	const content = (await fileService.readFile(dotGit)).value.toString();
+	const content = (await fileService.readFile(dotGit, { limits: { size: 8 * 1024 } })).value.toString();
 	const gitdir = /^gitdir:\s*(?<path>.+?)\s*$/m.exec(content)?.groups?.path;
-	if (!gitdir) {
+	return gitdir ? { uri: isAbsolute(gitdir) ? URI.file(gitdir) : joinPath(folder, gitdir), isSeparate: true } : undefined;
+}
+
+/**
+ * The git repository that a local folder is a checkout of, read from its `.git`: the folder itself when `.git` is a
+ * directory, and the main checkout when `.git` is the file of a worktree (`gitdir: <repository>/.git/worktrees/<name>`).
+ * `undefined` for a folder without `.git`, or whose `.git` names no worktree, such as a submodule's. Throws when `.git`
+ * exists but cannot be read.
+ */
+export async function readFolderGitCheckout(fileService: IFileService, folder: URI): Promise<IFolderGitCheckout | undefined> {
+	const gitDirectory = await readFolderGitDirectory(fileService, folder);
+	if (!gitDirectory) {
 		return undefined;
 	}
-	const worktreeGitDir = isAbsolute(gitdir) ? URI.file(gitdir) : joinPath(folder, gitdir);
+	if (!gitDirectory.isSeparate) {
+		return { repository: folder };
+	}
+	const worktreeGitDir = gitDirectory.uri;
 	const worktreesDir = dirname(worktreeGitDir);
 	const commonGitDir = dirname(worktreesDir);
 	return basename(worktreesDir) === 'worktrees' && basename(commonGitDir) === '.git' && !isEqual(commonGitDir, worktreesDir)
